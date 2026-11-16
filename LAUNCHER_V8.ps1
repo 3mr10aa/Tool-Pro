@@ -1,159 +1,114 @@
 <#
-AMR Windows Utility - Lightweight Startup Launcher V8
-Place this launcher in the same folder as AMR_WINDOWS_UTILITY_STARTUP_OPTIMIZED_V8.ps1.
-Windows PowerShell 5.1 | STA | Single UAC request when elevation is required.
+AMR Windows Utility - IRM In-Memory Launcher V9
+Usage (Windows PowerShell 5.1):
+irm 'https://raw.githubusercontent.com/3mr10aa/Tool-Pro/Master/AMR_WINDOWS_UTILITY_LAUNCHER_V9.ps1' | iex
+
+The launcher retrieves the main script into memory, verifies its pinned SHA-256,
+then streams it over a local named pipe to a hidden elevated STA PowerShell process.
+No launcher/main .ps1 file is written to disk. UAC consent remains visible.
 #>
-
 $ErrorActionPreference = 'Stop'
-
-# Hide only the legacy PowerShell console. Windows UAC consent remains visible by design.
-try {
-    if ($Host.Name -eq 'ConsoleHost' -and [string]::IsNullOrWhiteSpace([string]$env:WT_SESSION)) {
-        if (-not ('AMRLauncher.NativeWindow' -as [type])) {
-            Add-Type -Namespace AMRLauncher -Name NativeWindow -MemberDefinition @'
-[System.Runtime.InteropServices.DllImport("kernel32.dll")]
-public static extern System.IntPtr GetConsoleWindow();
-[System.Runtime.InteropServices.DllImport("user32.dll")]
-public static extern bool ShowWindow(System.IntPtr hWnd, int nCmdShow);
-'@
-        }
-        $consoleHandle = [AMRLauncher.NativeWindow]::GetConsoleWindow()
-        if ($consoleHandle -ne [IntPtr]::Zero) { [void][AMRLauncher.NativeWindow]::ShowWindow($consoleHandle,0) }
-    }
-} catch {}
-
-function Test-AMRLauncherAdmin {
-    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
-    $principal = New-Object Security.Principal.WindowsPrincipal($identity)
-    return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-}
-
-$needsAdmin = -not (Test-AMRLauncherAdmin)
-$needsSta = ([System.Threading.Thread]::CurrentThread.GetApartmentState() -ne 'STA')
-if ($needsAdmin -or $needsSta) {
-    $launcherPath = $PSCommandPath
-    if ([string]::IsNullOrWhiteSpace($launcherPath) -or -not (Test-Path -LiteralPath $launcherPath -PathType Leaf)) {
-        Add-Type -AssemblyName System.Windows.Forms
-        [System.Windows.Forms.MessageBox]::Show('Save the launcher as a .ps1 file before running it.','AMR Windows Utility','OK','Warning') | Out-Null
-        exit 1
-    }
-    $arguments = @('-NoProfile','-ExecutionPolicy','Bypass','-STA','-File',('"{0}"' -f $launcherPath))
-    $startParams = @{ FilePath='powershell.exe'; ArgumentList=$arguments; WindowStyle='Hidden'; ErrorAction='Stop' }
-    if ($needsAdmin) { $startParams.Verb = 'RunAs' }
-    try { Start-Process @startParams | Out-Null }
-    catch { exit 1 }
-    exit
-}
-
-$mainScript = Join-Path $PSScriptRoot 'AMR_WINDOWS_UTILITY_STARTUP_OPTIMIZED_V8.ps1'
-if (-not (Test-Path -LiteralPath $mainScript -PathType Leaf)) {
-    Add-Type -AssemblyName System.Windows.Forms
-    [System.Windows.Forms.MessageBox]::Show(
-        "The main application file was not found:`r`n$mainScript`r`n`r`nKeep both V8 files in the same folder.",
-        'AMR Windows Utility','OK','Error'
-    ) | Out-Null
-    exit 1
-}
-
-Add-Type -AssemblyName System.Windows.Forms
+$mainUrl = 'https://raw.githubusercontent.com/3mr10aa/Tool-Pro/Master/AMR_WINDOWS_UTILITY_STARTUP_OPTIMIZED_V9.ps1'
+$expectedSha256 = 'EA682AE046DD61889CC23D21C47EBB39238CFFA380537617B88CB207EFD27B6B'
+$pipeName = 'AMR_' + [guid]::NewGuid().ToString('N')
 $eventName = 'Local\AMR.Startup.Ready.' + [guid]::NewGuid().ToString('N')
-$eventCreated = $false
-$readyEvent = $null
-$appProcess = $null
-$timer = $null
-$form = $null
-$startupFailed = $false
-
+$server = $null; $readyEvent = $null; $form = $null; $timer = $null; $child = $null
+$failed = $false
 try {
-    $readyEvent = [System.Threading.EventWaitHandle]::new($false,[System.Threading.EventResetMode]::ManualReset,$eventName,[ref]$eventCreated)
-    $env:AMR_STARTUP_EVENT_NAME = $eventName
-    $env:AMR_LAUNCHER_START_TICKS = [DateTime]::UtcNow.Ticks.ToString([Globalization.CultureInfo]::InvariantCulture)
-
+    # Paint a lightweight welcome screen before retrieving/parsing the 1.6 MB app.
+    Add-Type -AssemblyName System.Windows.Forms
     $form = New-Object System.Windows.Forms.Form
     $form.Text = 'AMR Windows Utility'
     $form.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::None
     $form.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterScreen
-    $form.ClientSize = [System.Drawing.Size]::new(520,210)
+    $form.ClientSize = New-Object System.Drawing.Size(520,210)
     $form.BackColor = [System.Drawing.Color]::FromArgb(15,27,43)
     $form.ForeColor = [System.Drawing.Color]::White
-    $form.ShowInTaskbar = $false
-    $form.TopMost = $true
-
+    $form.ShowInTaskbar = $false; $form.TopMost = $true
     $brand = New-Object System.Windows.Forms.Label
-    $brand.Dock = [System.Windows.Forms.DockStyle]::Top
-    $brand.Height = 54
-    $brand.Text = 'AMR WINDOWS UTILITY'
-    $brand.TextAlign = [System.Drawing.ContentAlignment]::MiddleCenter
+    $brand.Dock = [System.Windows.Forms.DockStyle]::Top; $brand.Height = 54
+    $brand.Text = 'AMR WINDOWS UTILITY'; $brand.TextAlign = 'MiddleCenter'
     $brand.ForeColor = [System.Drawing.Color]::FromArgb(96,165,250)
-    $brand.Font = [System.Drawing.Font]::new('Segoe UI',17,[System.Drawing.FontStyle]::Bold)
+    $brand.Font = New-Object System.Drawing.Font('Segoe UI',17,[System.Drawing.FontStyle]::Bold)
     $form.Controls.Add($brand)
-
     $welcome = New-Object System.Windows.Forms.Label
     $welcome.Dock = [System.Windows.Forms.DockStyle]::Fill
     $welcome.Text = "Thank you for choosing AMR.`r`nWe appreciate your trust and are working to make your experience smoother and faster."
-    $welcome.TextAlign = [System.Drawing.ContentAlignment]::MiddleCenter
-    $welcome.ForeColor = [System.Drawing.Color]::FromArgb(241,245,249)
-    $welcome.Font = [System.Drawing.Font]::new('Segoe UI',12,[System.Drawing.FontStyle]::Regular)
+    $welcome.TextAlign = 'MiddleCenter'; $welcome.ForeColor = [System.Drawing.Color]::FromArgb(241,245,249)
+    $welcome.Font = New-Object System.Drawing.Font('Segoe UI',12,[System.Drawing.FontStyle]::Regular)
     $form.Controls.Add($welcome)
-
     $loading = New-Object System.Windows.Forms.Label
-    $loading.Dock = [System.Windows.Forms.DockStyle]::Bottom
-    $loading.Height = 34
-    $loading.Text = 'Preparing your workspace...'
-    $loading.TextAlign = [System.Drawing.ContentAlignment]::MiddleCenter
+    $loading.Dock = [System.Windows.Forms.DockStyle]::Bottom; $loading.Height = 34
+    $loading.Text = 'Preparing your workspace...'; $loading.TextAlign = 'MiddleCenter'
     $loading.ForeColor = [System.Drawing.Color]::FromArgb(148,163,184)
-    $loading.Font = [System.Drawing.Font]::new('Segoe UI',9,[System.Drawing.FontStyle]::Regular)
+    $loading.Font = New-Object System.Drawing.Font('Segoe UI',9,[System.Drawing.FontStyle]::Regular)
     $form.Controls.Add($loading)
+    $form.Show(); $form.Refresh(); [System.Windows.Forms.Application]::DoEvents()
 
-    # Paint the splash before the large application script is even parsed.
-    $form.Show()
-    $form.Refresh()
-    [System.Windows.Forms.Application]::DoEvents()
+    # Fetch source text only into memory. TLS 1.2 is explicitly enabled for Windows PowerShell 5.1.
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    $client = New-Object Net.WebClient
+    $client.Headers['User-Agent'] = 'AMR-Windows-Utility-IRM-Launcher/9'
+    $mainText = $client.DownloadString($mainUrl)
+    $client.Dispose()
+    $mainText = $mainText.TrimStart([char]0xFEFF)
+    if ([string]::IsNullOrWhiteSpace($mainText)) { throw 'The main application source was empty.' }
+    $shaProvider = [Security.Cryptography.SHA256]::Create()
+    try { $actualHash = [BitConverter]::ToString($shaProvider.ComputeHash([Text.Encoding]::UTF8.GetBytes($mainText))).Replace('-','') } finally { $shaProvider.Dispose() }
+    if ($actualHash -ne $expectedSha256) { throw 'Main application integrity check failed. The downloaded source does not match the version pinned in this launcher.' }
 
-    # Start the heavyweight 1.6 MB application only after the lightweight splash is visible.
-    $powerShellExe = Join-Path $PSHOME 'powershell.exe'
-    $appArgs = @('-NoLogo','-NoProfile','-ExecutionPolicy','Bypass','-STA','-File',('"{0}"' -f $mainScript))
-    $appProcess = Start-Process -FilePath $powerShellExe -ArgumentList $appArgs -WorkingDirectory $PSScriptRoot -WindowStyle Hidden -PassThru
+    # Named pipe transfers the script text directly to the elevated process; no temp script is created.
+    $server = New-Object IO.Pipes.NamedPipeServerStream($pipeName,[IO.Pipes.PipeDirection]::Out,1,[IO.Pipes.PipeTransmissionMode]::Byte,[IO.Pipes.PipeOptions]::None)
+    $readyEvent = New-Object System.Threading.EventWaitHandle($false,[System.Threading.EventResetMode]::ManualReset,$eventName)
+    $env:AMR_STARTUP_EVENT_NAME = $eventName
+    $env:AMR_LAUNCHER_START_TICKS = [DateTime]::UtcNow.Ticks.ToString([Globalization.CultureInfo]::InvariantCulture)
 
-    $timer = New-Object System.Windows.Forms.Timer
-    $timer.Interval = 150
-    $timer.Add_Tick({
-        try {
-            if ($readyEvent -and $readyEvent.WaitOne(0)) {
-                $timer.Stop()
-                $form.Close()
-                return
-            }
-            if ($appProcess -and $appProcess.HasExited) {
-                $script:startupFailed = $true
-                $timer.Stop()
-                $form.Close()
-                return
-            }
-        } catch {
-            $script:startupFailed = $true
-            $timer.Stop()
-            $form.Close()
-        }
-    }.GetNewClosure())
-    $timer.Start()
-    [System.Windows.Forms.Application]::Run($form)
+    # This small bootstrap is encoded on the command line; the large application body travels via pipe.
+    $bootstrap = @"
+`$ErrorActionPreference = 'Stop'
+`$pipe = New-Object IO.Pipes.NamedPipeClientStream('.', '$pipeName', [IO.Pipes.PipeDirection]::In)
+`$pipe.Connect(45000)
+`$memory = New-Object IO.MemoryStream
+`$pipe.CopyTo(`$memory)
+`$pipe.Dispose()
+`$source = [Text.Encoding]::UTF8.GetString(`$memory.ToArray())
+`$memory.Dispose()
+`$env:AMR_INMEMORY_BOOTSTRAP = '1'
+. ([ScriptBlock]::Create(`$source))
+"@
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($bootstrap))
+    $powershellExe = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    if (-not (Test-Path -LiteralPath $powershellExe -PathType Leaf)) { throw 'Windows PowerShell 5.1 was not found.' }
+    $start = @{ FilePath=$powershellExe; ArgumentList=@('-NoLogo','-NoProfile','-ExecutionPolicy','Bypass','-STA','-EncodedCommand',$encoded); WindowStyle='Hidden'; PassThru=$true; ErrorAction='Stop' }
+    # Elevate only the child application process. Windows displays its normal UAC consent dialog.
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $principal = New-Object Security.Principal.WindowsPrincipal($identity)
+    if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { $start.Verb = 'RunAs' }
+    $child = Start-Process @start
 
-    if ($startupFailed) {
-        [System.Windows.Forms.MessageBox]::Show(
-            "AMR Windows Utility closed before the main window appeared.`r`nCheck the latest log in C:\ProgramData\AMR-Utility\Logs.",
-            'AMR Startup','OK','Warning'
-        ) | Out-Null
+    $server.WaitForConnection()
+    $bytes = [Text.Encoding]::UTF8.GetBytes($mainText)
+    $server.Write($bytes,0,$bytes.Length); $server.Flush(); $server.Dispose(); $server = $null
+
+    # Keep the splash alive until the WPF window reports its first rendered frame.
+    while ($true) {
+        [System.Windows.Forms.Application]::DoEvents()
+        if ($readyEvent.WaitOne(100)) { break }
+        if ($child.HasExited) { $failed = $true; break }
+        if ($form.IsDisposed -or -not $form.Visible) { break }
     }
+    if ($form -and -not $form.IsDisposed) { $form.Close() }
+    if ($failed) { [System.Windows.Forms.MessageBox]::Show('AMR closed before its main window appeared. Check C:\ProgramData\AMR-Utility\Logs.','AMR Startup','OK','Warning') | Out-Null }
 } catch {
     try {
+        if ($form -and -not $form.IsDisposed) { $form.Close() }
         Add-Type -AssemblyName System.Windows.Forms -ErrorAction SilentlyContinue
-        [System.Windows.Forms.MessageBox]::Show($_.Exception.Message,'AMR Startup Error','OK','Error') | Out-Null
-    } catch {}
+        [System.Windows.Forms.MessageBox]::Show([string]$_.Exception.Message,'AMR IRM Launcher Error','OK','Error') | Out-Null
+    } catch { Write-Error $_ }
 } finally {
-    if ($timer) { try { $timer.Stop(); $timer.Dispose() } catch {} }
-    if ($form) { try { $form.Dispose() } catch {} }
+    if ($server) { try { $server.Dispose() } catch {} }
     if ($readyEvent) { try { $readyEvent.Dispose() } catch {} }
+    if ($form) { try { $form.Dispose() } catch {} }
     Remove-Item Env:AMR_STARTUP_EVENT_NAME -ErrorAction SilentlyContinue
     Remove-Item Env:AMR_LAUNCHER_START_TICKS -ErrorAction SilentlyContinue
 }
