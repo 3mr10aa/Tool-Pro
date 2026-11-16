@@ -1,15 +1,15 @@
 <#
-AMR Windows Utility - IRM In-Memory Launcher V9
+AMR Windows Utility - IRM In-Memory Launcher V10
 Usage (Windows PowerShell 5.1):
-irm 'https://raw.githubusercontent.com/3mr10aa/Tool-Pro/Master/AMR_WINDOWS_UTILITY_LAUNCHER_V9.ps1' | iex
+irm 'https://raw.githubusercontent.com/3mr10aa/Tool-Pro/Master/AMR_WINDOWS_UTILITY_LAUNCHER_V11.ps1' | iex
 
 The launcher retrieves the main script into memory, verifies its pinned SHA-256,
 then streams it over a local named pipe to a hidden elevated STA PowerShell process.
 No launcher/main .ps1 file is written to disk. UAC consent remains visible.
 #>
 $ErrorActionPreference = 'Stop'
-$mainUrl = 'https://raw.githubusercontent.com/3mr10aa/Tool-Pro/Master/AMR_WINDOWS_UTILITY_STARTUP_OPTIMIZED_V9.ps1'
-$expectedSha256 = 'EA682AE046DD61889CC23D21C47EBB39238CFFA380537617B88CB207EFD27B6B'
+$mainUrl = 'https://raw.githubusercontent.com/3mr10aa/Tool-Pro/Master/AMR_WINDOWS_UTILITY_ENGINEERING_SMART_INSTALL_V11.ps1'
+$expectedSha256 = '3E9A81880111D7E133DC627686F420CFD2C21F87E513A80BEBCD974D4401D3A7'
 $pipeName = 'AMR_' + [guid]::NewGuid().ToString('N')
 $eventName = 'Local\AMR.Startup.Ready.' + [guid]::NewGuid().ToString('N')
 $server = $null; $readyEvent = $null; $form = $null; $timer = $null; $child = $null
@@ -48,7 +48,7 @@ try {
     # Fetch source text only into memory. TLS 1.2 is explicitly enabled for Windows PowerShell 5.1.
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
     $client = New-Object Net.WebClient
-    $client.Headers['User-Agent'] = 'AMR-Windows-Utility-IRM-Launcher/9'
+    $client.Headers['User-Agent'] = 'AMR-Windows-Utility-IRM-Launcher/11'
     $mainText = $client.DownloadString($mainUrl)
     $client.Dispose()
     $mainText = $mainText.TrimStart([char]0xFEFF)
