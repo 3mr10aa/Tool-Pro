@@ -84,13 +84,22 @@ if (-not $script:AMRExternalSplashMode) {
 
         $brand = New-Object System.Windows.Forms.Label
         $brand.Dock = [System.Windows.Forms.DockStyle]::Top
-        $brand.Height = 54
+        $brand.Height = 48
         $brand.Text = 'AMR WINDOWS UTILITY'
         $brand.TextAlign = [System.Drawing.ContentAlignment]::MiddleCenter
         $brand.ForeColor = [System.Drawing.Color]::FromArgb(96,165,250)
         $brand.Font = [System.Drawing.Font]::new('Segoe UI',17,[System.Drawing.FontStyle]::Bold)
         $splash.Controls.Add($brand)
 
+        # Short appreciation message shown immediately on startup.
+        $welcome = New-Object System.Windows.Forms.Label
+        $welcome.Dock = [System.Windows.Forms.DockStyle]::Fill
+        $welcome.Padding = [System.Windows.Forms.Padding]::new(22,8,22,8)
+        $welcome.Text = "Thank you for your appreciation.`r`nWe value your time and will work hard to deliver`r`nthe best and fastest user experience."
+        $welcome.TextAlign = [System.Drawing.ContentAlignment]::MiddleCenter
+        $welcome.ForeColor = [System.Drawing.Color]::FromArgb(226,232,240)
+        $welcome.Font = [System.Drawing.Font]::new('Segoe UI',10,[System.Drawing.FontStyle]::Regular)
+        $splash.Controls.Add($welcome)
 
         $loading = New-Object System.Windows.Forms.Label
         $loading.Dock = [System.Windows.Forms.DockStyle]::Bottom
