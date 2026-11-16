@@ -1,21 +1,18 @@
 <#
-AMR Windows Utility - IRM In-Memory Launcher V10
-Usage (Windows PowerShell 5.1):
-irm 'https://raw.githubusercontent.com/3mr10aa/Tool-Pro/Master/AMR_WINDOWS_UTILITY_LAUNCHER_V11.ps1' | iex
-
-The launcher retrieves the main script into memory, verifies its pinned SHA-256,
-then streams it over a local named pipe to a hidden elevated STA PowerShell process.
-No launcher/main .ps1 file is written to disk. UAC consent remains visible.
+AMR Windows Utility - IRM In-Memory Launcher V11 (fixed)
+Windows PowerShell 5.1
+Downloads the exact V11 main script from the verified repository path,
+checks its pinned SHA-256, then streams it to an elevated STA PowerShell process.
+The UAC consent dialog remains visible. No launcher or main script is written to disk.
 #>
 $ErrorActionPreference = 'Stop'
-$mainUrl = 'https://raw.githubusercontent.com/3mr10aa/Tool-Pro/Master/AMR_WINDOWS_UTILITY_ENGINEERING_SMART_INSTALL_V11.ps1'
+$mainUrl = 'https://raw.githubusercontent.com/3mr10aa/Tool-Pro/Master/AMR_WINDOWS_UTILITY_V11.ps1'
 $expectedSha256 = '3E9A81880111D7E133DC627686F420CFD2C21F87E513A80BEBCD974D4401D3A7'
 $pipeName = 'AMR_' + [guid]::NewGuid().ToString('N')
 $eventName = 'Local\AMR.Startup.Ready.' + [guid]::NewGuid().ToString('N')
-$server = $null; $readyEvent = $null; $form = $null; $timer = $null; $child = $null
-$failed = $false
+$server = $null; $readyEvent = $null; $form = $null; $child = $null
+$client = $null
 try {
-    # Paint a lightweight welcome screen before retrieving/parsing the 1.6 MB app.
     Add-Type -AssemblyName System.Windows.Forms
     $form = New-Object System.Windows.Forms.Form
     $form.Text = 'AMR Windows Utility'
@@ -33,37 +30,31 @@ try {
     $form.Controls.Add($brand)
     $welcome = New-Object System.Windows.Forms.Label
     $welcome.Dock = [System.Windows.Forms.DockStyle]::Fill
-    $welcome.Text = "Thank you for choosing AMR.`r`nWe appreciate your trust and are working to make your experience smoother and faster."
+    $welcome.Text = "Thank you for choosing AMR.`r`nPreparing your workspace..."
     $welcome.TextAlign = 'MiddleCenter'; $welcome.ForeColor = [System.Drawing.Color]::FromArgb(241,245,249)
     $welcome.Font = New-Object System.Drawing.Font('Segoe UI',12,[System.Drawing.FontStyle]::Regular)
     $form.Controls.Add($welcome)
-    $loading = New-Object System.Windows.Forms.Label
-    $loading.Dock = [System.Windows.Forms.DockStyle]::Bottom; $loading.Height = 34
-    $loading.Text = 'Preparing your workspace...'; $loading.TextAlign = 'MiddleCenter'
-    $loading.ForeColor = [System.Drawing.Color]::FromArgb(148,163,184)
-    $loading.Font = New-Object System.Drawing.Font('Segoe UI',9,[System.Drawing.FontStyle]::Regular)
-    $form.Controls.Add($loading)
     $form.Show(); $form.Refresh(); [System.Windows.Forms.Application]::DoEvents()
 
-    # Fetch source text only into memory. TLS 1.2 is explicitly enabled for Windows PowerShell 5.1.
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
     $client = New-Object Net.WebClient
-    $client.Headers['User-Agent'] = 'AMR-Windows-Utility-IRM-Launcher/11'
+    $client.Headers['User-Agent'] = 'AMR-Windows-Utility-IRM-Launcher/11-fixed'
     $mainText = $client.DownloadString($mainUrl)
-    $client.Dispose()
+    $client.Dispose(); $client = $null
     $mainText = $mainText.TrimStart([char]0xFEFF)
     if ([string]::IsNullOrWhiteSpace($mainText)) { throw 'The main application source was empty.' }
     $shaProvider = [Security.Cryptography.SHA256]::Create()
-    try { $actualHash = [BitConverter]::ToString($shaProvider.ComputeHash([Text.Encoding]::UTF8.GetBytes($mainText))).Replace('-','') } finally { $shaProvider.Dispose() }
-    if ($actualHash -ne $expectedSha256) { throw 'Main application integrity check failed. The downloaded source does not match the version pinned in this launcher.' }
+    try {
+        $actualHash = [BitConverter]::ToString($shaProvider.ComputeHash([Text.Encoding]::UTF8.GetBytes($mainText))).Replace('-','')
+    } finally { $shaProvider.Dispose() }
+    if ($actualHash -ne $expectedSha256) {
+        throw "Main application integrity check failed. Expected $expectedSha256 but received $actualHash. No application code was started."
+    }
 
-    # Named pipe transfers the script text directly to the elevated process; no temp script is created.
     $server = New-Object IO.Pipes.NamedPipeServerStream($pipeName,[IO.Pipes.PipeDirection]::Out,1,[IO.Pipes.PipeTransmissionMode]::Byte,[IO.Pipes.PipeOptions]::None)
     $readyEvent = New-Object System.Threading.EventWaitHandle($false,[System.Threading.EventResetMode]::ManualReset,$eventName)
     $env:AMR_STARTUP_EVENT_NAME = $eventName
     $env:AMR_LAUNCHER_START_TICKS = [DateTime]::UtcNow.Ticks.ToString([Globalization.CultureInfo]::InvariantCulture)
-
-    # This small bootstrap is encoded on the command line; the large application body travels via pipe.
     $bootstrap = @"
 `$ErrorActionPreference = 'Stop'
 `$pipe = New-Object IO.Pipes.NamedPipeClientStream('.', '$pipeName', [IO.Pipes.PipeDirection]::In)
@@ -80,25 +71,24 @@ try {
     $powershellExe = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
     if (-not (Test-Path -LiteralPath $powershellExe -PathType Leaf)) { throw 'Windows PowerShell 5.1 was not found.' }
     $start = @{ FilePath=$powershellExe; ArgumentList=@('-NoLogo','-NoProfile','-ExecutionPolicy','Bypass','-STA','-EncodedCommand',$encoded); WindowStyle='Hidden'; PassThru=$true; ErrorAction='Stop' }
-    # Elevate only the child application process. Windows displays its normal UAC consent dialog.
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
     $principal = New-Object Security.Principal.WindowsPrincipal($identity)
     if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { $start.Verb = 'RunAs' }
     $child = Start-Process @start
-
     $server.WaitForConnection()
     $bytes = [Text.Encoding]::UTF8.GetBytes($mainText)
     $server.Write($bytes,0,$bytes.Length); $server.Flush(); $server.Dispose(); $server = $null
-
-    # Keep the splash alive until the WPF window reports its first rendered frame.
+    $ready = $false
     while ($true) {
         [System.Windows.Forms.Application]::DoEvents()
-        if ($readyEvent.WaitOne(100)) { break }
-        if ($child.HasExited) { $failed = $true; break }
+        if ($readyEvent.WaitOne(100)) { $ready = $true; break }
+        if ($child.HasExited) { break }
         if ($form.IsDisposed -or -not $form.Visible) { break }
     }
+    if (-not $ready -and $child.HasExited) {
+        [System.Windows.Forms.MessageBox]::Show('AMR closed before its main window appeared. Check C:\ProgramData\AMR-Utility\Logs.','AMR Startup','OK','Warning') | Out-Null
+    }
     if ($form -and -not $form.IsDisposed) { $form.Close() }
-    if ($failed) { [System.Windows.Forms.MessageBox]::Show('AMR closed before its main window appeared. Check C:\ProgramData\AMR-Utility\Logs.','AMR Startup','OK','Warning') | Out-Null }
 } catch {
     try {
         if ($form -and -not $form.IsDisposed) { $form.Close() }
@@ -106,6 +96,7 @@ try {
         [System.Windows.Forms.MessageBox]::Show([string]$_.Exception.Message,'AMR IRM Launcher Error','OK','Error') | Out-Null
     } catch { Write-Error $_ }
 } finally {
+    if ($client) { try { $client.Dispose() } catch {} }
     if ($server) { try { $server.Dispose() } catch {} }
     if ($readyEvent) { try { $readyEvent.Dispose() } catch {} }
     if ($form) { try { $form.Dispose() } catch {} }
