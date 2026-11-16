@@ -8,7 +8,7 @@ $ErrorActionPreference = 'Stop'
 $mainUrl = 'https://raw.githubusercontent.com/3mr10aa/Tool-Pro/Master/AMR_WINDOWS_UTILITY_V11.ps1'
 
 # SHA-256 of the exact modified application file delivered with this launcher.
-$expectedSha256 = '279AEF4AEC5B479762A41C18F11DD1B404CE240642E5089422FED5630DA87FB9'
+$expectedSha256 = '2A86FB8FE6FEDC4822A4BBD57761BC85463EC8A98E64E8D5FE76D21C8D530197'
 
 # --- Premium launcher-owned welcome screen ---
 Add-Type -AssemblyName System.Windows.Forms
