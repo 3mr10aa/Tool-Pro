@@ -7,7 +7,7 @@ and streams it to an elevated STA PowerShell process without saving it to disk.
 $ErrorActionPreference = 'Stop'
 $mainUrl = 'https://raw.githubusercontent.com/3mr10aa/Tool-Pro/Master/AMR_WINDOWS_UTILITY_V11.ps1'
 # Hash observed from the exact current GitHub raw download in the user's launcher error.
-$expectedSha256 = '468CCD57E13593CC2095063FEE7D7747A1B27001D2BAF2DFC811E83896C3978B'
+$expectedSha256 = 'D525FCF4ED32EA1416A3FF022C6C97C10B2259B422F88E016450675DA7354EA4'
 $client = $null; $server = $null; $readyEvent = $null; $form = $null; $child = $null
 $pipeName = 'AMR_' + [guid]::NewGuid().ToString('N')
 $eventName = 'Local\AMR_V11_READY_' + [guid]::NewGuid().ToString('N')
