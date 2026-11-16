@@ -91,16 +91,6 @@ if (-not $script:AMRExternalSplashMode) {
         $brand.Font = [System.Drawing.Font]::new('Segoe UI',17,[System.Drawing.FontStyle]::Bold)
         $splash.Controls.Add($brand)
 
-        # Short appreciation message shown immediately on startup.
-        $welcome = New-Object System.Windows.Forms.Label
-        $welcome.Dock = [System.Windows.Forms.DockStyle]::Fill
-        $welcome.Padding = [System.Windows.Forms.Padding]::new(22,8,22,8)
-        $welcome.Text = "Thank you for your appreciation.`r`nWe value your time and will work hard to deliver`r`nthe best and fastest user experience."
-        $welcome.TextAlign = [System.Drawing.ContentAlignment]::MiddleCenter
-        $welcome.ForeColor = [System.Drawing.Color]::FromArgb(226,232,240)
-        $welcome.Font = [System.Drawing.Font]::new('Segoe UI',10,[System.Drawing.FontStyle]::Regular)
-        $splash.Controls.Add($welcome)
-
         $loading = New-Object System.Windows.Forms.Label
         $loading.Dock = [System.Windows.Forms.DockStyle]::Bottom
         $loading.Height = 34
@@ -2669,9 +2659,9 @@ $RawApps = @(
 # 2. Otherwise download Icons.zip (bundled -> pinned commit -> main branch) with 30s timeout.
 # 3. Extract progressively, surface icons to UI as they become available.
 # 4. A missing icon for one app never invalidates the whole cache.
-$script:IconArchiveUrl = 'https://raw.githubusercontent.com/3mr10aa/Amr_tools/main/Icons.zip'
-$script:IconArchiveUrlFallback = 'https://github.com/3mr10aa/Amr_tools/raw/refs/heads/main/Icons.zip'
-$script:IconArchiveApiUrl = 'https://api.github.com/repos/3mr10aa/Amr_tools/contents/Icons.zip?ref=main'
+$script:IconArchiveUrl = 'https://raw.githubusercontent.com/3mr10aa/Tool-Pro/59558e518041960aa4e717cc026598566db94a1f/Icons.zip'
+$script:IconArchiveUrlFallback = 'https://github.com/3mr10aa/Tool-Pro/raw/59558e518041960aa4e717cc026598566db94a1f/Icons.zip'
+$script:IconArchiveApiUrl = 'https://api.github.com/repos/3mr10aa/Tool-Pro/contents/Icons.zip?ref=59558e518041960aa4e717cc026598566db94a1f'
 # Keep the source ZIP and extracted images together in ProgramData\AMR-Utility\Icons.
 $script:IconArchivePath = Join-Path $script:IconDir 'icons.zip'
 $script:IconArchiveMarkerPath = Join-Path $script:IconDir 'icons.cache.json'
@@ -19196,7 +19186,7 @@ function Start-AMRBackgroundIconRefresh {
 
                     if (-not $sameVersion) {
                         # Prefer the canonical raw URL; keep only independent mirrors.
-                        $mediaArchiveUrl = 'https://media.githubusercontent.com/media/3mr10aa/Amr_tools/refs/heads/main/icons.zip'
+                        $mediaArchiveUrl = 'https://media.githubusercontent.com/media/3mr10aa/Tool-Pro/59558e518041960aa4e717cc026598566db94a1f/Icons.zip'
                         $sources = @($downloadUrl,$ArchiveUrl,$mediaArchiveUrl,$ArchiveUrlFallback) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique
                         $downloaded = $false; $lastError = ''; $attempt = 0
                         $downloadClock = [Diagnostics.Stopwatch]::StartNew()
@@ -19295,7 +19285,7 @@ function Start-AMRBackgroundIconRefresh {
                     } finally { $zip.Dispose() }
                     if ($extracted -lt $MinFileCount) { return "ExtractFailed:Only $extracted images extracted" }
                     $finalCount = @(Get-ChildItem -LiteralPath $IconDir -File | Where-Object { $_.Extension -match '^\.(png|jpe?g)$' -and $_.Length -gt 128 }).Count
-                    $metaOut = [pscustomobject]@{ repository='3mr10aa/Amr_tools'; branch='main'; file='icons.zip'; size=[long](Get-Item -LiteralPath $localArchive).Length; sha=$remoteSha; imageCount=$finalCount; updatedUtc=[DateTime]::UtcNow.ToString('o') }
+                    $metaOut = [pscustomobject]@{ repository='3mr10aa/Tool-Pro'; commit='59558e518041960aa4e717cc026598566db94a1f'; file='Icons.zip'; size=[long](Get-Item -LiteralPath $localArchive).Length; sha=$remoteSha; imageCount=$finalCount; updatedUtc=[DateTime]::UtcNow.ToString('o') }
                     $metaOut | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $metaFile -Encoding UTF8
                     return "ArchiveReady:DownloadedOrReused;Extracted=$extracted;CacheImages=$finalCount;Zip=$localArchive"
                 } catch {
