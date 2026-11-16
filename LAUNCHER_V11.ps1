@@ -55,7 +55,25 @@ try {
     $utf8Strict = [System.Text.UTF8Encoding]::new($false, $true)
     try { $mainText = $utf8Strict.GetString($mainBytes) } catch { throw 'The downloaded application is not valid UTF-8.' }
     $server = New-Object IO.Pipes.NamedPipeServerStream($pipeName,[IO.Pipes.PipeDirection]::Out,1,[IO.Pipes.PipeTransmissionMode]::Byte,[IO.Pipes.PipeOptions]::None)
-    $readyEvent = New-Object System.Threading.EventWaitHandle($false,[System.Threading.EventResetMode]::ManualReset,$eventName)
+    # Allow the elevated child process to signal the event even when this launcher
+    # was started without elevation (mandatory integrity levels can otherwise
+    # prevent the child from opening the event with Modify access).
+    $eventSecurity = New-Object System.Security.AccessControl.EventWaitHandleSecurity
+    $currentUserSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+    $eventRule = [System.Security.AccessControl.EventWaitHandleAccessRule]::new(
+        $currentUserSid,
+        ([System.Security.AccessControl.EventWaitHandleRights]::Modify -bor [System.Security.AccessControl.EventWaitHandleRights]::Synchronize),
+        [System.Security.AccessControl.AccessControlType]::Allow
+    )
+    [void]$eventSecurity.AddAccessRule($eventRule)
+    $createdNew = $false
+    $readyEvent = [System.Threading.EventWaitHandle]::new(
+        $false,
+        [System.Threading.EventResetMode]::ManualReset,
+        $eventName,
+        [ref]$createdNew,
+        $eventSecurity
+    )
     $env:AMR_STARTUP_EVENT_NAME = $eventName
     $env:AMR_LAUNCHER_START_TICKS = [DateTime]::UtcNow.Ticks.ToString([Globalization.CultureInfo]::InvariantCulture)
     $bootstrap = @"
@@ -101,6 +119,7 @@ try {
     if ($client) { try { $client.Dispose() } catch {} }
     if ($server) { try { $server.Dispose() } catch {} }
     if ($readyEvent) { try { $readyEvent.Dispose() } catch {} }
+    if ($eventSecurity) { try { $eventSecurity = $null } catch {} }
     if ($form) { try { $form.Dispose() } catch {} }
     Remove-Item Env:AMR_STARTUP_EVENT_NAME -ErrorAction SilentlyContinue
     Remove-Item Env:AMR_LAUNCHER_START_TICKS -ErrorAction SilentlyContinue
