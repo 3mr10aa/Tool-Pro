@@ -192,7 +192,7 @@ public static class AMRLogDiskWriter {
             } catch {
                 for (int i = batch.Count - 1; i >= 0; i--) Queue.Enqueue(batch[i]);
                 try {
-                    string fallbackDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "AMR-Utility", "Logs");
+                    string fallbackDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "AMR Tool Pro", "Logs");
                     if (!Directory.Exists(fallbackDir)) Directory.CreateDirectory(fallbackDir);
                     string fallback = Path.Combine(fallbackDir, "AMR_LogWriter_Fallback.log");
                     File.AppendAllText(fallback, DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff") + " [ERROR] [LogWriter] Main log append failed; queued entries retained for retry." + Environment.NewLine, new UTF8Encoding(false));
@@ -214,7 +214,7 @@ public static class AMRLogDiskWriter {
 $script:AMRCleanupScanState = [pscustomobject]@{ Current = $null }
 
 # --- 2. Environment & Folders Setup ---
-$script:AppRoot     = Join-Path $env:ProgramData 'AMR-Utility'
+$script:AppRoot     = Join-Path $env:ProgramData 'AMR Tool Pro'
 $script:BackupDir   = Join-Path $script:AppRoot 'Backups'
 $script:LogDir      = Join-Path $script:AppRoot 'Logs'
 $script:ExportDir   = Join-Path $script:AppRoot 'Exports'
@@ -653,7 +653,7 @@ function Start-AMRLogUIPump {
       } catch {
         $uiLogError = $_
         try {
-            $fallbackPath = Join-Path $env:ProgramData 'AMR-Utility\Logs\AMR_LogUI_Fallback.log'
+            $fallbackPath = Join-Path $env:ProgramData 'AMR Tool Pro\Logs\AMR_LogUI_Fallback.log'
             $fallbackDir = Split-Path -Parent $fallbackPath
             if (-not [System.IO.Directory]::Exists($fallbackDir)) { [void][System.IO.Directory]::CreateDirectory($fallbackDir) }
             $fallbackLine = ('[{0:yyyy-MM-dd HH:mm:ss.fff}] [ERROR] [LogUIPump] {1} | {2}' -f (Get-Date),$uiLogError.Exception.Message,$uiLogError.ScriptStackTrace)
@@ -2662,7 +2662,7 @@ $RawApps = @(
 $script:IconArchiveUrl = 'https://raw.githubusercontent.com/3mr10aa/Tool-Pro/59558e518041960aa4e717cc026598566db94a1f/Icons.zip'
 $script:IconArchiveUrlFallback = 'https://github.com/3mr10aa/Tool-Pro/raw/59558e518041960aa4e717cc026598566db94a1f/Icons.zip'
 $script:IconArchiveApiUrl = 'https://api.github.com/repos/3mr10aa/Tool-Pro/contents/Icons.zip?ref=59558e518041960aa4e717cc026598566db94a1f'
-# Keep the source ZIP and extracted images together in ProgramData\AMR-Utility\Icons.
+# Keep the source ZIP and extracted images together in ProgramData\AMR Tool Pro\Icons.
 $script:IconArchivePath = Join-Path $script:IconDir 'icons.zip'
 $script:IconArchiveMarkerPath = Join-Path $script:IconDir 'icons.cache.json'
 $script:IconMinFileCount = 100
@@ -3468,7 +3468,7 @@ Set-AMRStartupCheckpoint 'Catalog models created'
         <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="390"/></Grid.ColumnDefinitions>
         <StackPanel Grid.Column="0" Grid.ColumnSpan="2" VerticalAlignment="Center" Margin="0,0,16,0">
          <TextBlock Text="Backup &amp; Recovery Center" FontSize="27" FontWeight="Bold" Foreground="#E7EAF0" Margin="0,0,0,2"/>
-         <TextBlock Text="Export important system settings and recovery information. Exports are saved under ProgramData\AMR-Utility\Backups." Foreground="#AEB8C8" TextWrapping="Wrap" Visibility="Collapsed"/>
+         <TextBlock Text="Export important system settings and recovery information. Exports are saved under ProgramData\AMR Tool Pro\Backups." Foreground="#AEB8C8" TextWrapping="Wrap" Visibility="Collapsed"/>
         </StackPanel>
         <Grid Grid.Column="1" VerticalAlignment="Center" Visibility="Collapsed"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
          <Grid Grid.Column="0" Margin="0,0,6,0">
@@ -16313,7 +16313,7 @@ function Invoke-AMRNetworkTool {
    'Hosts' { $msg=(Get-Content "$env:SystemRoot\System32\drivers\etc\hosts" -ErrorAction Stop | Out-String); break }
    'InternetOptions' { Start-Process inetcpl.cpl; return }
    'NetworkStatus' { Start-Process 'ms-settings:network-status'; return }
-   'Report' { $dir=Join-Path $env:ProgramData 'AMR-Utility\NetworkReports'; New-Item -ItemType Directory -Path $dir -Force | Out-Null; $file=Join-Path $dir ('NetworkReport-{0:yyyyMMdd-HHmmss}.txt' -f (Get-Date)); ("AMR Utility Network Diagnostics Report`r`nGenerated: {0}`r`n`r`n" -f (Get-Date)) | Set-Content -LiteralPath $file -Encoding UTF8; $reportLines = @(& ipconfig /all; ''; & route print; ''; & arp -a; ''; & netstat -e -s); $reportLines | Add-Content -LiteralPath $file -Encoding UTF8; Start-Process notepad.exe -ArgumentList ('"{0}"' -f $file); Write-AMRLog ("Network report saved: {0}" -f $file) SUCCESS Network; return }
+   'Report' { $dir=Join-Path $env:ProgramData 'AMR Tool Pro\NetworkReports'; New-Item -ItemType Directory -Path $dir -Force | Out-Null; $file=Join-Path $dir ('NetworkReport-{0:yyyyMMdd-HHmmss}.txt' -f (Get-Date)); ("AMR Utility Network Diagnostics Report`r`nGenerated: {0}`r`n`r`n" -f (Get-Date)) | Set-Content -LiteralPath $file -Encoding UTF8; $reportLines = @(& ipconfig /all; ''; & route print; ''; & arp -a; ''; & netstat -e -s); $reportLines | Add-Content -LiteralPath $file -Encoding UTF8; Start-Process notepad.exe -ArgumentList ('"{0}"' -f $file); Write-AMRLog ("Network report saved: {0}" -f $file) SUCCESS Network; return }
    default { throw 'Unknown network tool.' }
   }
   Write-AMRLog ("Network tool completed: {0}" -f $Key) SUCCESS Network
@@ -16851,7 +16851,7 @@ function Start-AMRBrowserCleanupDialog {
 # ORPHAN ANALYZER + REVERSIBLE QUARANTINE
 # All enumeration and file moves run in a background runspace. Never targets user-profile data.
 $script:AMROrphanScanState = [pscustomobject]@{ Current = $null }
-$script:AMROrphanQuarantineRoot = Join-Path $env:ProgramData 'AMR-Utility\Quarantine\OrphanedApps'
+$script:AMROrphanQuarantineRoot = Join-Path $env:ProgramData 'AMR Tool Pro\Quarantine\OrphanedApps'
 
 function Get-AMROrphanQuarantineItems {
     $items = @()
@@ -17074,7 +17074,7 @@ function Test-AMRCleanupDirectory {
 function Write-AMRCleanupTrace {
     param([string]$Message,[string]$Level='INFO')
     try {
-        $traceDirectory = Join-Path $env:ProgramData 'AMR-Utility\Logs'
+        $traceDirectory = Join-Path $env:ProgramData 'AMR Tool Pro\Logs'
         if (-not [string]::IsNullOrWhiteSpace([string]$script:LogDir)) { $traceDirectory = [string]$script:LogDir }
         if (-not (Test-Path -LiteralPath $traceDirectory -PathType Container)) {
             New-Item -ItemType Directory -Path $traceDirectory -Force -ErrorAction Stop | Out-Null
@@ -18616,7 +18616,7 @@ function Invoke-AMRBackupAction {
   switch ($Key) {
    'RestorePoint' {
     Enable-ComputerRestore -Drive "$env:SystemDrive\" -ErrorAction Stop
-    Checkpoint-Computer -Description "AMR-Utility Restore Point $stamp" -RestorePointType MODIFY_SETTINGS -ErrorAction Stop
+    Checkpoint-Computer -Description "AMR Tool Pro Restore Point $stamp" -RestorePointType MODIFY_SETTINGS -ErrorAction Stop
     # A restore point is stored by Windows, not as a desktop file. Add a desktop shortcut to launch System Protection.
     try { $desk=[Environment]::GetFolderPath('Desktop'); $lnk=Join-Path $desk 'AMR System Protection.lnk'; $w=New-Object -ComObject WScript.Shell; $sc=$w.CreateShortcut($lnk); $sc.TargetPath="$env:windir\System32\SystemPropertiesProtection.exe"; $sc.Description='Open Windows System Protection and restore point settings'; $sc.Save() } catch { Write-AMRLog "Restore point created; desktop shortcut could not be created: $_" WARNING System }
     Write-AMRLog 'Created System Restore Point.' SUCCESS System
