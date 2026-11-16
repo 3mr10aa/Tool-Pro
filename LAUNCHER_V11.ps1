@@ -1,5 +1,5 @@
 <#
-AMR Windows Utility - IRM In-Memory Launcher V11 (fixed)
+AMR Windows Utility - IRM In-Memory Launcher V11 (fixed raw-byte SHA-256)
 Windows PowerShell 5.1
 Downloads the exact V11 main script from the verified repository path,
 checks its pinned SHA-256, then streams it to an elevated STA PowerShell process.
@@ -39,18 +39,21 @@ try {
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
     $client = New-Object Net.WebClient
     $client.Headers['User-Agent'] = 'AMR-Windows-Utility-IRM-Launcher/11-fixed'
-    $mainText = $client.DownloadString($mainUrl)
+    # Download raw bytes. DownloadString can use the machine's ANSI code page
+    # when the server omits a charset, corrupting non-ASCII text and its hash.
+    $mainBytes = $client.DownloadData($mainUrl)
     $client.Dispose(); $client = $null
-    $mainText = $mainText.TrimStart([char]0xFEFF)
-    if ([string]::IsNullOrWhiteSpace($mainText)) { throw 'The main application source was empty.' }
+    if (-not $mainBytes -or $mainBytes.Length -eq 0) { throw 'The main application source was empty.' }
     $shaProvider = [Security.Cryptography.SHA256]::Create()
     try {
-        $actualHash = [BitConverter]::ToString($shaProvider.ComputeHash([Text.Encoding]::UTF8.GetBytes($mainText))).Replace('-','')
+        $actualHash = [BitConverter]::ToString($shaProvider.ComputeHash($mainBytes)).Replace('-','')
     } finally { $shaProvider.Dispose() }
     if ($actualHash -ne $expectedSha256) {
         throw "Main application integrity check failed. Expected $expectedSha256 but received $actualHash. No application code was started."
     }
 
+    $utf8Strict = [System.Text.UTF8Encoding]::new($false, $true)
+    try { $mainText = $utf8Strict.GetString($mainBytes) } catch { throw 'The downloaded application is not valid UTF-8.' }
     $server = New-Object IO.Pipes.NamedPipeServerStream($pipeName,[IO.Pipes.PipeDirection]::Out,1,[IO.Pipes.PipeTransmissionMode]::Byte,[IO.Pipes.PipeOptions]::None)
     $readyEvent = New-Object System.Threading.EventWaitHandle($false,[System.Threading.EventResetMode]::ManualReset,$eventName)
     $env:AMR_STARTUP_EVENT_NAME = $eventName
@@ -76,8 +79,7 @@ try {
     if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { $start.Verb = 'RunAs' }
     $child = Start-Process @start
     $server.WaitForConnection()
-    $bytes = [Text.Encoding]::UTF8.GetBytes($mainText)
-    $server.Write($bytes,0,$bytes.Length); $server.Flush(); $server.Dispose(); $server = $null
+    $server.Write($mainBytes,0,$mainBytes.Length); $server.Flush(); $server.Dispose(); $server = $null
     $ready = $false
     while ($true) {
         [System.Windows.Forms.Application]::DoEvents()
