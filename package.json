@@ -1,0 +1,10 @@
+{
+  "name": "amr-windows-utility-v1",
+  "version": "1.0.0",
+  "private": true,
+  "description": "AMR Windows Utility V1 - Driver Center Intelligence Update",
+  "scripts": {
+    "start": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\LAUNCHER.ps1",
+    "launch": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\\LAUNCHER.ps1"
+  }
+}
