@@ -12,11 +12,11 @@ $logPath = Join-Path $env:TEMP 'AMR_ToolPro_Launcher.log'
 # These pins are populated automatically by the publish command from the exact
 # files in the local release folder. Never leave a placeholder in a published launcher.
 $expected = @{
-    'AMR_Windows_Utility_V1.ps1' = '79BA8860BDDDD732A8CF7A92B1AA92A15027C1ED90DF144B953585CE0123AF86'
-    'AMR_WebView2/Microsoft.Web.WebView2.Core.dll' = 'ACDD517B951829F763D1255F32DF1E6A936CB8623A7EBFF6B8B24172DEDE6BD6'
-    'AMR_WebView2/Microsoft.Web.WebView2.Wpf.dll' = 'BAAFA0A595C2CEFB3BE8F18288C3DB76F52E3966C8B99957D5E56CAF1B137BC1'
-    'AMR_WebView2/x64/WebView2Loader.dll' = 'D3FCE90BDEECB08596E377DEA6A316354DD8949E32FF09B89D51BE00C14E21B6'
-    'AMR_WebView2/x86/WebView2Loader.dll' = '1D348D3C0A5CB0D985389B68A0FD9BF966C2AED65F5E44BBC0233739B7A57F9E'
+    'AMR_Windows_Utility_V1.ps1' = '__APP_SHA256__'
+    'AMR_WebView2/Microsoft.Web.WebView2.Core.dll' = '__CORE_SHA256__'
+    'AMR_WebView2/Microsoft.Web.WebView2.Wpf.dll' = '__WPF_SHA256__'
+    'AMR_WebView2/x64/WebView2Loader.dll' = '__X64_SHA256__'
+    'AMR_WebView2/x86/WebView2Loader.dll' = '__X86_SHA256__'
 }
 
 function Write-AMRLauncherLog {
