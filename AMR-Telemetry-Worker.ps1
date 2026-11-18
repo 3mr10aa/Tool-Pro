@@ -132,6 +132,25 @@ function Get-AMRInstallSecret {
     return $secret
 }
 
+function Get-AMRValidatedTelemetryEndpoint {
+    param([string]$Endpoint)
+
+    $uri = $null
+    if (-not [Uri]::TryCreate($Endpoint, [UriKind]::Absolute, [ref]$uri)) {
+        throw 'Telemetry endpoint is not a valid absolute URI.'
+    }
+    if ($uri.Scheme -ine 'https' -or
+        $uri.Host -ine 'amr-toolpro-telemetry.3mr10aa.workers.dev' -or
+        $uri.Port -ne 443 -or
+        $uri.AbsolutePath.TrimEnd('/') -cne '/collect' -or
+        -not [string]::IsNullOrEmpty($uri.UserInfo) -or
+        -not [string]::IsNullOrEmpty($uri.Query) -or
+        -not [string]::IsNullOrEmpty($uri.Fragment)) {
+        throw 'Telemetry endpoint rejected: only the pinned HTTPS /collect endpoint is allowed.'
+    }
+
+    return $uri.AbsoluteUri.TrimEnd('/')
+}
 function Invoke-AMRForgetRequest {
     param([string]$Endpoint, [string]$InstallId, [string]$InstallSecret, [string]$ForgetPath)
     $forgetEndpoint = $Endpoint -replace '/collect/?$', '/forget'
@@ -183,7 +202,8 @@ try {
             if ($forgetId -match '^[0-9a-fA-F-]{36}$' -and (Test-Path -LiteralPath $secretPath)) {
                 $secret = (Get-Content -LiteralPath $secretPath -Raw).Trim()
                 $endpointText = (Invoke-WebRequest -Uri $EndpointFileUrl -UseBasicParsing -TimeoutSec 8 -ErrorAction Stop).Content.Trim()
-                if ($endpointText -match '^https://[^\s]+/collect/?$') { Invoke-AMRForgetRequest -Endpoint $endpointText -InstallId $forgetId -InstallSecret $secret -ForgetPath $forgetPath }
+                $validatedEndpoint = Get-AMRValidatedTelemetryEndpoint -Endpoint $endpointText
+                Invoke-AMRForgetRequest -Endpoint $validatedEndpoint -InstallId $forgetId -InstallSecret $secret -ForgetPath $forgetPath
             }
         }
         exit 0
@@ -244,10 +264,8 @@ try {
             exit 0
         }
         $endpoint = (Invoke-WebRequest -Uri $EndpointFileUrl -UseBasicParsing -TimeoutSec 8 -ErrorAction Stop).Content.Trim()
-        $parsedEndpoint = $null
-        if (-not [Uri]::TryCreate($endpoint, [UriKind]::Absolute, [ref]$parsedEndpoint) -or $parsedEndpoint.Scheme -ne 'https' -or $parsedEndpoint.AbsolutePath.TrimEnd('/') -ne '/collect') {
-            throw 'Telemetry endpoint is not a valid HTTPS /collect endpoint.'
-        }
+        $endpoint = Get-AMRValidatedTelemetryEndpoint -Endpoint $endpoint
+
         $bytes = [System.Text.Encoding]::UTF8.GetBytes($json)
         $response = Invoke-RestMethod -Method Post -Uri $endpoint -Body $bytes -ContentType 'application/json; charset=utf-8' -TimeoutSec 12 -ErrorAction Stop
         if ($response -and $response.ok -eq $true) {

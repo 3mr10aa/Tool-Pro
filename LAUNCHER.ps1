@@ -83,7 +83,7 @@ function Start-AMRTelemetryWorker {
     # This bootstrap runs in a separate hidden PowerShell process. The launcher
     # never downloads the worker, runs CIM, waits for the network, or updates its UI.
     $workerUrl = $repoRaw + '/AMR-Telemetry-Worker.ps1'
-    $workerSha256 = 'd06dbe2adca87995045fa98505d0788b33b0f69553585c9d7d82dd1df8289416'
+    $workerSha256 = '968217b5404fc5b6847783aca237d0fb53fd0bc34a5ad6140d158e7864e17d2a'
     $bootstrap = @'
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
