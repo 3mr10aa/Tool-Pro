@@ -447,8 +447,13 @@ namespace AMR {
     $quotedApp = '"' + $appPath.Replace('"', '""') + '"'
     $arguments = '-NoLogo -NoProfile -ExecutionPolicy Bypass -STA -File ' + $quotedApp
     Set-AMRLauncherProgress -Percent 94 -Status 'Launching AMR Tool-Pro...' -Detail 'Waiting for the main application window to appear...'
-    Write-AMRLauncherLog ('Launching verified app from ' + $appPath)
-    $appProcess = Start-Process -FilePath $powershellExe -ArgumentList $arguments -WorkingDirectory $installRoot -WindowStyle Hidden -PassThru -ErrorAction Stop
+    Write-AMRLauncherLog ('Launching verified app elevated from ' + $appPath)
+    # The main application requires Administrator privileges. Its own bootstrap
+    # relaunches itself with RunAs when started unelevated, then exits the first
+    # PowerShell process. Launch elevated here so the launcher tracks the real
+    # application process instead of mistaking that intentional self-relaunch
+    # for an application crash. Windows will show the standard UAC consent prompt.
+    $appProcess = Start-Process -FilePath $powershellExe -ArgumentList $arguments -WorkingDirectory $installRoot -WindowStyle Hidden -Verb RunAs -PassThru -ErrorAction Stop
 
     # Detect the actual visible WPF window; do not fake a 100% download indicator.
     $appHandle = [IntPtr]::Zero
