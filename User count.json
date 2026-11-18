@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "updatedAtUtc": "2026-11-18T18:15:47.644Z",
+  "privacy": "Aggregated statistics only. Individual device records are stored in private diagnostics storage.",
+  "totals": {
+    "uniqueUsers": 1,
+    "totalLaunches": 1
+  },
+  "manufacturers": [],
+  "models": [],
+  "operatingSystems": [],
+  "architectures": []
+}
