@@ -1,3 +1,4 @@
+
 #requires -Version 5.1
 [CmdletBinding()]
 param(
@@ -151,6 +152,7 @@ function Get-AMRValidatedTelemetryEndpoint {
 
     return $uri.AbsoluteUri.TrimEnd('/')
 }
+
 function Invoke-AMRForgetRequest {
     param([string]$Endpoint, [string]$InstallId, [string]$InstallSecret, [string]$ForgetPath)
     $forgetEndpoint = $Endpoint -replace '/collect/?$', '/forget'
@@ -159,6 +161,7 @@ function Invoke-AMRForgetRequest {
     $result = Invoke-RestMethod -Method Post -Uri $forgetEndpoint -Body $bytes -ContentType 'application/json; charset=utf-8' -TimeoutSec 8 -ErrorAction Stop
     if (-not ($result -and $result.ok -eq $true)) { throw 'Server did not confirm deletion.' }
     Remove-Item -LiteralPath (Join-Path $TelemetryRoot 'User count.json'), (Join-Path $TelemetryRoot 'pending-upload.json'), (Join-Path $TelemetryRoot 'device-id.txt'), (Join-Path $TelemetryRoot 'install-secret.txt'), $ForgetPath -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath (Join-Path $TelemetryRoot 'pending-uploads') -Recurse -Force -ErrorAction SilentlyContinue
     Write-AMRTelemetryLog 'A previously queued diagnostics deletion was confirmed by the server.'
 }
 
@@ -172,10 +175,9 @@ try {
     $secretPath = Join-Path $TelemetryRoot 'install-secret.txt'
     $localDataPath = Join-Path $TelemetryRoot 'User count.json'
     $pendingPath = Join-Path $TelemetryRoot 'pending-upload.json'
+    $queuePath = Join-Path $TelemetryRoot 'pending-uploads'
     $forgetPath = Join-Path $TelemetryRoot 'forget-request.json'
 
-    # Withdrawal is persisted before mutex acquisition so it still takes effect
-    # even when a collection worker is already running.
     if ($DisableTelemetry) {
         $oldInstallId = $null
         if (Test-Path -LiteralPath $installIdPath -PathType Leaf) { try { $oldInstallId = (Get-Content -LiteralPath $installIdPath -Raw).Trim() } catch {} }
@@ -186,9 +188,9 @@ try {
             [System.IO.File]::WriteAllText($forgetPath, $forgetRecord, (New-Object System.Text.UTF8Encoding($false)))
         }
         Remove-Item -LiteralPath $localDataPath, $pendingPath -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $queuePath -Recurse -Force -ErrorAction SilentlyContinue
     }
 
-    # One worker per interactive user session. This prevents overlapping CIM scans/uploads.
     $mutex = New-Object System.Threading.Mutex($false, 'Local\AMRToolPro.Telemetry.Worker')
     try { $hasMutex = $mutex.WaitOne(0) } catch [System.Threading.AbandonedMutexException] { $hasMutex = $true }
     if (-not $hasMutex) { exit 0 }
@@ -234,6 +236,7 @@ try {
     $device = Get-AMRDeviceProfile -InstallId $installId
     $record = [ordered]@{
         schemaVersion = 2
+        launchId = [Guid]::NewGuid().ToString()
         installId = $installId
         installSecret = $installSecret
         firstSeenUtc = $firstSeen
@@ -253,29 +256,77 @@ try {
     $tempPath = $localDataPath + '.tmp'
     [System.IO.File]::WriteAllText($tempPath, $localJson, (New-Object System.Text.UTF8Encoding($false)))
     Move-Item -LiteralPath $tempPath -Destination $localDataPath -Force
-    [System.IO.File]::WriteAllText($pendingPath, $json, (New-Object System.Text.UTF8Encoding($false)))
-    Write-AMRTelemetryLog ("Saved sanitized device profile. LaunchCount={0}." -f $launchCount)
+
+    if (-not (Test-Path -LiteralPath $queuePath -PathType Container)) {
+        New-Item -ItemType Directory -Path $queuePath -Force | Out-Null
+    }
+    $queueFile = Join-Path $queuePath ($record['launchId'] + '.json')
+    $queueTemp = $queueFile + '.tmp'
+    [System.IO.File]::WriteAllText($queueTemp, $json, (New-Object System.Text.UTF8Encoding($false)))
+    Move-Item -LiteralPath $queueTemp -Destination $queueFile -Force
+
+    # Migrate any report left by the previous single-file queue.
+    if (Test-Path -LiteralPath $pendingPath -PathType Leaf) {
+        try {
+            $legacy = Get-Content -LiteralPath $pendingPath -Raw -Encoding UTF8 | ConvertFrom-Json
+            if ($legacy -and $legacy.installId -and $legacy.installSecret) {
+                if (-not $legacy.launchId) {
+                    $legacy | Add-Member -NotePropertyName launchId -NotePropertyValue ([Guid]::NewGuid().ToString()) -Force
+                }
+                $legacyId = [string]$legacy.launchId
+                $legacyFile = Join-Path $queuePath ($legacyId + '.json')
+                if (-not (Test-Path -LiteralPath $legacyFile -PathType Leaf)) {
+                    $legacyJson = $legacy | ConvertTo-Json -Depth 12
+                    $legacyTemp = $legacyFile + '.tmp'
+                    [System.IO.File]::WriteAllText($legacyTemp, $legacyJson, (New-Object System.Text.UTF8Encoding($false)))
+                    Move-Item -LiteralPath $legacyTemp -Destination $legacyFile -Force
+                }
+            }
+            Remove-Item -LiteralPath $pendingPath -Force -ErrorAction SilentlyContinue
+        } catch {
+            Write-AMRTelemetryLog ('Legacy pending report could not be migrated: ' + $_.Exception.Message)
+        }
+    }
+
+    Write-AMRTelemetryLog ("Saved sanitized profile and queued launch {0}. LaunchCount={1}." -f $record['launchId'], $launchCount)
 
     try {
         $latestConsent = Get-Content -LiteralPath $consentPath -Raw -Encoding UTF8 | ConvertFrom-Json
         if ($latestConsent.deviceDiagnostics -ne $true) {
-            Remove-Item -LiteralPath $localDataPath, $pendingPath -Force -ErrorAction SilentlyContinue
-            Write-AMRTelemetryLog 'Consent was withdrawn during collection; no report was uploaded.'
+            Remove-Item -LiteralPath $localDataPath -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $queuePath -Recurse -Force -ErrorAction SilentlyContinue
+            Write-AMRTelemetryLog 'Consent was withdrawn during collection; queued reports were removed.'
             exit 0
         }
+
         $endpoint = (Invoke-WebRequest -Uri $EndpointFileUrl -UseBasicParsing -TimeoutSec 8 -ErrorAction Stop).Content.Trim()
         $endpoint = Get-AMRValidatedTelemetryEndpoint -Endpoint $endpoint
 
-        $bytes = [System.Text.Encoding]::UTF8.GetBytes($json)
-        $response = Invoke-RestMethod -Method Post -Uri $endpoint -Body $bytes -ContentType 'application/json; charset=utf-8' -TimeoutSec 12 -ErrorAction Stop
-        if ($response -and $response.ok -eq $true) {
-            Remove-Item -LiteralPath $pendingPath -Force -ErrorAction SilentlyContinue
-            Write-AMRTelemetryLog 'Sanitized device profile synchronized successfully.'
-        } else {
-            Write-AMRTelemetryLog 'Server response was not successful; report remains queued locally.'
+        $queuedFiles = @(Get-ChildItem -LiteralPath $queuePath -Filter '*.json' -File -ErrorAction Stop | Sort-Object LastWriteTimeUtc)
+        foreach ($queuedFile in $queuedFiles) {
+            try {
+                $queuedJson = Get-Content -LiteralPath $queuedFile.FullName -Raw -Encoding UTF8
+                $queuedRecord = $queuedJson | ConvertFrom-Json
+                if (-not $queuedRecord.launchId) {
+                    Write-AMRTelemetryLog ("Queued report has no launchId and was retained: " + $queuedFile.Name)
+                    continue
+                }
+
+                $queuedBytes = [System.Text.Encoding]::UTF8.GetBytes($queuedJson)
+                $response = Invoke-RestMethod -Method Post -Uri $endpoint -Body $queuedBytes -ContentType 'application/json; charset=utf-8' -TimeoutSec 12 -ErrorAction Stop
+
+                if ($response -and $response.ok -eq $true -and ($response.eventRecorded -eq $true -or $response.duplicate -eq $true)) {
+                    Remove-Item -LiteralPath $queuedFile.FullName -Force -ErrorAction SilentlyContinue
+                    Write-AMRTelemetryLog ("Launch event acknowledged: " + [string]$queuedRecord.launchId)
+                } else {
+                    Write-AMRTelemetryLog ("No explicit server acknowledgement; report retained: " + [string]$queuedRecord.launchId)
+                }
+            } catch {
+                Write-AMRTelemetryLog ("Queued upload deferred for " + $queuedFile.Name + ': ' + $_.Exception.Message)
+            }
         }
     } catch {
-        Write-AMRTelemetryLog ('Upload deferred; report remains queued locally: ' + $_.Exception.Message)
+        Write-AMRTelemetryLog ('Upload deferred; queued reports remain locally: ' + $_.Exception.Message)
     }
 } catch {
     Write-AMRTelemetryLog ('Background worker failed safely: ' + $_.Exception.Message)
