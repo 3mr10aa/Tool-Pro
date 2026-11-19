@@ -83,7 +83,9 @@ function Start-AMRTelemetryWorker {
     # This bootstrap runs in a separate hidden PowerShell process. The launcher
     # never downloads the worker, runs CIM, waits for the network, or updates its UI.
     $workerUrl = $repoRaw + '/AMR-Telemetry-Worker.ps1'
-    $workerSha256 = 'ED1353698793C2F311C8E84B2CA1880233BEC941B83F8A2CFCE9012695FC474A'
+    # Pin the exact GitHub blob currently published on main. This is the Git
+    # object SHA-1, not a plain-file SHA-1 or SHA-256.
+    $workerGitBlobSha1 = '7fd17d205c3a9d2339edc15d319e27eacad1b0e6'
     $bootstrap = @'
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
@@ -92,7 +94,28 @@ $root = __ROOT__
 $workerUrl = __WORKERURL__
 $endpointFileUrl = __ENDPOINTURL__
 $launcherVersion = __VERSION__
-$expectedHash = '__HASH__'
+$expectedGitBlobSha1 = '__HASH__'
+
+function Get-AMRTelemetryGitBlobSha1 {
+    param([Parameter(Mandatory=$true)][string]$Path)
+    $fileInfo = Get-Item -LiteralPath $Path -ErrorAction Stop
+    $header = [System.Text.Encoding]::ASCII.GetBytes(('blob {0}' -f $fileInfo.Length) + [char]0)
+    $sha = [System.Security.Cryptography.SHA1]::Create()
+    $stream = [System.IO.File]::OpenRead($Path)
+    try {
+        [void]$sha.TransformBlock($header, 0, $header.Length, $header, 0)
+        $buffer = New-Object byte[] 65536
+        while (($read = $stream.Read($buffer, 0, $buffer.Length)) -gt 0) {
+            [void]$sha.TransformBlock($buffer, 0, $read, $buffer, 0)
+        }
+        [void]$sha.TransformFinalBlock((New-Object byte[] 0), 0, 0)
+        return ([BitConverter]::ToString($sha.Hash)).Replace('-', '').ToLowerInvariant()
+    } finally {
+        $stream.Dispose()
+        $sha.Dispose()
+    }
+}
+
 try {
     $consentPath = Join-Path $root 'consent.json'
     if (-not (Test-Path -LiteralPath $consentPath -PathType Leaf)) { exit 0 }
@@ -103,12 +126,12 @@ try {
     $tempPath = $workerPath + '.download'
     $valid = $false
     if (Test-Path -LiteralPath $workerPath -PathType Leaf) {
-        try { $valid = ((Get-FileHash -LiteralPath $workerPath -Algorithm SHA256).Hash.ToLowerInvariant() -eq $expectedHash) } catch {}
+        try { $valid = ((Get-AMRTelemetryGitBlobSha1 -Path $workerPath) -eq $expectedGitBlobSha1) } catch {}
     }
     if (-not $valid) {
         Invoke-WebRequest -Uri $workerUrl -UseBasicParsing -OutFile $tempPath -TimeoutSec 20 -ErrorAction Stop
-        $actualHash = (Get-FileHash -LiteralPath $tempPath -Algorithm SHA256).Hash.ToLowerInvariant()
-        if ($actualHash -ne $expectedHash) { Remove-Item -LiteralPath $tempPath -Force -ErrorAction SilentlyContinue; throw 'Background worker integrity check failed.' }
+        $actualGitBlobSha1 = Get-AMRTelemetryGitBlobSha1 -Path $tempPath
+        if ($actualGitBlobSha1 -ne $expectedGitBlobSha1) { Remove-Item -LiteralPath $tempPath -Force -ErrorAction SilentlyContinue; throw 'Background worker GitHub blob integrity check failed.' }
         Move-Item -LiteralPath $tempPath -Destination $workerPath -Force
     }
     & $workerPath -TelemetryRoot $root -LauncherVersion $launcherVersion -EndpointFileUrl $endpointFileUrl
@@ -120,7 +143,7 @@ try {
     $bootstrap = $bootstrap.Replace('__WORKERURL__', (ConvertTo-AMRPSSingleQuoted $workerUrl))
     $bootstrap = $bootstrap.Replace('__ENDPOINTURL__', (ConvertTo-AMRPSSingleQuoted $telemetryEndpointFileUrl))
     $bootstrap = $bootstrap.Replace('__VERSION__', (ConvertTo-AMRPSSingleQuoted $LauncherVersion))
-    $bootstrap = $bootstrap.Replace('__HASH__', $workerSha256)
+    $bootstrap = $bootstrap.Replace('__HASH__', $workerGitBlobSha1)
     $encoded = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($bootstrap))
     $powerShellExe = Join-Path $PSHOME 'powershell.exe'
     $arguments = '-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -EncodedCommand ' + $encoded
