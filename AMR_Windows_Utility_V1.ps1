@@ -1,8 +1,11 @@
-﻿#
+#
 # Amr | AMR Windows Utility - Cleanup Workspace & Isolated Root Scanner V16
 # Windows 10/11 | Windows PowerShell 5.1 | WPF | Administrator
 # Developer: عمرو أحمد عبد الفتاح | Phone: 01014716301 | Email: 3mr10aa@gmail.com
 #
+
+$script:AMRStartupStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+$script:AMRStartupPhaseTimings = [ordered]@{}
 
 # --- Phase 6.8 | Direct Vendor Adapters & Full Multi-Source Discovery (built on Phase 6.7) ---
 # --- 0. Single-pass STA + Administrator bootstrap ---
@@ -2726,10 +2729,25 @@ Write-AMRLog ("Startup catalog ready: {0} preloaded icons from local cache. Cach
 [xml]$xaml = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" 
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" 
+        xmlns:primitives="clr-namespace:System.Windows.Controls.Primitives;assembly=PresentationFramework" 
         Title="Amr | windows_utility" Height="700" Width="1100" 
         MinHeight="600" MinWidth="900" WindowStartupLocation="CenterScreen" WindowState="Normal" 
         Background="#18181B" Foreground="#E4E4E7" FontFamily="Segoe UI">
  <Window.Resources>
+  <!-- Activation Center: opaque glass-like graphite layers with warm reflective edges. -->
+  <LinearGradientBrush x:Key="ActivationOuterGlassBrush" StartPoint="0,0" EndPoint="0.9,1">
+   <GradientStop Color="#D65B554B" Offset="0"/><GradientStop Color="#E83A3B3F" Offset="0.20"/><GradientStop Color="#E52A2C31" Offset="0.62"/><GradientStop Color="#D91D1F23" Offset="1"/>
+  </LinearGradientBrush>
+  <LinearGradientBrush x:Key="ActivationInnerGlassBrush" StartPoint="0,0" EndPoint="1,1">
+   <GradientStop Color="#B85D574B" Offset="0"/><GradientStop Color="#E33B3D41" Offset="0.22"/><GradientStop Color="#E52C2E33" Offset="0.68"/><GradientStop Color="#D9232529" Offset="1"/>
+  </LinearGradientBrush>
+  <LinearGradientBrush x:Key="ActivationInsetGlassBrush" StartPoint="0,0" EndPoint="0,1">
+   <GradientStop Color="#D136383D" Offset="0"/><GradientStop Color="#F01E2024" Offset="0.45"/><GradientStop Color="#E8141619" Offset="1"/>
+  </LinearGradientBrush>
+  <LinearGradientBrush x:Key="ActivationGlassEdgeBrush" StartPoint="0,0" EndPoint="1,1">
+   <GradientStop Color="#D9D4C29F" Offset="0"/><GradientStop Color="#986F624B" Offset="0.38"/><GradientStop Color="#665B554B" Offset="1"/>
+  </LinearGradientBrush>
+
   <!-- Overview premium glass surfaces: distinct depth for section shells and metric tiles. -->
   <LinearGradientBrush x:Key="OverviewOuterGlassBrush" StartPoint="0,0" EndPoint="1,1">
    <GradientStop Color="#C52D4B69" Offset="0"/>
@@ -2785,6 +2803,7 @@ Write-AMRLog ("Startup catalog ready: {0} preloaded icons from local cache. Cach
    </Setter>
   </Style>
 
+
   <!-- Main navigation + one shared contextual search field. -->
   <Style x:Key="MainNavigationTabControlStyle" TargetType="TabControl"
          BasedOn="{StaticResource {x:Type TabControl}}">
@@ -2805,7 +2824,10 @@ Write-AMRLog ("Startup catalog ready: {0} preloaded icons from local cache. Cach
                     ClipToBounds="False"/>
        <Border Grid.Row="0" Grid.Column="1" Margin="4,0,0,10"
                Background="#101D30" BorderBrush="#2874C7" BorderThickness="1.3"
-               CornerRadius="11" Padding="9,6" VerticalAlignment="Center">
+               CornerRadius="11" Padding="9,6" VerticalAlignment="Center"
+               RenderTransformOrigin="0.5,0.5">
+        <Border.RenderTransform><ScaleTransform ScaleX="1" ScaleY="1"/></Border.RenderTransform>
+        <Border.Effect><DropShadowEffect Color="#38BDF8" BlurRadius="9" ShadowDepth="0" Opacity="0.10"/></Border.Effect>
         <StackPanel>
          <Grid Height="36">
           <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
@@ -2907,6 +2929,26 @@ Write-AMRLog ("Startup catalog ready: {0} preloaded icons from local cache. Cach
           </ComboBox.Resources>
          </ComboBox>
         </StackPanel>
+        <Border.Triggers>
+         <EventTrigger RoutedEvent="Mouse.MouseEnter">
+          <BeginStoryboard>
+           <Storyboard>
+            <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleX)" To="1.035" Duration="0:0:0.135"/>
+            <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleY)" To="1.035" Duration="0:0:0.135"/>
+            <DoubleAnimation Storyboard.TargetProperty="(UIElement.Effect).(DropShadowEffect.Opacity)" To="0.62" Duration="0:0:0.15"/>
+           </Storyboard>
+          </BeginStoryboard>
+         </EventTrigger>
+         <EventTrigger RoutedEvent="Mouse.MouseLeave">
+          <BeginStoryboard>
+           <Storyboard>
+            <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleX)" To="1" Duration="0:0:0.145"/>
+            <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleY)" To="1" Duration="0:0:0.145"/>
+            <DoubleAnimation Storyboard.TargetProperty="(UIElement.Effect).(DropShadowEffect.Opacity)" To="0.10" Duration="0:0:0.16"/>
+           </Storyboard>
+          </BeginStoryboard>
+         </EventTrigger>
+        </Border.Triggers>
        </Border>
        <Border Grid.Row="1" Grid.ColumnSpan="2" Background="{TemplateBinding Background}"
                ClipToBounds="False">
@@ -2962,6 +3004,41 @@ Write-AMRLog ("Startup catalog ready: {0} preloaded icons from local cache. Cach
      </ControlTemplate>
     </Setter.Value>
    </Setter>
+  </Style>
+
+  <!-- Premium hover motion for the six primary navigation tabs only.
+       The original tab colors, selected state, dimensions and content remain unchanged. -->
+  <Style x:Key="MainNavigationTabItemStyle" TargetType="TabItem"
+         BasedOn="{StaticResource {x:Type TabItem}}">
+   <Setter Property="RenderTransformOrigin" Value="0.5,0.5"/>
+   <Setter Property="RenderTransform">
+    <Setter.Value><ScaleTransform ScaleX="1" ScaleY="1"/></Setter.Value>
+   </Setter>
+   <Setter Property="Effect">
+    <Setter.Value><DropShadowEffect Color="#38BDF8" BlurRadius="8" ShadowDepth="0" Opacity="0.10"/></Setter.Value>
+   </Setter>
+   <Style.Triggers>
+    <Trigger Property="IsMouseOver" Value="True">
+     <Trigger.EnterActions>
+      <BeginStoryboard>
+       <Storyboard>
+        <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleX)" To="1.055" Duration="0:0:0.135"/>
+        <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleY)" To="1.055" Duration="0:0:0.135"/>
+        <DoubleAnimation Storyboard.TargetProperty="(UIElement.Effect).(DropShadowEffect.Opacity)" To="0.58" Duration="0:0:0.15"/>
+       </Storyboard>
+      </BeginStoryboard>
+     </Trigger.EnterActions>
+     <Trigger.ExitActions>
+      <BeginStoryboard>
+       <Storyboard>
+        <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleX)" To="1" Duration="0:0:0.145"/>
+        <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleY)" To="1" Duration="0:0:0.145"/>
+        <DoubleAnimation Storyboard.TargetProperty="(UIElement.Effect).(DropShadowEffect.Opacity)" To="0.10" Duration="0:0:0.16"/>
+       </Storyboard>
+      </BeginStoryboard>
+     </Trigger.ExitActions>
+    </Trigger>
+   </Style.Triggers>
   </Style>
 
   <!-- Phase 6.10.24: Compact Overview tiles and reserve space for the Update tab. -->
@@ -3265,7 +3342,7 @@ Write-AMRLog ("Startup catalog ready: {0} preloaded icons from local cache. Cach
   <TextBlock Name="StatusText" Visibility="Collapsed"/>
   
   <!-- Main navigation with persistent context-aware search at the right. -->
-  <TabControl Name="MainNavigationTabs" Grid.Row="0" Margin="10,10,10,0" Style="{StaticResource MainNavigationTabControlStyle}">
+  <TabControl Name="MainNavigationTabs" Grid.Row="0" Margin="10,10,10,0" Style="{StaticResource MainNavigationTabControlStyle}" ItemContainerStyle="{StaticResource MainNavigationTabItemStyle}">
    
    <!-- 1. OVERVIEW -->
    <TabItem Header="System">
@@ -3609,47 +3686,93 @@ Write-AMRLog ("Startup catalog ready: {0} preloaded icons from local cache. Cach
       </Grid>
      </TabItem>
      <TabItem Header="Backups">
-      <Border Background="#172536" BorderBrush="#34465B" BorderThickness="1" CornerRadius="10" Padding="10" Margin="6,4,6,6">
+      <Border BorderThickness="1" CornerRadius="14" Padding="10" Margin="6,4,6,6">
+       <Border.Background>
+        <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
+         <GradientStop Color="#D92A2E33" Offset="0"/>
+         <GradientStop Color="#C51B1F24" Offset="0.52"/>
+         <GradientStop Color="#B814171B" Offset="1"/>
+        </LinearGradientBrush>
+       </Border.Background>
+       <Border.BorderBrush>
+        <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
+         <GradientStop Color="#80FFFFFF" Offset="0"/>
+         <GradientStop Color="#35FFFFFF" Offset="0.55"/>
+         <GradientStop Color="#65FFFFFF" Offset="1"/>
+        </LinearGradientBrush>
+       </Border.BorderBrush>
        <Grid>
         <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
         <!-- The two backup destinations are shown as a compact animated submenu when the main Backups section is opened. -->
-        <Border Grid.Row="0" Background="#1D2C3D" BorderBrush="#34465B" BorderThickness="1" CornerRadius="8" Padding="8" Margin="2,0,2,8">
-         <StackPanel x:Name="BackupSubMenuPanel" Orientation="Horizontal" HorizontalAlignment="Left" Opacity="0" RenderTransformOrigin="0.5,0.5">
-          <StackPanel.RenderTransform><TranslateTransform Y="-10"/></StackPanel.RenderTransform>
+        <Border Grid.Row="0" BorderThickness="1" CornerRadius="11" Padding="10,7" Margin="2,0,2,8">
+         <Border.Background>
+          <LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
+           <GradientStop Color="#66FFFFFF" Offset="0"/>
+           <GradientStop Color="#24FFFFFF" Offset="0.45"/>
+           <GradientStop Color="#12FFFFFF" Offset="1"/>
+          </LinearGradientBrush>
+         </Border.Background>
+         <Border.BorderBrush>
+          <LinearGradientBrush StartPoint="0,0" EndPoint="1,0">
+           <GradientStop Color="#75FFFFFF" Offset="0"/>
+           <GradientStop Color="#28FFFFFF" Offset="0.5"/>
+           <GradientStop Color="#65FFFFFF" Offset="1"/>
+          </LinearGradientBrush>
+         </Border.BorderBrush>
+         <Grid>
+          <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+          <StackPanel Grid.Column="0" VerticalAlignment="Center" Margin="2,0,12,0">
+           <TextBlock Text="Backup &amp; Recovery Center" FontSize="23" FontWeight="Bold" Foreground="#E7EAF0"/>
+           <TextBlock Text="System backups, recovery tools and driver protection" FontSize="11" Foreground="#AEB8C8" Margin="0,2,0,0"/>
+          </StackPanel>
+         <StackPanel x:Name="BackupSubMenuPanel" Grid.Column="1" Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center" Opacity="0" RenderTransformOrigin="0.5,0.5">
+          <StackPanel.RenderTransform><TranslateTransform Y="-6"/></StackPanel.RenderTransform>
           <StackPanel.Triggers>
            <EventTrigger RoutedEvent="FrameworkElement.Loaded">
             <BeginStoryboard>
              <Storyboard>
               <DoubleAnimation Storyboard.TargetProperty="Opacity" From="0" To="1" Duration="0:0:0.24"/>
-              <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.Y)" From="-10" To="0" Duration="0:0:0.24" DecelerationRatio="0.8"/>
+              <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.Y)" From="-6" To="0" Duration="0:0:0.24" DecelerationRatio="0.8"/>
              </Storyboard>
             </BeginStoryboard>
            </EventTrigger>
           </StackPanel.Triggers>
-          <Button Name="BackupCenterChoiceBtn" Content="💾  Backup Center" Width="154" Height="27" Margin="0,0,8,0" Padding="9,3" FontSize="11" FontWeight="SemiBold" Background="#263646" Foreground="#E7EAF0" BorderBrush="#B89A62" BorderThickness="1" Cursor="Hand"/>
-          <Button Name="DriverBackupChoiceBtn" Content="🛡  Driver Backup" Width="154" Height="27" Padding="9,3" FontSize="11" FontWeight="SemiBold" Background="#263646" Foreground="#E7EAF0" BorderBrush="#34465B" BorderThickness="1" Cursor="Hand"/>
+          <Button Name="BackupCenterChoiceBtn" Content="💾  Backup Center" Width="142" Height="29" Margin="0,0,8,0" Padding="9,3" FontSize="11" FontWeight="SemiBold" Background="#263646" Foreground="#E7EAF0" BorderBrush="#B89A62" BorderThickness="1" Cursor="Hand"/>
+          <Button Name="DriverBackupChoiceBtn" Content="🛡  Driver Backup" Width="142" Height="29" Padding="9,3" FontSize="11" FontWeight="SemiBold" Background="#263646" Foreground="#E7EAF0" BorderBrush="#34465B" BorderThickness="1" Cursor="Hand"/>
          </StackPanel>
+         </Grid>
         </Border>
         <TabControl Name="BackupSubTabs" Grid.Row="1" Background="Transparent" BorderThickness="0">
          <TabControl.Template>
           <ControlTemplate TargetType="{x:Type TabControl}">
            <Grid ClipToBounds="True" KeyboardNavigation.TabNavigation="Local">
             <Border Background="Transparent" BorderThickness="0">
-             <ContentPresenter x:Name="PART_SelectedContentHost" ContentSource="SelectedContent" SnapsToDevicePixels="{TemplateBinding SnapsToDevicePixels}"/>
+             <ContentPresenter x:Name="PART_SelectedContentHost" ContentSource="SelectedContent" HorizontalAlignment="Stretch" VerticalAlignment="Stretch" SnapsToDevicePixels="{TemplateBinding SnapsToDevicePixels}"/>
             </Border>
            </Grid>
           </ControlTemplate>
          </TabControl.Template>
        <TabItem Header="Backup Center" MinWidth="184" Height="34" Padding="14,4" FontSize="12" FontWeight="SemiBold" Background="#202A35" Foreground="#E7EAF0" BorderBrush="#B89A62">
-     <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-      <Border Padding="20">
-       <StackPanel>
-        <Grid Margin="0,0,0,12">
+     <ScrollViewer Name="BackupCenterScrollViewer" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" HorizontalAlignment="Stretch" VerticalAlignment="Stretch" VerticalContentAlignment="Top">
+      <ScrollViewer.Template>
+       <ControlTemplate TargetType="{x:Type ScrollViewer}">
+        <Grid ClipToBounds="True">
+         <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+         <ScrollContentPresenter x:Name="PART_ScrollContentPresenter" Grid.Column="0" CanContentScroll="{TemplateBinding CanContentScroll}" Content="{TemplateBinding Content}" ContentTemplate="{TemplateBinding ContentTemplate}" Margin="{TemplateBinding Padding}" HorizontalAlignment="Stretch" VerticalAlignment="Top"/>
+         <ScrollBar x:Name="PART_VerticalScrollBar" Grid.Column="1" Orientation="Vertical" Value="{TemplateBinding VerticalOffset}" Maximum="{TemplateBinding ScrollableHeight}" ViewportSize="{TemplateBinding ViewportHeight}" Visibility="{TemplateBinding ComputedVerticalScrollBarVisibility}"/>
+        </Grid>
+       </ControlTemplate>
+      </ScrollViewer.Template>
+      <Grid MinHeight="{Binding ViewportHeight, RelativeSource={RelativeSource AncestorType={x:Type ScrollViewer}}}" VerticalAlignment="Top">
+       <Grid.RowDefinitions>
+        <RowDefinition Height="Auto"/>
+        <RowDefinition Height="*"/>
+       </Grid.RowDefinitions>
+      <Border Grid.Row="0" Padding="12,10,12,12" VerticalAlignment="Top">
+       <StackPanel VerticalAlignment="Top">
+        <Grid Margin="0">
         <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="390"/></Grid.ColumnDefinitions>
-        <StackPanel Grid.Column="0" Grid.ColumnSpan="2" VerticalAlignment="Center" Margin="0,0,16,0">
-         <TextBlock Text="Backup &amp; Recovery Center" FontSize="27" FontWeight="Bold" Foreground="#E7EAF0" Margin="0,0,0,2"/>
-         <TextBlock Text="Export important system settings and recovery information. Exports are saved under ProgramData\AMR-Utility\Backups." Foreground="#AEB8C8" TextWrapping="Wrap" Visibility="Collapsed"/>
-        </StackPanel>
+
         <Grid Grid.Column="1" VerticalAlignment="Center" Visibility="Collapsed"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
          <Grid Grid.Column="0" Margin="0,0,6,0">
           <TextBox Name="BackupSearchBox" Grid.Column="0" Height="34" Padding="32,5" FontSize="13" ToolTip="Search backup tools by name or keyword" Margin="0,0,6,0" Background="#1AFFFFFF" BorderBrush="#557F7B" BorderThickness="1.2" Visibility="Collapsed"/>
@@ -3727,13 +3850,14 @@ Write-AMRLog ("Startup catalog ready: {0} preloaded icons from local cache. Cach
              </Style.Triggers>
             </Style>
            </ComboBox.ItemContainerStyle>
- <ComboBoxItem Content="💾 All Categories"/><ComboBoxItem Content="💾 Recovery"/><ComboBoxItem Content="💾 Registry &amp; System"/><ComboBoxItem Content="💾 Drivers &amp; Hardware"/><ComboBoxItem Content="💾 Network"/><ComboBoxItem Content="💾 Security"/><ComboBoxItem Content="💾 Configuration &amp; Reports"/></ComboBox>
+ <ComboBoxItem Content="💾 All Categories"/><ComboBoxItem Content="🛡 Security"/><ComboBoxItem Content="⚙ System"/><ComboBoxItem Content="🚀 Optimize"/><ComboBoxItem Content="🌐 Network"/><ComboBoxItem Content="🧰 Utilities"/></ComboBox>
         </Grid>
        </Grid>
-       <TextBlock Name="BackupResultsCount" Text="50 backup actions" Foreground="#AEB8C8" Margin="0,0,0,10"/>
-        <UniformGrid Name="BackupActionsGrid" Columns="3"/>
+       <TextBlock Name="BackupResultsCount" Text="50 backup actions" Foreground="#AEB8C8" Margin="0,0,0,4" VerticalAlignment="Top"/>
+        <WrapPanel Name="BackupActionsGrid" Orientation="Horizontal" HorizontalAlignment="Stretch" VerticalAlignment="Top" FlowDirection="RightToLeft" ItemWidth="380" ItemHeight="58" MinHeight="0"/>
        </StackPanel>
       </Border>
+      </Grid>
      </ScrollViewer>
        </TabItem>
        <TabItem Header="Driver Backup" MinWidth="184" Height="34" Padding="14,4" FontSize="12" FontWeight="SemiBold" Background="#202A35" Foreground="#E7EAF0" BorderBrush="#B89A62">
@@ -3759,6 +3883,122 @@ Write-AMRLog ("Startup catalog ready: {0} preloaded icons from local cache. Cach
        </Grid>
       </Border>
      </TabItem>
+      <TabItem Name="ActivationTab" Header="Activation">
+       <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Background="#17191D">
+        <Grid Margin="18,16,18,22">
+         <Grid.RowDefinitions>
+          <RowDefinition Height="Auto"/>
+          <RowDefinition Height="Auto"/>
+          <RowDefinition Height="Auto"/>
+          <RowDefinition Height="Auto"/>
+          <RowDefinition Height="Auto"/>
+         </Grid.RowDefinitions>
+         <Border Grid.Row="0" Background="{DynamicResource ActivationOuterGlassBrush}" BorderBrush="{DynamicResource ActivationGlassEdgeBrush}" BorderThickness="1" CornerRadius="15" Padding="20" Margin="0,0,0,14">
+          <Border.Effect><DropShadowEffect Color="#000000" BlurRadius="18" ShadowDepth="5" Opacity="0.34"/></Border.Effect>
+          <Grid>
+           <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+           <StackPanel>
+            <TextBlock Text="Activation &amp; License Center" Foreground="#F1EEE7" FontSize="25" FontWeight="Bold" Margin="0,5,0,3"/>
+            <TextBlock Text="Inspect Windows and Microsoft Office licensing, understand the current state, and use official Microsoft activation tools." Foreground="#B7B5AE" FontSize="11" TextWrapping="Wrap" MaxWidth="720"/>
+            <ProgressBar Name="ActivationScanProgress" Height="3" Margin="0,13,0,0" IsIndeterminate="True" Visibility="Collapsed" Background="#35383D" Foreground="#B89A62" BorderThickness="0"/>
+           </StackPanel>
+           <Button Name="ActivationRefreshBtn" Grid.Column="1" Content="↻  Refresh Status" Height="38" MinWidth="142" Padding="14,0" VerticalAlignment="Center" Margin="16,0,0,0" Background="{DynamicResource ActivationInnerGlassBrush}" Foreground="#F4EAD5" BorderBrush="{DynamicResource ActivationGlassEdgeBrush}" BorderThickness="1" FontWeight="SemiBold" Cursor="Hand"/>
+          </Grid>
+         </Border>
+
+         <Grid Grid.Row="1" Margin="0,0,0,14">
+          <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+          <Border Grid.Column="0" Background="{DynamicResource ActivationInnerGlassBrush}" BorderBrush="{DynamicResource ActivationGlassEdgeBrush}" BorderThickness="1" CornerRadius="14" Padding="17" Margin="0,0,7,0">
+           <Border.Effect><DropShadowEffect Color="#000000" BlurRadius="15" ShadowDepth="4" Opacity="0.30"/></Border.Effect>
+           <Grid>
+            <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+            <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+            <Border Grid.RowSpan="2" Background="#182638" BorderBrush="#9ABFE0" BorderThickness="1" CornerRadius="12" Width="50" Height="50" VerticalAlignment="Top" Margin="0,0,13,0">
+             <Border.Effect><DropShadowEffect Color="#83C9FF" BlurRadius="15" ShadowDepth="0" Opacity="0.28"/></Border.Effect>
+             <Grid Width="29" Height="29">
+              <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+              <Grid.RowDefinitions><RowDefinition Height="*"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+              <Border Grid.Row="0" Grid.Column="0" Margin="0,0,2,2" Background="#EAF2FA"/>
+              <Border Grid.Row="0" Grid.Column="1" Margin="2,0,0,2" Background="#EAF2FA"/>
+              <Border Grid.Row="1" Grid.Column="0" Margin="0,2,2,0" Background="#EAF2FA"/>
+              <Border Grid.Row="1" Grid.Column="1" Margin="2,2,0,0" Background="#EAF2FA"/>
+             </Grid>
+            </Border>
+            <StackPanel Grid.Column="1">
+             <TextBlock Text="WINDOWS LICENSE" Foreground="#B9A77E" FontSize="10" FontWeight="Bold"/>
+             <TextBlock Name="ActivationWindowsStatus" Text="Not checked" Foreground="#F1EEE7" FontSize="21" FontWeight="Bold" Margin="0,5,0,2"/>
+             <TextBlock Name="ActivationWindowsEdition" Text="Edition: —" Foreground="#D0CEC8" FontSize="11" TextWrapping="Wrap"/>
+             <TextBlock Name="ActivationWindowsDetails" Text="License details will appear after inspection." Foreground="#A9A79F" FontSize="10" Margin="0,7,0,0" TextWrapping="Wrap"/>
+            </StackPanel>
+            <Border Grid.Row="2" Grid.ColumnSpan="2" Background="#34363A" Height="1" Margin="0,14,0,0" VerticalAlignment="Bottom"/>
+           </Grid>
+          </Border>
+          <Border Grid.Column="1" Background="{DynamicResource ActivationInnerGlassBrush}" BorderBrush="{DynamicResource ActivationGlassEdgeBrush}" BorderThickness="1" CornerRadius="14" Padding="17" Margin="7,0,0,0">
+           <Border.Effect><DropShadowEffect Color="#000000" BlurRadius="15" ShadowDepth="4" Opacity="0.30"/></Border.Effect>
+           <Grid>
+            <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+            <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+            <Border Grid.RowSpan="2" Background="#282638" BorderBrush="#C9C4E8" BorderThickness="1" CornerRadius="12" Width="50" Height="50" VerticalAlignment="Top" Margin="0,0,13,0">
+             <Border.Effect><DropShadowEffect Color="#B9B2F2" BlurRadius="15" ShadowDepth="0" Opacity="0.24"/></Border.Effect>
+             <Grid Width="29" Height="29">
+              <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+              <Grid.RowDefinitions><RowDefinition Height="*"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+              <Border Grid.Row="0" Grid.Column="0" Margin="0,0,2,2" Background="#EAF2FA"/>
+              <Border Grid.Row="0" Grid.Column="1" Margin="2,0,0,2" Background="#EAF2FA"/>
+              <Border Grid.Row="1" Grid.Column="0" Margin="0,2,2,0" Background="#EAF2FA"/>
+              <Border Grid.Row="1" Grid.Column="1" Margin="2,2,0,0" Background="#EAF2FA"/>
+             </Grid>
+            </Border>
+            <StackPanel Grid.Column="1">
+             <TextBlock Text="MICROSOFT OFFICE" Foreground="#B9A77E" FontSize="10" FontWeight="Bold"/>
+             <TextBlock Name="ActivationOfficeStatus" Text="Not checked" Foreground="#F1EEE7" FontSize="21" FontWeight="Bold" Margin="0,5,0,2"/>
+             <TextBlock Name="ActivationOfficeEdition" Text="Product: —" Foreground="#D0CEC8" FontSize="11" TextWrapping="Wrap"/>
+             <TextBlock Name="ActivationOfficeDetails" Text="Office licensing information will appear after inspection." Foreground="#A9A79F" FontSize="10" Margin="0,7,0,0" TextWrapping="Wrap"/>
+            </StackPanel>
+            <Border Grid.Row="2" Grid.ColumnSpan="2" Background="#34363A" Height="1" Margin="0,14,0,0" VerticalAlignment="Bottom"/>
+           </Grid>
+          </Border>
+         </Grid>
+
+         <Border Grid.Row="2" Background="{DynamicResource ActivationOuterGlassBrush}" BorderBrush="{DynamicResource ActivationGlassEdgeBrush}" BorderThickness="1" CornerRadius="14" Padding="16" Margin="0,0,0,14">
+          <Border.Effect><DropShadowEffect Color="#000000" BlurRadius="14" ShadowDepth="4" Opacity="0.27"/></Border.Effect>
+          <StackPanel>
+           <Grid Margin="0,0,0,10">
+            <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+            <StackPanel>
+             <TextBlock Text="LICENSE DIAGNOSTICS" Foreground="#D0B77F" FontSize="11" FontWeight="Bold"/>
+             <TextBlock Text="Read-only inspection report" Foreground="#A9A79F" FontSize="10" Margin="0,3,0,0"/>
+            </StackPanel>
+            <TextBlock Name="ActivationLastScan" Grid.Column="1" Text="Last inspection: not yet run" Foreground="#AAA69B" FontSize="10" VerticalAlignment="Center" TextWrapping="Wrap" Margin="0,0,9,0"/>
+            <Button Name="ActivationCopyDiagnosticsIconBtn" Grid.Column="2" Content="⧉" Width="30" Height="28" Padding="0" Background="{DynamicResource ActivationInnerGlassBrush}" Foreground="#E8D8B5" BorderBrush="{DynamicResource ActivationGlassEdgeBrush}" BorderThickness="1" FontSize="16" FontWeight="SemiBold" Cursor="Hand" ToolTip="Copy the license diagnostic report"/>
+           </Grid>
+           <Border Background="{DynamicResource ActivationInsetGlassBrush}" BorderBrush="#686052" BorderThickness="1" CornerRadius="9" Padding="11">
+            <TextBox Name="ActivationDiagnostics" Text="Select Refresh Status to inspect the installed licensing records." IsReadOnly="True" TextWrapping="Wrap" AcceptsReturn="True" VerticalScrollBarVisibility="Auto" MinHeight="125" MaxHeight="245" Background="Transparent" Foreground="#D8D5CD" BorderThickness="0" FontFamily="Consolas" FontSize="10" Padding="2"/>
+           </Border>
+          </StackPanel>
+         </Border>
+
+         <Border Grid.Row="3" Background="{DynamicResource ActivationInnerGlassBrush}" BorderBrush="{DynamicResource ActivationGlassEdgeBrush}" BorderThickness="1" CornerRadius="14" Padding="16" Margin="0,0,0,14">
+          <Border.Effect><DropShadowEffect Color="#000000" BlurRadius="14" ShadowDepth="4" Opacity="0.27"/></Border.Effect>
+          <StackPanel>
+           <TextBlock Text="OFFICIAL MICROSOFT ACTIONS" Foreground="#D0B77F" FontSize="11" FontWeight="Bold" Margin="0,0,0,11"/>
+           <WrapPanel>
+            <Button Name="ActivationWindowsActivateBtn" Content="Activate Windows" Height="36" Padding="15,0" Margin="0,0,8,8" Background="#3B382F" Foreground="#EDE2C9" BorderBrush="#9C865A" FontWeight="SemiBold" Cursor="Hand" ToolTip="Runs Microsoft's built-in online activation request for an installed genuine license."/>
+            <Button Name="ActivationOfficeActivateBtn" Content="Activate Office" Height="36" Padding="15,0" Margin="0,0,8,8" Background="#3B382F" Foreground="#EDE2C9" BorderBrush="#9C865A" FontWeight="SemiBold" Cursor="Hand" ToolTip="Runs the installed Office licensing script's official activation command."/>
+            <Button Name="ActivationOpenSettingsBtn" Content="Windows Activation Settings" Height="34" Padding="13,0" Margin="0,0,8,8" Background="#34373B" Foreground="#D8D5CD" BorderBrush="#595B5E" Cursor="Hand"/>
+            <Button Name="ActivationOpenSluiBtn" Content="Windows License UI" Height="34" Padding="13,0" Margin="0,0,8,8" Background="#34373B" Foreground="#D8D5CD" BorderBrush="#595B5E" Cursor="Hand"/>
+            <Button Name="ActivationOpenOfficeBtn" Content="Open Office Apps" Height="34" Padding="13,0" Margin="0,0,8,8" Background="#34373B" Foreground="#D8D5CD" BorderBrush="#595B5E" Cursor="Hand"/>
+            <Button Name="ActivationCopyReportBtn" Content="Copy Report" Height="34" Padding="13,0" Margin="0,0,8,8" Background="#34373B" Foreground="#D8D5CD" BorderBrush="#595B5E" Cursor="Hand"/>
+            <Button Name="ActivationExportReportBtn" Content="Export Report" Height="34" Padding="13,0" Margin="0,0,8,8" Background="#34373B" Foreground="#D8D5CD" BorderBrush="#595B5E" Cursor="Hand"/>
+           </WrapPanel>
+           <TextBlock Name="ActivationTaskStatus" Text="Ready. Activation actions use Microsoft's installed licensing components and require a valid license." Foreground="#AAA69B" FontSize="10" TextWrapping="Wrap" Margin="0,4,0,0"/>
+           <TextBlock Text="KMS configuration is inspected for diagnostics only. No third-party activation, emulation, unauthorized KMS activation, or license-store modification is performed." Foreground="#89877F" FontSize="10" TextWrapping="Wrap" Margin="0,5,0,0"/>
+          </StackPanel>
+         </Border>
+         <TextBlock Grid.Row="4" Text="AMR LICENSE CENTER  •  READ-ONLY DIAGNOSTICS  •  MICROSOFT OFFICIAL ACTIVATION" Foreground="#77756F" FontSize="9" Margin="3,0,0,0"/>
+        </Grid>
+       </ScrollViewer>
+      </TabItem>
 </TabControl>
     </Grid>
    </TabItem>
@@ -4720,60 +4960,6 @@ Write-AMRLog ("Startup catalog ready: {0} preloaded icons from local cache. Cach
        </Grid>
        <TextBlock Name="SysResultsCount" Text="50 system tools" Foreground="#AEB8C8" Margin="0,0,0,12"/>
        <UniformGrid Name="SysToolsGrid" Columns="3"/>
-       <Border Background="#172536" BorderBrush="#34465B" BorderThickness="1" CornerRadius="10" Padding="14" Margin="0,18,0,8">
-        <StackPanel>
-      <Grid Margin="2,0,2,16">
-       <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-       <StackPanel>
-        <TextBlock Text="ACTIVATION CENTER" Foreground="#7DB7F0" FontSize="10" FontWeight="Bold"/>
-        <TextBlock Text="License &amp; Activation" Foreground="#F8FAFC" FontSize="26" FontWeight="Bold" Margin="0,4,0,2"/>
-        <TextBlock Text="Inspect Windows and Microsoft Office licensing, review status, and open official troubleshooting tools." Foreground="#94A3B8" FontSize="11" TextWrapping="Wrap"/>
-       </StackPanel>
-       <Button Name="ActivationRefreshBtn" Grid.Column="1" Content="↻  Refresh Status" Height="34" Padding="14,0" VerticalAlignment="Center" Background="#1E4264" Foreground="#FFFFFF" BorderBrush="#4B83B8" FontWeight="SemiBold"/>
-      </Grid>
-      <UniformGrid Columns="2" Margin="0,0,0,12">
-       <Border Background="#202A35" BorderBrush="#40566D" BorderThickness="1" CornerRadius="10" Padding="15" Margin="4">
-        <StackPanel>
-         <TextBlock Text="WINDOWS LICENSE" Foreground="#7DB7F0" FontSize="10" FontWeight="Bold"/>
-         <TextBlock Name="ActivationWindowsStatus" Text="Not checked" Foreground="#F8FAFC" FontSize="20" FontWeight="SemiBold" Margin="0,8,0,4"/>
-         <TextBlock Name="ActivationWindowsEdition" Text="Edition: —" Foreground="#CBD5E1" FontSize="11" TextWrapping="Wrap"/>
-         <TextBlock Name="ActivationWindowsDetails" Text="License details will appear after inspection." Foreground="#94A3B8" FontSize="10" Margin="0,5,0,0" TextWrapping="Wrap"/>
-        </StackPanel>
-       </Border>
-       <Border Background="#202A35" BorderBrush="#40566D" BorderThickness="1" CornerRadius="10" Padding="15" Margin="4">
-        <StackPanel>
-         <TextBlock Text="MICROSOFT OFFICE" Foreground="#7DB7F0" FontSize="10" FontWeight="Bold"/>
-         <TextBlock Name="ActivationOfficeStatus" Text="Not checked" Foreground="#F8FAFC" FontSize="20" FontWeight="SemiBold" Margin="0,8,0,4"/>
-         <TextBlock Name="ActivationOfficeEdition" Text="Product: —" Foreground="#CBD5E1" FontSize="11" TextWrapping="Wrap"/>
-         <TextBlock Name="ActivationOfficeDetails" Text="Office licensing information will appear after inspection." Foreground="#94A3B8" FontSize="10" Margin="0,5,0,0" TextWrapping="Wrap"/>
-        </StackPanel>
-       </Border>
-      </UniformGrid>
-      <Border Background="#181F2A" BorderBrush="#34465B" BorderThickness="1" CornerRadius="10" Padding="14" Margin="4,0,4,12">
-       <StackPanel>
-        <TextBlock Text="LICENSE DIAGNOSTICS" Foreground="#9CCCF5" FontSize="11" FontWeight="Bold" Margin="0,0,0,8"/>
-        <TextBox Name="ActivationDiagnostics" Text="Select Refresh Status to inspect the installed licensing records." IsReadOnly="True" TextWrapping="Wrap" AcceptsReturn="True" VerticalScrollBarVisibility="Auto" MinHeight="118" MaxHeight="220" Background="#0B1220" Foreground="#DCE7F3" BorderBrush="#40566D" FontFamily="Consolas" FontSize="10" Padding="9"/>
-       </StackPanel>
-      </Border>
-      <Border Background="#202027" BorderBrush="#383842" BorderThickness="1" CornerRadius="10" Padding="14" Margin="4,0,4,12">
-       <StackPanel>
-        <TextBlock Text="OFFICIAL TROUBLESHOOTING" Foreground="#9CCCF5" FontSize="11" FontWeight="Bold" Margin="0,0,0,9"/>
-        <WrapPanel>
-         <Button Name="ActivationWindowsActivateBtn" Content="Activate Windows (Genuine License)" Height="34" Padding="13,0" Margin="0,0,8,8" Background="#14532D" Foreground="#DCFCE7" BorderBrush="#22C55E" FontWeight="SemiBold" ToolTip="Runs Microsoft's built-in online activation request for an installed genuine license."/>
-         <Button Name="ActivationOfficeActivateBtn" Content="Activate Office (Genuine License)" Height="34" Padding="13,0" Margin="0,0,8,8" Background="#14532D" Foreground="#DCFCE7" BorderBrush="#22C55E" FontWeight="SemiBold" ToolTip="Runs the installed Office licensing script's official activation command."/>
-         <Button Name="ActivationOpenSettingsBtn" Content="Windows Activation Settings" Height="32" Padding="12,0" Margin="0,0,8,8" Background="#293746" Foreground="#C7DDF5" BorderBrush="#40566D"/>
-         <Button Name="ActivationOpenSluiBtn" Content="Windows License UI" Height="32" Padding="12,0" Margin="0,0,8,8" Background="#293746" Foreground="#C7DDF5" BorderBrush="#40566D"/>
-         <Button Name="ActivationOpenOfficeBtn" Content="Open Office Apps" Height="32" Padding="12,0" Margin="0,0,8,8" Background="#293746" Foreground="#C7DDF5" BorderBrush="#40566D"/>
-         <Button Name="ActivationCopyReportBtn" Content="Copy Report" Height="32" Padding="12,0" Margin="0,0,8,8" Background="#293746" Foreground="#C7DDF5" BorderBrush="#40566D"/>
-         <Button Name="ActivationExportReportBtn" Content="Export Report" Height="32" Padding="12,0" Margin="0,0,8,8" Background="#293746" Foreground="#C7DDF5" BorderBrush="#40566D"/>
-        </WrapPanel>
-        <TextBlock Name="ActivationTaskStatus" Text="Ready. Activation actions use Microsoft's installed licensing components and require a valid license." Foreground="#94A3B8" FontSize="10" TextWrapping="Wrap" Margin="0,3,0,0"/>
-        <TextBlock Text="KMS settings are inspected for diagnostics only. No third-party activation, emulation, unauthorized KMS activation, or license-store modification is performed." Foreground="#94A3B8" FontSize="10" TextWrapping="Wrap" Margin="0,3,0,0"/>
-       </StackPanel>
-      </Border>
-      <TextBlock Name="ActivationLastScan" Text="Last inspection: not yet run" Foreground="#64748B" FontSize="10" Margin="6,0,0,0"/>
-        </StackPanel>
-       </Border>
       </StackPanel>
      </Border>
     </ScrollViewer>
@@ -5757,9 +5943,32 @@ Write-AMRLog ("Startup catalog ready: {0} preloaded icons from local cache. Cach
 </Window>
 '@
 
+# Set the explicit application identity before WPF creates the main Window.
+# Windows uses this process identity when creating the taskbar button; setting it
+# after the Window object exists can leave the button grouped under powershell.exe.
+try {
+    if (-not ('AMR.AppIdentity' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+namespace AMR { public static class AppIdentity {
+    [DllImport("shell32.dll", CharSet=CharSet.Unicode, PreserveSig=true)]
+    public static extern int SetCurrentProcessExplicitAppUserModelID(string appId);
+} }
+'@
+    }
+    $amrAppIdResult = [AMR.AppIdentity]::SetCurrentProcessExplicitAppUserModelID('AMR.WindowsUtility')
+    if ($amrAppIdResult -lt 0) {
+        throw ('SetCurrentProcessExplicitAppUserModelID failed: 0x{0:X8}' -f $amrAppIdResult)
+    }
+} catch {
+    try { Write-AMRLog ("Could not set early taskbar application identity: {0}" -f $_.Exception.Message) WARNING System } catch {}
+}
+
 # --- 5. Window & Controls Mapping ---
 $reader = New-Object System.Xml.XmlNodeReader $xaml
 $script:Window = [Windows.Markup.XamlReader]::Load($reader)
+$script:AMRStartupPhaseTimings['XamlLoadedMs'] = [int]$script:AMRStartupStopwatch.ElapsedMilliseconds
 
 # --- AMR application identity: custom icon + restrained Windows glass caption ---
 # The icon is embedded so the online launcher remains a single-script download.
@@ -5774,22 +5983,112 @@ try {
     try { Write-AMRLog ("Could not load AMR window icon: {0}" -f $_.Exception.Message) WARNING System } catch {}
 }
 
-# Give Windows Explorer/Taskbar a stable application identity instead of grouping
-# the WPF window under the generic PowerShell host icon where supported.
+# Apply the same embedded AMR icon to the native window handle. This keeps the
+# title-bar icon and the taskbar button icon consistent with the early AppUserModelID.
 try {
-    if (-not ('AMR.AppIdentity' -as [type])) {
+    Add-Type -AssemblyName System.Drawing
+    if (-not ('AMR.NativeWindowIcon' -as [type])) {
         Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
-namespace AMR { public static class AppIdentity {
-    [DllImport("shell32.dll", CharSet=CharSet.Unicode, PreserveSig=true)]
-    public static extern int SetCurrentProcessExplicitAppUserModelID(string appId);
+namespace AMR { public static class NativeWindowIcon {
+    [DllImport("user32.dll", CharSet=CharSet.Auto, SetLastError=true)]
+    public static extern IntPtr SendMessage(IntPtr hWnd, UInt32 Msg, IntPtr wParam, IntPtr lParam);
 } }
 '@
     }
-    [void][AMR.AppIdentity]::SetCurrentProcessExplicitAppUserModelID('AMR.WindowsUtility')
+    # A window hosted by powershell.exe needs a window-level AppUserModelID.
+    # Supply its explicit relaunch icon BEFORE assigning that ID; otherwise the
+    # Shell can fall back to the host executable's (PowerShell) icon.
+    if (-not ('AMR.WindowTaskbarIdentity' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+
+namespace AMR {
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct PropertyKey {
+        public Guid FormatId;
+        public UInt32 PropertyId;
+        public PropertyKey(Guid formatId, UInt32 propertyId) { FormatId = formatId; PropertyId = propertyId; }
+    }
+
+    [StructLayout(LayoutKind.Explicit, Size=16)]
+    internal struct PropVariant {
+        [FieldOffset(0)] public UInt16 VarType;
+        [FieldOffset(8)] public IntPtr PointerValue;
+    }
+
+    [ComImport, Guid("886D8EEB-8CF2-4446-8D02-CDBA1DBDCF99"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    internal interface IPropertyStore {
+        UInt32 GetCount();
+        void GetAt(UInt32 propertyIndex, out PropertyKey key);
+        void GetValue(ref PropertyKey key, out PropVariant value);
+        void SetValue(ref PropertyKey key, ref PropVariant value);
+        void Commit();
+    }
+
+    public static class WindowTaskbarIdentity {
+        private static readonly Guid PropertyStoreIid = new Guid("886D8EEB-8CF2-4446-8D02-CDBA1DBDCF99");
+        private static readonly Guid AppUserModelGuid = new Guid("9F4C2855-9F79-4B39-A8D0-E1D42DE1D5F3");
+        [DllImport("shell32.dll", PreserveSig=true)]
+        private static extern int SHGetPropertyStoreForWindow(IntPtr hwnd, ref Guid riid, out IPropertyStore propertyStore);
+        [DllImport("ole32.dll")] private static extern int PropVariantClear(ref PropVariant value);
+
+        private static void SetString(IPropertyStore store, PropertyKey key, string text) {
+            IntPtr memory = Marshal.StringToCoTaskMemUni(text);
+            PropVariant value = new PropVariant();
+            value.VarType = 31; // VT_LPWSTR
+            value.PointerValue = memory;
+            try { store.SetValue(ref key, ref value); }
+            finally { PropVariantClear(ref value); }
+        }
+
+        public static int SetWindowAppUserModelId(IntPtr hwnd, string appId, string iconResource) {
+            if (hwnd == IntPtr.Zero || String.IsNullOrWhiteSpace(appId) || String.IsNullOrWhiteSpace(iconResource))
+                return unchecked((int)0x80070057);
+            IPropertyStore store = null;
+            try {
+                Guid iid = PropertyStoreIid;
+                int hr = SHGetPropertyStoreForWindow(hwnd, ref iid, out store);
+                if (hr < 0) return hr;
+                // PKEY_AppUserModel_RelaunchIconResource (PID 3) must be set before PID 5.
+                SetString(store, new PropertyKey(AppUserModelGuid, 3), iconResource);
+                SetString(store, new PropertyKey(AppUserModelGuid, 5), appId); // PKEY_AppUserModel_ID
+                return 0;
+            } catch (COMException ex) { return ex.ErrorCode; }
+              catch { return unchecked((int)0x80004005); }
+            finally { if (store != null) Marshal.ReleaseComObject(store); }
+        }
+    }
+}
+'@
+    }
+    $script:AMRSmallWindowIcon = New-Object System.Drawing.Icon($amrIconPath, 16, 16)
+    $script:AMRLargeWindowIcon = New-Object System.Drawing.Icon($amrIconPath, 32, 32)
+    $script:Window.Add_SourceInitialized({
+        param($sender, $eventArgs)
+        try {
+            $nativeHandle = (New-Object System.Windows.Interop.WindowInteropHelper($script:Window)).Handle
+            if ($nativeHandle -ne [IntPtr]::Zero) {
+                $amrTaskbarIconResource = '{0},0' -f $amrIconPath
+                $windowAppIdResult = [AMR.WindowTaskbarIdentity]::SetWindowAppUserModelId($nativeHandle, 'AMR.WindowsUtility', $amrTaskbarIconResource)
+                if ($windowAppIdResult -lt 0) {
+                    throw ('Setting AMR taskbar identity/icon failed: 0x{0:X8}' -f $windowAppIdResult)
+                }
+                if ($script:AMRSmallWindowIcon) {
+                    [void][AMR.NativeWindowIcon]::SendMessage($nativeHandle, 0x0080, [IntPtr]::Zero, $script:AMRSmallWindowIcon.Handle)
+                }
+                if ($script:AMRLargeWindowIcon) {
+                    [void][AMR.NativeWindowIcon]::SendMessage($nativeHandle, 0x0080, [IntPtr]::One, $script:AMRLargeWindowIcon.Handle)
+                }
+            }
+        } catch {
+            try { Write-AMRLog ("Could not apply native AMR window/taskbar icons: {0}" -f $_.Exception.Message) WARNING System } catch {}
+        }
+    }.GetNewClosure())
 } catch {
-    try { Write-AMRLog ("Could not set taskbar application identity: {0}" -f $_.Exception.Message) WARNING System } catch {}
+    try { Write-AMRLog ("Could not prepare native AMR window/taskbar icons: {0}" -f $_.Exception.Message) WARNING System } catch {}
 }
 
 # Ask DWM for a dark, subtle acrylic system caption on Windows versions that support it.
@@ -5830,7 +6129,104 @@ namespace AMR { public static class DwmCaption {
     try { Write-AMRLog ("DWM caption styling could not initialize: {0}" -f $_.Exception.Message) INFO System } catch {}
 }
 
-function C { param([string]$Name) return $script:Window.FindName($Name) }
+function C {
+    param([string]$Name)
+    if ($Name -eq 'SoftwareGrid') {
+        $catalogGrid = $script:Window.FindName('SoftwareGrid')
+        $activeGrid = $catalogGrid
+        if ($script:ShowInstalledOnly -and $script:InstalledSoftwareGrid) {
+            $activeGrid = $script:InstalledSoftwareGrid
+        }
+        # Keep two independent ItemsControl instances alive. Swapping the
+        # ScrollViewer content preserves each view's own generated card tree,
+        # bindings, and realized containers instead of rebinding one grid twice.
+        $scrollHost = $script:Window.FindName('SoftwareScrollViewer')
+        if ($scrollHost -and $activeGrid -and -not [object]::ReferenceEquals($scrollHost.Content, $activeGrid)) {
+            $scrollHost.Content = $activeGrid
+        }
+        return $activeGrid
+    }
+    return $script:Window.FindName($Name)
+}
+
+# Create a dedicated Installed ItemsControl using the exact catalog templates.
+# The two grids share immutable WPF templates, but never share ItemsSource or
+# generated visual containers. This is intentionally initialized once.
+try {
+    $script:SoftwareCatalogGrid = $script:Window.FindName('SoftwareGrid')
+    $script:InstalledSoftwareGrid = New-Object System.Windows.Controls.ItemsControl
+    $script:InstalledSoftwareGrid.ItemTemplate = $script:SoftwareCatalogGrid.ItemTemplate
+    $script:InstalledSoftwareGrid.ItemsPanel = $script:SoftwareCatalogGrid.ItemsPanel
+    $script:InstalledSoftwareGrid.ItemTemplateSelector = $script:SoftwareCatalogGrid.ItemTemplateSelector
+    $script:InstalledSoftwareGrid.ItemContainerStyle = $script:SoftwareCatalogGrid.ItemContainerStyle
+    $script:InstalledSoftwareGrid.ItemStringFormat = $script:SoftwareCatalogGrid.ItemStringFormat
+    $script:InstalledSoftwareGrid.AlternationCount = $script:SoftwareCatalogGrid.AlternationCount
+    $script:InstalledSoftwareGrid.FlowDirection = $script:SoftwareCatalogGrid.FlowDirection
+    $script:InstalledSoftwareGrid.Margin = $script:SoftwareCatalogGrid.Margin
+    $script:InstalledSoftwareGrid.Background = $script:SoftwareCatalogGrid.Background
+    $script:InstalledSoftwareGrid.HorizontalContentAlignment = $script:SoftwareCatalogGrid.HorizontalContentAlignment
+    $script:InstalledSoftwareGrid.VerticalContentAlignment = $script:SoftwareCatalogGrid.VerticalContentAlignment
+    $script:InstalledSoftwareGrid.SnapsToDevicePixels = $script:SoftwareCatalogGrid.SnapsToDevicePixels
+    $script:InstalledSoftwareGrid.UseLayoutRounding = $script:SoftwareCatalogGrid.UseLayoutRounding
+    $script:InstalledSoftwareGrid.ItemsSource = New-Object 'System.Collections.ObjectModel.ObservableCollection[object]'
+    $script:InstalledSoftwareGrid.Name = 'AMRInstalledSoftwareGrid'
+    $script:InstalledSoftwareGrid.Uid = 'AMR_INSTALLED_SURFACE_V1'
+    Write-AMRLog 'Created independent catalog and Installed visual surfaces; each retains its own WPF card containers.' INFO Software
+} catch {
+    $script:InstalledSoftwareGrid = $null
+    Write-AMRLog ('Independent Installed visual surface could not initialize; shared-grid fallback remains active: ' + $_.Exception.Message) WARNING Software
+}
+
+# Software App Management Console: matching the primary-navigation hover glow/scale.
+# Presentation-only: preserves each button's existing colors, content, sizing and handlers.
+function Set-AMRSoftwareConsoleButtonHoverMotion {
+    param([System.Windows.Controls.Button]$Button)
+    if (-not $Button) { return }
+
+    $Button.RenderTransformOrigin = [System.Windows.Point]::new(0.5,0.5)
+    $scale = New-Object System.Windows.Media.ScaleTransform(1.0,1.0)
+    $Button.RenderTransform = $scale
+
+    $glow = New-Object System.Windows.Media.Effects.DropShadowEffect
+    $glow.Color = [System.Windows.Media.Color]::FromRgb(56,189,248) # #38BDF8, same as main navigation
+    $glow.BlurRadius = 8
+    $glow.ShadowDepth = 0
+    $glow.Opacity = 0.10
+    $Button.Effect = $glow
+
+    $scaleRef = $scale
+    $glowRef = $glow
+    $Button.Add_MouseEnter({
+        $up = [System.Windows.Media.Animation.DoubleAnimation]::new(1.0,1.055,[System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(135)))
+        $up.FillBehavior = [System.Windows.Media.Animation.FillBehavior]::HoldEnd
+        $scaleRef.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleXProperty,$up)
+        $scaleRef.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleYProperty,$up)
+        $shine = [System.Windows.Media.Animation.DoubleAnimation]::new(0.10,0.58,[System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(150)))
+        $glowRef.BeginAnimation([System.Windows.Media.Effects.DropShadowEffect]::OpacityProperty,$shine)
+    }.GetNewClosure())
+
+    $Button.Add_MouseLeave({
+        $down = [System.Windows.Media.Animation.DoubleAnimation]::new(1.055,1.0,[System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(145)))
+        $scaleRef.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleXProperty,$down)
+        $scaleRef.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleYProperty,$down)
+        $dim = [System.Windows.Media.Animation.DoubleAnimation]::new(0.58,0.10,[System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(160)))
+        $glowRef.BeginAnimation([System.Windows.Media.Effects.DropShadowEffect]::OpacityProperty,$dim)
+    }.GetNewClosure())
+}
+
+# Apply only to the six App Management Console actions; Uninstall is wired while collapsed,
+# so it receives the same hover treatment whenever the existing logic makes it visible.
+foreach ($softwareConsoleButtonName in @(
+    'DeselectAllBtn',
+    'RepairSelectedBtn',
+    'UninstallSelectedBtn',
+    'UpdateSelectedBtn',
+    'InstallInteractiveBtn',
+    'InstallSelectedBtn'
+)) {
+    Set-AMRSoftwareConsoleButtonHoverMotion -Button (C $softwareConsoleButtonName)
+}
+
 
 
 # Toolkit Tweaks UX: compact information affordances and a restrained check animation.
@@ -5943,6 +6339,8 @@ foreach ($tweakName in $script:AMRBasicInfoNames) {
 
 
 # --- Activation Center | native Microsoft licensing inspection and licensed activation ---
+$script:AMRActivationScanState = [hashtable]::Synchronized(@{ PowerShell = $null; Runspace = $null; Async = $null; Timer = $null; StartedAt = $null; Stage = ''; LastLoggedStage = ''; WindowsStatus = $null; WindowsEdition = $null; WindowsDetails = $null; OfficeStatus = $null; OfficeEdition = $null; OfficeDetails = $null; Report = $null; Completed = $null })
+$script:AMRActivationStartedAt = $null
 # Design note: this module uses Windows Software Protection Platform (SPP),
 # slmgr.vbs, and the installed Office OSPP.vbs only. It does not implement
 # third-party activation, emulation, license-store patching, or bypass logic.
@@ -5964,58 +6362,164 @@ function Get-AMRLicenseStateLabel {
 }
 
 function Get-AMROfficeOsppPath {
-    $roots = @($env:ProgramFiles, ${env:ProgramFiles(x86)}, $env:ProgramW6432) | Where-Object { $_ } | Select-Object -Unique
+    # Discover OSPP from common 32/64-bit layouts and Click-to-Run registry data.
+    $roots = @($env:ProgramW6432, $env:ProgramFiles, ${env:ProgramFiles(x86)}) |
+        Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } |
+        Select-Object -Unique
     $candidates = New-Object System.Collections.Generic.List[string]
+
     foreach ($root in $roots) {
         foreach ($relative in @(
             'Microsoft Office\root\Office16\OSPP.VBS',
             'Microsoft Office\Office16\OSPP.VBS',
             'Microsoft Office\Office15\OSPP.VBS',
-            'Microsoft Office\Office14\OSPP.VBS'
-        )) { $candidates.Add((Join-Path $root $relative)) }
+            'Microsoft Office\Office14\OSPP.VBS',
+            'Common Files\Microsoft Shared\OfficeSoftwareProtectionPlatform\OSPP.VBS'
+        )) {
+            try { $candidates.Add((Join-Path $root $relative)) } catch {}
+        }
     }
-    foreach ($candidate in $candidates) {
+
+    foreach ($registryPath in @(
+        'HKLM:\SOFTWARE\Microsoft\Office\ClickToRun\Configuration',
+        'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Office\ClickToRun\Configuration'
+    )) {
+        try {
+            if (Test-Path -LiteralPath $registryPath) {
+                $configuration = Get-ItemProperty -LiteralPath $registryPath -ErrorAction Stop
+                foreach ($propertyName in @('InstallationPath','ClientFolder')) {
+                    $installPath = [string]$configuration.$propertyName
+                    if (-not [string]::IsNullOrWhiteSpace($installPath)) {
+                        foreach ($relative in @('root\Office16\OSPP.VBS','Office16\OSPP.VBS')) {
+                            $candidates.Add((Join-Path $installPath $relative))
+                        }
+                    }
+                }
+            }
+        } catch {}
+    }
+
+    foreach ($candidate in ($candidates | Select-Object -Unique)) {
         if (Test-Path -LiteralPath $candidate -PathType Leaf) { return $candidate }
     }
     return $null
 }
 
+function Set-AMRActivationRefreshAnimation {
+    param([Parameter(Mandatory=$true)][bool]$Running)
+    $button = C 'ActivationRefreshBtn'
+    if (-not $button) { return }
+
+    # Reuse the same glyph/button transform structure as Overview and Performance.
+    if (-not ($button.Content -is [System.Windows.Controls.StackPanel])) {
+        Set-AMRRefreshButtonVisual -Button $button -Label 'Refresh Status'
+    }
+    $glyph = $null
+    if ($button.Content -is [System.Windows.Controls.StackPanel] -and $button.Content.Children.Count -gt 0) {
+        $glyph = $button.Content.Children[0]
+    }
+    if (-not $glyph) { return }
+    $script:AMRActivationRefreshGlyph = $glyph
+
+    if (-not ($glyph.RenderTransform -is [System.Windows.Media.RotateTransform])) {
+        $glyph.RenderTransformOrigin = [System.Windows.Point]::new(0.5,0.5)
+        $glyph.RenderTransform = [System.Windows.Media.RotateTransform]::new(0)
+    }
+    if ($Running) {
+        # Continuous, smooth rotation while the diagnostic worker is genuinely running.
+        $spin = [System.Windows.Media.Animation.DoubleAnimation]::new(0,360,[System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(900)))
+        $spin.RepeatBehavior = [System.Windows.Media.Animation.RepeatBehavior]::Forever
+        # DoubleAnimation uses linear interpolation by default; no easing class is required.
+        $glyph.RenderTransform.BeginAnimation([System.Windows.Media.RotateTransform]::AngleProperty,$spin,[System.Windows.Media.Animation.HandoffBehavior]::SnapshotAndReplace)
+        $button.IsEnabled = $false
+        $button.Opacity = 0.88
+    } else {
+        $glyph.RenderTransform.BeginAnimation([System.Windows.Media.RotateTransform]::AngleProperty,$null)
+        $glyph.RenderTransform.Angle = 0
+        $button.IsEnabled = $true
+        $button.Opacity = 1.0
+    }
+}
 function Update-AMRActivationStatus {
-    # IMPORTANT: WMI/CIM and registry discovery must never run on the WPF dispatcher.
-    # Start a background job and return immediately; only the short UI update runs on the dispatcher.
-    if ($script:AMRActivationScanJob -and $script:AMRActivationScanJob.State -in @('NotStarted','Running')) {
+    # Run all CIM/registry/service inspection in a dedicated PowerShell runspace.
+    # This avoids Start-Job's child-process/serialization dependency in the WPF host.
+    $scanState = $script:AMRActivationScanState
+    if ($scanState.Async) {
         $status = C 'ActivationTaskStatus'
-        if ($status) { $status.Text = 'Activation diagnostics are already running…' }
+        if ($status) { $status.Text = 'Activation diagnostics are already running or their result is being finalized…' }
         return
     }
 
     $winStatus = C 'ActivationWindowsStatus'
     $officeStatus = C 'ActivationOfficeStatus'
     $taskStatus = C 'ActivationTaskStatus'
+    $reportControl = C 'ActivationDiagnostics'
+    if (-not $winStatus -or -not $officeStatus -or -not $taskStatus -or -not $reportControl) {
+        $missing = @()
+        if (-not $winStatus) { $missing += 'ActivationWindowsStatus' }
+        if (-not $officeStatus) { $missing += 'ActivationOfficeStatus' }
+        if (-not $taskStatus) { $missing += 'ActivationTaskStatus' }
+        if (-not $reportControl) { $missing += 'ActivationDiagnostics' }
+        $reason = 'Activation UI controls were not found: ' + ($missing -join ', ')
+        try { Write-AMRLog $reason ERROR Activation } catch {}
+        if ($taskStatus) { $taskStatus.Text = $reason }
+        return
+    }
+    try { Write-AMRLog 'Activation diagnostics requested; initializing dedicated inspection worker.' INFO Activation } catch {}
     if ($winStatus) { $winStatus.Text = 'Checking…' }
-    if ($officeStatus) { $officeStatus.Text = 'Checking…' }
-    if ($taskStatus) { $taskStatus.Text = 'Collecting licensing information in background…' }
+    if ($officeStatus) { $officeStatus.Text = 'Waiting for Windows scan…' }
+    $scanState.WindowsStatus = $null
+    $scanState.WindowsEdition = $null
+    $scanState.WindowsDetails = $null
+    $scanState.OfficeStatus = $null
+    $scanState.OfficeEdition = $null
+    $scanState.OfficeDetails = $null
+    $scanState.Report = $null
+    $scanState.Completed = $null
+    $scanState.LastLoggedStage = ''
+    if ($taskStatus) { $taskStatus.Text = 'Starting licensing inspection…' }
+    $initialReport = C 'ActivationDiagnostics'
+    if ($initialReport) { $initialReport.Text = "AMR ACTIVATION & LICENSE DIAGNOSTICS`r`nInspection started. Results will appear as each licensing check completes." }
+    $progress = C 'ActivationScanProgress'
+    if ($progress) { $progress.Visibility = [Windows.Visibility]::Visible }
+    Set-AMRActivationRefreshAnimation -Running $true
 
     try {
-        $script:AMRActivationScanJob = Start-Job -ScriptBlock {
+        $workerScript = {
+            param($sharedState)
             $ErrorActionPreference = 'Continue'
+            if ($sharedState) { $sharedState.Stage = 'Preparing licensing inspection…' }
             $lines = New-Object System.Collections.Generic.List[string]
-            $lines.Add('AMR ACTIVATION & LICENSE DIAGNOSTICS')
-            $lines.Add(('Inspection time: {0}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')))
-            $lines.Add(('Computer: {0}' -f $env:COMPUTERNAME))
-            $lines.Add('Inspection mode: read-only. Full product keys and account credentials are never collected.')
-            $lines.Add('')
+            [void]$lines.Add('AMR ACTIVATION & LICENSE DIAGNOSTICS')
+            [void]$lines.Add(('Inspection time: {0}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')))
+            [void]$lines.Add(('Computer: {0}' -f $env:COMPUTERNAME))
+            [void]$lines.Add('Inspection mode: read-only. Full product keys and account credentials are never collected.')
+            [void]$lines.Add('')
 
+            if ($sharedState) { $sharedState.Stage = 'Inspecting Windows edition and license records…' }
             $winLabel = 'Unknown'
             $winEditionText = 'Edition: unavailable'
             $winDetailsText = 'Windows licensing information is unavailable.'
             try {
-                $os = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop
+                $os = Get-CimInstance -ClassName Win32_OperatingSystem -OperationTimeoutSec 15 -ErrorAction Stop
                 $winEditionText = ('Edition: {0} | Version {1} | Build {2}' -f $os.Caption,$os.Version,$os.BuildNumber)
                 # Filter at the CIM provider so the entire SoftwareLicensingProduct class is not
                 # transferred to PowerShell and enumerated on the UI thread.
-                $winLicenses = @(Get-CimInstance -ClassName SoftwareLicensingProduct -Filter "ApplicationID='55c92734-d682-4d71-983e-d6ec3f16059f' AND PartialProductKey IS NOT NULL" -ErrorAction Stop)
-                $winLicenses = @($winLicenses | Sort-Object -Property LicenseStatus -Descending)
+                $windowsApplicationId = '55c92734-d682-4d71-983e-d6ec3f16059f'
+                $winLicenses = @(Get-CimInstance -ClassName SoftwareLicensingProduct -Filter "ApplicationID='$windowsApplicationId' AND PartialProductKey IS NOT NULL" -OperationTimeoutSec 20 -ErrorAction Stop)
+                $windowsQueryFallbackUsed = $false
+                if ($winLicenses.Count -eq 0) {
+                    # Some entitlement/digital-license states may not expose a partial key.
+                    # Retry within the Windows SPP application only; never mix Office records.
+                    $fallbackRecords = @(Get-CimInstance -ClassName SoftwareLicensingProduct -Filter "ApplicationID='$windowsApplicationId'" -OperationTimeoutSec 20 -ErrorAction Stop)
+                    $winLicenses = @($fallbackRecords | Where-Object {
+                        ([string]$_.Name -match '(?i)Windows') -or
+                        ([string]$_.Description -match '(?i)Windows|Operating System')
+                    })
+                    $windowsQueryFallbackUsed = ($winLicenses.Count -gt 0)
+                }
+                $winPriority = @{ 1=0; 5=1; 4=2; 2=3; 3=4; 6=5; 0=6 }
+                $winLicenses = @($winLicenses | Sort-Object @{ Expression = { if ($winPriority.ContainsKey([int]$_.LicenseStatus)) { $winPriority[[int]$_.LicenseStatus] } else { 99 } } })
                 $activeWin = $winLicenses | Where-Object { [int]$_.LicenseStatus -eq 1 } | Select-Object -First 1
                 $selectedWin = if ($activeWin) { $activeWin } elseif ($winLicenses.Count -gt 0) { $winLicenses[0] } else { $null }
                 if ($selectedWin) {
@@ -6034,35 +6538,45 @@ function Update-AMRActivationStatus {
                     $winLabel = 'Not detected'
                     $winDetailsText = 'No Windows license record with an installed partial product key was returned.'
                 }
-                $lines.Add('WINDOWS')
-                $lines.Add($winEditionText)
-                $lines.Add(('Detected license records: {0}' -f $winLicenses.Count))
+                [void]$lines.Add('WINDOWS')
+                [void]$lines.Add($winEditionText)
+                [void]$lines.Add(('Detected license records: {0}' -f $winLicenses.Count))
+                if ($windowsQueryFallbackUsed) { [void]$lines.Add('Note: Windows SPP fallback query was used because no record with a partial key was returned.') }
                 if ($selectedWin) {
-                    $lines.Add(('Selected status: {0} ({1})' -f $winLabel,$selectedWin.LicenseStatus))
-                    $lines.Add(('Product: {0}' -f $selectedWin.Name))
-                    $lines.Add(('Description: {0}' -f $selectedWin.Description))
-                    $lines.Add(('Channel: {0}' -f $selectedWin.ProductKeyChannel))
-                    $lines.Add(('Installed key suffix: {0}' -f $selectedWin.PartialProductKey))
-                    if ($selectedWin.GracePeriodRemaining) { $lines.Add(('Grace remaining (minutes): {0}' -f $selectedWin.GracePeriodRemaining)) }
+                    [void]$lines.Add(('Selected status: {0} ({1})' -f $winLabel,$selectedWin.LicenseStatus))
+                    [void]$lines.Add(('Product: {0}' -f $selectedWin.Name))
+                    [void]$lines.Add(('Description: {0}' -f $selectedWin.Description))
+                    [void]$lines.Add(('Channel: {0}' -f $selectedWin.ProductKeyChannel))
+                    [void]$lines.Add(('Installed key suffix: {0}' -f $selectedWin.PartialProductKey))
+                    if ($selectedWin.GracePeriodRemaining) { [void]$lines.Add(('Grace remaining (minutes): {0}' -f $selectedWin.GracePeriodRemaining)) }
                     foreach ($license in ($winLicenses | Select-Object -First 12)) {
-                        $lines.Add(('  - {0} | status {1} | {2} | key ending {3}' -f $license.Name,$license.LicenseStatus,$license.ProductKeyChannel,$license.PartialProductKey))
+                        [void]$lines.Add(('  - {0} | status {1} | {2} | key ending {3}' -f $license.Name,$license.LicenseStatus,$license.ProductKeyChannel,$license.PartialProductKey))
                     }
                 }
             } catch {
                 $winLabel = 'Unavailable'
                 $winDetailsText = $_.Exception.Message
-                $lines.Add(('WINDOWS INSPECTION ERROR: {0}' -f $_.Exception.Message))
+                [void]$lines.Add(('WINDOWS INSPECTION ERROR: {0}' -f $_.Exception.Message))
+            }
+            if ($sharedState) {
+                $sharedState.WindowsStatus = $winLabel
+                $sharedState.WindowsEdition = $winEditionText
+                $sharedState.WindowsDetails = $winDetailsText
             }
 
-            $lines.Add('')
-            $lines.Add('MICROSOFT OFFICE (SPP-BASED LICENSE RECORDS)')
+            if ($sharedState) { $sharedState.Stage = 'Inspecting Microsoft Office license records…' }
+            [void]$lines.Add('')
+            [void]$lines.Add('MICROSOFT OFFICE (SPP-BASED LICENSE RECORDS)')
             $officeLabel = 'Not detected'
             $officeEditionText = 'Product: Not detected'
             $officeDetailsText = 'No SPP-based Office license record detected.'
+            $officeLicenseQuerySucceeded = $false
             try {
                 $officeAppId = '0ff1ce15-a989-479d-af46-f275c6370663'
-                $officeLicenses = @(Get-CimInstance -ClassName SoftwareLicensingProduct -Filter "ApplicationID='$officeAppId' AND PartialProductKey IS NOT NULL" -ErrorAction Stop)
-                $officeLicenses = @($officeLicenses | Sort-Object -Property LicenseStatus -Descending)
+                $officeLicenses = @(Get-CimInstance -ClassName SoftwareLicensingProduct -Filter "ApplicationID='$officeAppId' AND PartialProductKey IS NOT NULL" -OperationTimeoutSec 20 -ErrorAction Stop)
+                $officeLicenseQuerySucceeded = $true
+                $officePriority = @{ 1=0; 5=1; 4=2; 2=3; 3=4; 6=5; 0=6 }
+                $officeLicenses = @($officeLicenses | Sort-Object @{ Expression = { if ($officePriority.ContainsKey([int]$_.LicenseStatus)) { $officePriority[[int]$_.LicenseStatus] } else { 99 } } })
                 $activeOffice = $officeLicenses | Where-Object { [int]$_.LicenseStatus -eq 1 } | Select-Object -First 1
                 $selectedOffice = if ($activeOffice) { $activeOffice } elseif ($officeLicenses.Count -gt 0) { $officeLicenses[0] } else { $null }
                 if ($selectedOffice) {
@@ -6078,27 +6592,30 @@ function Update-AMRActivationStatus {
                     }
                     $officeEditionText = ('Product: {0}' -f $selectedOffice.Name)
                     $officeDetailsText = ('Channel: {0} | Key ending: {1} | {2} record(s)' -f $selectedOffice.ProductKeyChannel,$selectedOffice.PartialProductKey,$officeLicenses.Count)
-                    $lines.Add(('Detected license records: {0}' -f $officeLicenses.Count))
-                    $lines.Add(('Selected status: {0} ({1})' -f $officeLabel,$selectedOffice.LicenseStatus))
-                    $lines.Add(('Product: {0}' -f $selectedOffice.Name))
-                    $lines.Add(('Description: {0}' -f $selectedOffice.Description))
-                    $lines.Add(('Channel: {0}' -f $selectedOffice.ProductKeyChannel))
-                    $lines.Add(('Installed key suffix: {0}' -f $selectedOffice.PartialProductKey))
+                    [void]$lines.Add(('Detected license records: {0}' -f $officeLicenses.Count))
+                    [void]$lines.Add(('Selected status: {0} ({1})' -f $officeLabel,$selectedOffice.LicenseStatus))
+                    [void]$lines.Add(('Product: {0}' -f $selectedOffice.Name))
+                    [void]$lines.Add(('Description: {0}' -f $selectedOffice.Description))
+                    [void]$lines.Add(('Channel: {0}' -f $selectedOffice.ProductKeyChannel))
+                    [void]$lines.Add(('Installed key suffix: {0}' -f $selectedOffice.PartialProductKey))
                     foreach ($license in ($officeLicenses | Select-Object -First 12)) {
-                        $lines.Add(('  - {0} | status {1} | {2} | key ending {3}' -f $license.Name,$license.LicenseStatus,$license.ProductKeyChannel,$license.PartialProductKey))
+                        [void]$lines.Add(('  - {0} | status {1} | {2} | key ending {3}' -f $license.Name,$license.LicenseStatus,$license.ProductKeyChannel,$license.PartialProductKey))
                     }
                 } else {
-                    $lines.Add('No matching Office SPP licensing record was detected.')
-                    $lines.Add('Microsoft 365 subscription entitlement may require a separate signed-in account check.')
+                    [void]$lines.Add('No matching Office SPP licensing record was detected.')
+                    [void]$lines.Add('Microsoft 365 subscription entitlement may require a separate signed-in account check.')
                 }
             } catch {
                 $officeLabel = 'Unavailable'
                 $officeDetailsText = $_.Exception.Message
-                $lines.Add(('OFFICE INSPECTION ERROR: {0}' -f $_.Exception.Message))
+                [void]$lines.Add(('OFFICE INSPECTION ERROR: {0}' -f $_.Exception.Message))
             }
 
-            $lines.Add('')
-            $lines.Add('OFFICE INSTALLATION DISCOVERY')
+            if ($sharedState) { $sharedState.Stage = 'Checking Office installation and subscription indicators…' }
+            [void]$lines.Add('')
+            [void]$lines.Add('OFFICE INSTALLATION DISCOVERY')
+            $officeInstallDetected = $false
+            $officeDetectedProduct = $null
             try {
                 $officeRoots = @(
                     'HKLM:\SOFTWARE\Microsoft\Office\ClickToRun\Configuration',
@@ -6110,11 +6627,13 @@ function Update-AMRActivationStatus {
                         $cfg = Get-ItemProperty -LiteralPath $officeRoot -ErrorAction SilentlyContinue
                         if ($cfg) {
                             $officeFound = $true
-                            $lines.Add(('Click-to-Run registry: {0}' -f $officeRoot))
+                            $officeInstallDetected = $true
+                            if (-not $officeDetectedProduct -and $cfg.ProductReleaseIds) { $officeDetectedProduct = [string]$cfg.ProductReleaseIds }
+                            [void]$lines.Add(('Click-to-Run registry: {0}' -f $officeRoot))
                             foreach ($field in @('ProductReleaseIds','Platform','VersionToReport','InstallationPath','ClientCulture')) {
                                 $value = $cfg.$field
                                 if ($null -ne $value -and -not [string]::IsNullOrWhiteSpace([string]$value)) {
-                                    $lines.Add(('  {0}: {1}' -f $field,$value))
+                                    [void]$lines.Add(('  {0}: {1}' -f $field,$value))
                                 }
                             }
                         }
@@ -6130,25 +6649,40 @@ function Update-AMRActivationStatus {
                             $app = Get-ItemProperty -LiteralPath $entry.PSPath -ErrorAction SilentlyContinue
                             if ($app -and [string]$app.DisplayName -match '(?i)Microsoft (Office|365|Visio|Project)') {
                                 $officeFound = $true
-                                $lines.Add(('Installed product: {0} | Version: {1} | Publisher: {2}' -f $app.DisplayName,$app.DisplayVersion,$app.Publisher))
+                                $officeInstallDetected = $true
+                                if (-not $officeDetectedProduct) { $officeDetectedProduct = [string]$app.DisplayName }
+                                [void]$lines.Add(('Installed product: {0} | Version: {1} | Publisher: {2}' -f $app.DisplayName,$app.DisplayVersion,$app.Publisher))
                             }
                         }
                     }
                 }
-                if (-not $officeFound) { $lines.Add('No standard Click-to-Run or Office uninstall registry entry was detected.') }
-            } catch { $lines.Add(('Office installation discovery warning: {0}' -f $_.Exception.Message)) }
+                if (-not $officeFound) { [void]$lines.Add('No standard Click-to-Run or Office uninstall registry entry was detected.') }
+                if ($officeInstallDetected -and $officeLicenseQuerySucceeded -and $officeLicenses.Count -eq 0) {
+                    $officeLabel = 'Installed - account status unknown'
+                    $officeEditionText = if ($officeDetectedProduct) { 'Product: ' + $officeDetectedProduct } else { 'Product: Office installation detected' }
+                    $officeDetailsText = 'Office is installed, but no SPP license record was found. Microsoft 365 account or subscription entitlement cannot be confirmed by this local inspection.'
+                    [void]$lines.Add('Office installation was detected without a matching SPP license record.')
+                    [void]$lines.Add('Subscription/account entitlement was not verified. Sign in to an Office app and check Account > Product Information.')
+                }
+            } catch { [void]$lines.Add(('Office installation discovery warning: {0}' -f $_.Exception.Message)) }
+            if ($sharedState) {
+                $sharedState.OfficeStatus = $officeLabel
+                $sharedState.OfficeEdition = $officeEditionText
+                $sharedState.OfficeDetails = $officeDetailsText
+            }
 
-            $lines.Add('')
-            $lines.Add('LICENSING SERVICES')
+            if ($sharedState) { $sharedState.Stage = 'Checking Windows licensing services and configuration…' }
+            [void]$lines.Add('')
+            [void]$lines.Add('LICENSING SERVICES')
             foreach ($serviceName in @('sppsvc','ClipSVC','LicenseManager')) {
                 try {
                     $svc = Get-Service -Name $serviceName -ErrorAction Stop
-                    $lines.Add(('  {0}: {1} | Start type: {2}' -f $serviceName,$svc.Status,$svc.StartType))
-                } catch { $lines.Add(('  {0}: Not available ({1})' -f $serviceName,$_.Exception.Message)) }
+                    [void]$lines.Add(('  {0}: {1} | Start type: {2}' -f $serviceName,$svc.Status,$svc.StartType))
+                } catch { [void]$lines.Add(('  {0}: Not available ({1})' -f $serviceName,$_.Exception.Message)) }
             }
 
-            $lines.Add('')
-            $lines.Add('KMS CONFIGURATION INSPECTION (READ-ONLY)')
+            [void]$lines.Add('')
+            [void]$lines.Add('KMS CONFIGURATION INSPECTION (READ-ONLY)')
             $kmsRoots = @(
                 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\SoftwareProtectionPlatform',
                 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\CurrentVersion\Software Protection Platform',
@@ -6163,20 +6697,34 @@ function Update-AMRActivationStatus {
                             $value = $kms.$field
                             if ($null -ne $value -and -not [string]::IsNullOrWhiteSpace([string]$value)) {
                                 $kmsFound = $true
-                                $lines.Add(('  {0} = {1} ({2})' -f $field,$value,$kmsRoot))
+                                [void]$lines.Add(('  {0} = {1} ({2})' -f $field,$value,$kmsRoot))
                             }
                         }
                     }
                 }
             }
-            if (-not $kmsFound) { $lines.Add('No explicit KMS host or port override was found in the inspected registry locations.') }
-            $lines.Add('  Note: A configured KMS endpoint is configuration only; it is not proof of legitimacy or misuse.')
-            $lines.Add('')
-            $lines.Add('NOTES')
-            $lines.Add('- This report is diagnostic and does not prove ownership of a license.')
-            $lines.Add('- Activation requests use installed Microsoft licensing components only.')
-            $lines.Add('- No full product key or account credential is read or stored.')
+            if (-not $kmsFound) { [void]$lines.Add('No explicit KMS host or port override was found in the inspected registry locations.') }
+            [void]$lines.Add('  Note: A configured KMS endpoint is configuration only; it is not proof of legitimacy or misuse.')
+            [void]$lines.Add('')
+            [void]$lines.Add('NOTES')
+            [void]$lines.Add('- This report is diagnostic and does not prove ownership of a license.')
+            [void]$lines.Add('- Activation requests use installed Microsoft licensing components only.')
+            [void]$lines.Add('- No full product key or account credential is read or stored.')
+            if ($sharedState) { $sharedState.Stage = 'Finalizing licensing report…' }
 
+            $finalReport = ($lines -join [Environment]::NewLine)
+            $completedAt = Get-Date -Format 'HH:mm:ss'
+            if ($sharedState) {
+                $sharedState.WindowsStatus = $winLabel
+                $sharedState.WindowsEdition = $winEditionText
+                $sharedState.WindowsDetails = $winDetailsText
+                $sharedState.OfficeStatus = $officeLabel
+                $sharedState.OfficeEdition = $officeEditionText
+                $sharedState.OfficeDetails = $officeDetailsText
+                $sharedState.Report = $finalReport
+                $sharedState.Completed = $completedAt
+                $sharedState.Stage = 'Applying licensing results to the interface…'
+            }
             [pscustomobject]@{
                 WindowsStatus = $winLabel
                 WindowsEdition = $winEditionText
@@ -6184,74 +6732,237 @@ function Update-AMRActivationStatus {
                 OfficeStatus = $officeLabel
                 OfficeEdition = $officeEditionText
                 OfficeDetails = $officeDetailsText
-                Report = ($lines -join [Environment]::NewLine)
-                Completed = (Get-Date -Format 'HH:mm:ss')
+                Report = $finalReport
+                Completed = $completedAt
             }
         }
+        # Use an explicitly owned runspace instead of relying on an implicit host default.
+        # This makes worker startup, polling, timeout and disposal deterministic.
+        $workerRunspace = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace()
+        $workerRunspace.ApartmentState = [System.Threading.ApartmentState]::MTA
+        $workerRunspace.ThreadOptions = [System.Management.Automation.Runspaces.PSThreadOptions]::ReuseThread
+        $workerRunspace.Open()
 
-        if (-not $script:AMRActivationScanTimer) {
-            $script:AMRActivationScanTimer = New-Object Windows.Threading.DispatcherTimer
-            $script:AMRActivationScanTimer.Interval = [TimeSpan]::FromMilliseconds(500)
-            $script:AMRActivationScanTimer.Add_Tick({
-                $job = $script:AMRActivationScanJob
-                if (-not $job) { $script:AMRActivationScanTimer.Stop(); return }
-                if ($job.State -in @('Completed','Failed','Stopped')) {
-                    $script:AMRActivationScanTimer.Stop()
+        $workerPowerShell = [System.Management.Automation.PowerShell]::Create()
+        $workerPowerShell.Runspace = $workerRunspace
+        [void]$workerPowerShell.AddScript($workerScript.ToString())
+        [void]$workerPowerShell.AddArgument($scanState)
+        $scanState.PowerShell = $workerPowerShell
+        $scanState.Runspace = $workerRunspace
+        $scanState.Stage = 'Starting licensing inspection…'
+        $scanState.StartedAt = Get-Date
+        $workerAsync = $workerPowerShell.BeginInvoke()
+        $scanState.Async = $workerAsync
+        try { Write-AMRLog 'Activation inspection worker started successfully.' INFO Activation } catch {}
+
+        if (-not $scanState.Timer) {
+            $windowRef = $script:Window
+            $getActivationControl = { param([string]$Name) $windowRef.FindName($Name) }.GetNewClosure()
+            $scanState.Timer = New-Object Windows.Threading.DispatcherTimer
+            $scanState.Timer.Interval = [TimeSpan]::FromMilliseconds(350)
+            $scanState.Timer.Add_Tick(({
+                if (-not $scanState.Async) {
+                    $scanState.Timer.Stop()
+                    return
+                }
+
+                $stageControl = & $getActivationControl 'ActivationTaskStatus'
+                if ($stageControl -and -not [string]::IsNullOrWhiteSpace([string]$scanState.Stage)) {
+                    $stageControl.Text = [string]$scanState.Stage
+                }
+                if (-not [string]::IsNullOrWhiteSpace([string]$scanState.Stage) -and [string]$scanState.LastLoggedStage -ne [string]$scanState.Stage) {
+                    $scanState.LastLoggedStage = [string]$scanState.Stage
+                    try { Write-AMRLog ('Activation stage: ' + [string]$scanState.Stage) INFO Activation } catch {}
+                }
+                if (-not [string]::IsNullOrWhiteSpace([string]$scanState.WindowsStatus)) {
+                    $liveWindows = & $getActivationControl 'ActivationWindowsStatus'
+                    $liveWindowsEdition = & $getActivationControl 'ActivationWindowsEdition'
+                    $liveWindowsDetails = & $getActivationControl 'ActivationWindowsDetails'
+                    if ($liveWindows) {
+                        $liveWindows.Text = [string]$scanState.WindowsStatus
+                        $liveWindows.Foreground = if ($scanState.WindowsStatus -eq 'Licensed') { [Windows.Media.Brushes]::LightGreen } elseif ($scanState.WindowsStatus -match 'Unavailable|Unknown|Not detected') { [Windows.Media.Brushes]::DarkGray } else { [Windows.Media.Brushes]::Khaki }
+                    }
+                    if ($liveWindowsEdition) { $liveWindowsEdition.Text = [string]$scanState.WindowsEdition }
+                    if ($liveWindowsDetails) { $liveWindowsDetails.Text = [string]$scanState.WindowsDetails }
+                }
+                if (-not [string]::IsNullOrWhiteSpace([string]$scanState.OfficeStatus)) {
+                    $liveOffice = & $getActivationControl 'ActivationOfficeStatus'
+                    $liveOfficeEdition = & $getActivationControl 'ActivationOfficeEdition'
+                    $liveOfficeDetails = & $getActivationControl 'ActivationOfficeDetails'
+                    if ($liveOffice) {
+                        $liveOffice.Text = [string]$scanState.OfficeStatus
+                        $liveOffice.Foreground = if ($scanState.OfficeStatus -eq 'Licensed') { [Windows.Media.Brushes]::LightGreen } elseif ($scanState.OfficeStatus -match 'Unavailable|Unknown|Not detected') { [Windows.Media.Brushes]::DarkGray } else { [Windows.Media.Brushes]::Khaki }
+                    }
+                    if ($liveOfficeEdition) { $liveOfficeEdition.Text = [string]$scanState.OfficeEdition }
+                    if ($liveOfficeDetails) { $liveOfficeDetails.Text = [string]$scanState.OfficeDetails }
+                }
+
+                # Guard against a stuck WMI/CIM provider so the UI never remains
+                # permanently in the animated "checking" state.
+                if (-not $scanState.Async.IsCompleted -and $scanState.StartedAt -and ((Get-Date) - $scanState.StartedAt).TotalSeconds -gt 120) {
+                    try { $scanState.PowerShell.Stop() } catch {}
+                    $scanState.Timer.Stop()
+                    Set-AMRActivationRefreshAnimation -Running $false
+                    $progressControl = & $getActivationControl 'ActivationScanProgress'
+                    if ($progressControl) { $progressControl.Visibility = [Windows.Visibility]::Collapsed }
+                    $timeoutText = 'The licensing inspection timed out after 120 seconds. A Windows licensing provider may be unresponsive; try Refresh again.'
+                    $taskControl = & $getActivationControl 'ActivationTaskStatus'
+                    $windowsControl = & $getActivationControl 'ActivationWindowsStatus'
+                    $officeControl = & $getActivationControl 'ActivationOfficeStatus'
+                    $reportControl = & $getActivationControl 'ActivationDiagnostics'
+                    if ($taskControl) { $taskControl.Text = $timeoutText }
+                    if ($windowsControl) { $windowsControl.Text = 'Inspection timed out' }
+                    if ($officeControl) { $officeControl.Text = 'Inspection timed out' }
+                    if ($reportControl) { $reportControl.Text = "AMR ACTIVATION & LICENSE DIAGNOSTICS`r`n$timeoutText" }
+                    try { Write-AMRLog $timeoutText WARNING Activation } catch {}
+                    try { $scanState.PowerShell.Dispose() } catch {}
+                    try { if ($scanState.Runspace) { $scanState.Runspace.Close(); $scanState.Runspace.Dispose() } } catch {}
+                    $scanState.PowerShell = $null
+                    $scanState.Runspace = $null
+                    $scanState.Async = $null
+                    $scanState.StartedAt = $null
+                    $scanState.Stage = ''
+                    return
+                }
+
+                if ($scanState.Async.IsCompleted) {
+                    $scanState.Timer.Stop()
+                    Set-AMRActivationRefreshAnimation -Running $false
+                    $progressControl = & $getActivationControl 'ActivationScanProgress'
+                    if ($progressControl) { $progressControl.Visibility = [Windows.Visibility]::Collapsed }
+
                     try {
-                        $result = @(Receive-Job -Job $job -ErrorAction SilentlyContinue)
-                        if ($job.State -eq 'Completed' -and $result.Count -gt 0) {
-                            $data = $result[-1]
-                            $w = C 'ActivationWindowsStatus'
-                            $we = C 'ActivationWindowsEdition'
-                            $wd = C 'ActivationWindowsDetails'
-                            $o = C 'ActivationOfficeStatus'
-                            $oe = C 'ActivationOfficeEdition'
-                            $od = C 'ActivationOfficeDetails'
-                            $r = C 'ActivationDiagnostics'
-                            $last = C 'ActivationLastScan'
-                            if ($w) { $w.Text = [string]$data.WindowsStatus; $w.Foreground = if ($data.WindowsStatus -eq 'Licensed') { [Windows.Media.Brushes]::LightGreen } else { [Windows.Media.Brushes]::White } }
+                        $workerErrors = @()
+                        $result = @($scanState.PowerShell.EndInvoke($scanState.Async))
+                        try {
+                            $workerErrors = @($scanState.PowerShell.Streams.Error | ForEach-Object { $_.ToString() })
+                        } catch {}
+                        $data = $null
+                        for ($resultIndex = $result.Count - 1; $resultIndex -ge 0; $resultIndex--) {
+                            if ($null -ne $result[$resultIndex] -and $null -ne $result[$resultIndex].PSObject.Properties['WindowsStatus']) {
+                                $data = $result[$resultIndex]
+                                break
+                            }
+                        }
+                        if (-not $data -and $null -ne $scanState.WindowsStatus -and $null -ne $scanState.OfficeStatus) {
+                            $data = [pscustomobject]@{
+                                WindowsStatus = $scanState.WindowsStatus
+                                WindowsEdition = $scanState.WindowsEdition
+                                WindowsDetails = $scanState.WindowsDetails
+                                OfficeStatus = $scanState.OfficeStatus
+                                OfficeEdition = $scanState.OfficeEdition
+                                OfficeDetails = $scanState.OfficeDetails
+                                Report = $scanState.Report
+                                Completed = $scanState.Completed
+                            }
+                            try { Write-AMRLog 'Activation result restored from synchronized worker state after pipeline output was empty.' WARNING Activation } catch {}
+                        }
+
+                        if ($data) {
+                            $w = & $getActivationControl 'ActivationWindowsStatus'
+                            $we = & $getActivationControl 'ActivationWindowsEdition'
+                            $wd = & $getActivationControl 'ActivationWindowsDetails'
+                            $o = & $getActivationControl 'ActivationOfficeStatus'
+                            $oe = & $getActivationControl 'ActivationOfficeEdition'
+                            $od = & $getActivationControl 'ActivationOfficeDetails'
+                            $r = & $getActivationControl 'ActivationDiagnostics'
+                            $last = & $getActivationControl 'ActivationLastScan'
+                            if ($w) {
+                                $w.Text = [string]$data.WindowsStatus
+                                $w.Foreground = if ($data.WindowsStatus -eq 'Licensed') { [Windows.Media.Brushes]::LightGreen } elseif ($data.WindowsStatus -match 'Unavailable|Unknown|Not detected') { [Windows.Media.Brushes]::DarkGray } else { [Windows.Media.Brushes]::Khaki }
+                            }
                             if ($we) { $we.Text = [string]$data.WindowsEdition }
                             if ($wd) { $wd.Text = [string]$data.WindowsDetails }
-                            if ($o) { $o.Text = [string]$data.OfficeStatus; $o.Foreground = if ($data.OfficeStatus -eq 'Licensed') { [Windows.Media.Brushes]::LightGreen } else { [Windows.Media.Brushes]::White } }
+                            if ($o) {
+                                $o.Text = [string]$data.OfficeStatus
+                                $o.Foreground = if ($data.OfficeStatus -eq 'Licensed') { [Windows.Media.Brushes]::LightGreen } elseif ($data.OfficeStatus -match 'Unavailable|Unknown|Not detected') { [Windows.Media.Brushes]::DarkGray } else { [Windows.Media.Brushes]::Khaki }
+                            }
                             if ($oe) { $oe.Text = [string]$data.OfficeEdition }
                             if ($od) { $od.Text = [string]$data.OfficeDetails }
-                            if ($r) { $r.Text = [string]$data.Report }
-                            if ($last) { $last.Text = ('Last inspection: {0}' -f $data.Completed) }
-                            $t = C 'ActivationTaskStatus'
-                            if ($t) { $t.Text = 'Diagnostics completed.' }
-                            try { Write-AMRLog 'Activation diagnostics completed in background.' INFO Activation } catch { }
-                        } else {
-                            $reason = 'Background diagnostic job failed without a result.'
-                            try {
-                                if ($job.ChildJobs.Count -gt 0 -and $job.ChildJobs[0].JobStateInfo.Reason) {
-                                    $reason = $job.ChildJobs[0].JobStateInfo.Reason.Message
+                            if ($r) {
+                                $r.Text = if (-not [string]::IsNullOrWhiteSpace([string]$data.Report)) { [string]$data.Report } else {
+                                    'AMR ACTIVATION & LICENSE DIAGNOSTICS' + [Environment]::NewLine +
+                                    'The worker returned license states but did not publish the detailed report.' + [Environment]::NewLine +
+                                    ('Windows: {0} | {1}' -f $data.WindowsStatus,$data.WindowsDetails) + [Environment]::NewLine +
+                                    ('Office: {0} | {1}' -f $data.OfficeStatus,$data.OfficeDetails)
                                 }
-                            } catch { }
-                            $t = C 'ActivationTaskStatus'
+                                if ($workerErrors.Count -gt 0) {
+                                    $r.Text += [Environment]::NewLine + [Environment]::NewLine + 'PROVIDER WARNINGS' + [Environment]::NewLine + ($workerErrors -join [Environment]::NewLine)
+                                }
+                            }
+                            if ($last) { $last.Text = ('Last inspection: {0}' -f $data.Completed) }
+                            $t = & $getActivationControl 'ActivationTaskStatus'
+                            $taskText = if ($workerErrors.Count -gt 0) { 'Diagnostics completed with provider warnings. See the report.' } else { 'Diagnostics completed.' }
+                            if ($t) { $t.Text = $taskText }
+                            try { Write-AMRLog ('Activation diagnostics applied to UI. Windows={0}; Office={1}; Completed={2}' -f $data.WindowsStatus,$data.OfficeStatus,$data.Completed) SUCCESS Activation } catch {}
+                        } else {
+                            $reason = if ($workerErrors.Count -gt 0) { $workerErrors -join ' | ' } elseif ($scanState.Stage) { 'Worker completed without publishing Windows/Office states. Last stage: ' + [string]$scanState.Stage } else { 'The background runspace completed without returning the expected diagnostic object or shared state.' }
+                            $t = & $getActivationControl 'ActivationTaskStatus'
+                            $w = & $getActivationControl 'ActivationWindowsStatus'
+                            $o = & $getActivationControl 'ActivationOfficeStatus'
+                            $r = & $getActivationControl 'ActivationDiagnostics'
                             if ($t) { $t.Text = ('Diagnostics failed: {0}' -f $reason) }
-                            try { Write-AMRLog ('Activation diagnostics failed: ' + $reason) WARNING Activation } catch { }
+                            if ($w) { $w.Text = 'Scan failed' }
+                            if ($o) { $o.Text = 'Scan failed' }
+                            if ($r) { $r.Text = "AMR ACTIVATION & LICENSE DIAGNOSTICS`r`nInspection failed.`r`nReason: $reason" }
+                            try { Write-AMRLog ('Activation diagnostics failed: ' + $reason) WARNING Activation } catch {}
                         }
                     } catch {
-                        $t = C 'ActivationTaskStatus'
-                        if ($t) { $t.Text = ('Could not apply diagnostic results: {0}' -f $_.Exception.Message) }
+                        $reason = $_.Exception.Message
+                        $t = & $getActivationControl 'ActivationTaskStatus'
+                        $r = & $getActivationControl 'ActivationDiagnostics'
+                        if ($t) { $t.Text = ('Could not apply diagnostic results: {0}' -f $reason) }
+                        if ($r) { $r.Text = "AMR ACTIVATION & LICENSE DIAGNOSTICS`r`nCould not apply inspection results.`r`nReason: $reason" }
+                        try { Write-AMRLog ('Could not apply activation results: ' + $reason) ERROR Activation } catch {}
+                    } finally {
+                        try { $scanState.PowerShell.Dispose() } catch {}
+                        try { if ($scanState.Runspace) { $scanState.Runspace.Close(); $scanState.Runspace.Dispose() } } catch {}
+                        $scanState.PowerShell = $null
+                        $scanState.Runspace = $null
+                        $scanState.Async = $null
+                        $scanState.StartedAt = $null
+                        $scanState.Stage = ''
                     }
-                    Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
-                    $script:AMRActivationScanJob = $null
                 }
-            }.GetNewClosure())
+            }).GetNewClosure())
         }
-        $script:AMRActivationScanTimer.Start()
+        $scanState.Timer.Start()
     } catch {
-        $script:AMRActivationScanJob = $null
-        if ($taskStatus) { $taskStatus.Text = ('Could not start background diagnostics: {0}' -f $_.Exception.Message) }
-        try { Write-AMRLog ("Activation background scan could not start: {0}" -f $_.Exception.Message) WARNING Activation } catch { }
+        try { if ($scanState.PowerShell) { $scanState.PowerShell.Dispose() } } catch {}
+        try { if ($scanState.Runspace) { $scanState.Runspace.Close(); $scanState.Runspace.Dispose() } } catch {}
+        $scanState.PowerShell = $null
+        $scanState.Runspace = $null
+        $scanState.Async = $null
+        $scanState.StartedAt = $null
+        $scanState.Stage = ''
+        Set-AMRActivationRefreshAnimation -Running $false
+        $progress = C 'ActivationScanProgress'
+        if ($progress) { $progress.Visibility = [Windows.Visibility]::Collapsed }
+        $reason = $_.Exception.Message
+        if ($taskStatus) { $taskStatus.Text = ('Diagnostics could not start: {0}' -f $reason) }
+        if ($winStatus) { $winStatus.Text = 'Scan failed' }
+        if ($officeStatus) { $officeStatus.Text = 'Scan failed' }
+        $report = C 'ActivationDiagnostics'
+        if ($report) { $report.Text = "AMR ACTIVATION & LICENSE DIAGNOSTICS`r`nCould not start inspection.`r`nReason: $reason" }
+        try { Write-AMRLog ("Activation background scan could not start: {0}" -f $reason) WARNING Activation } catch {}
     }
 }
 
 function Start-AMRActivationOperation {
     param([ValidateSet('Windows','Office')][string]$Target)
-    if ($script:AMRActivationJob -and $script:AMRActivationJob.State -in @('Running','NotStarted')) {
-        [System.Windows.MessageBox]::Show('An activation task is already running. Wait for it to finish.','AMR Activation','OK','Information') | Out-Null
+    if ($script:AMRActivationJob) {
+        [System.Windows.MessageBox]::Show('An activation task is running or its result is being finalized. Wait for the current task to finish.','AMR Activation','OK','Information') | Out-Null
+        return
+    }
+    try {
+        $currentIdentity = [Security.Principal.WindowsIdentity]::GetCurrent()
+        $currentPrincipal = New-Object Security.Principal.WindowsPrincipal($currentIdentity)
+        $isAdministrator = $currentPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    } catch { $isAdministrator = $false }
+    if (-not $isAdministrator) {
+        $status = C 'ActivationTaskStatus'
+        if ($status) { $status.Text = 'Activation requires an elevated AMR session. Close AMR and run it as Administrator, then retry.' }
+        [System.Windows.MessageBox]::Show('Windows and Office activation requests require Administrator privileges. Close AMR, run it as Administrator, and try again.','AMR Activation','OK','Warning') | Out-Null
         return
     }
     $title = if ($Target -eq 'Windows') { 'Windows online activation' } else { 'Office online activation' }
@@ -6260,7 +6971,9 @@ function Start-AMRActivationOperation {
 
     $status = C 'ActivationTaskStatus'
     if ($status) { $status.Text = ('{0} request running in the background…' -f $Target) }
-    $script:AMRActivationJob = Start-Job -ArgumentList $Target -ScriptBlock {
+    try {
+        $script:AMRActivationStartedAt = Get-Date
+        $script:AMRActivationJob = Start-Job -ArgumentList $Target -ScriptBlock {
         param($ActivationTarget)
         $ErrorActionPreference = 'Stop'
         if ($ActivationTarget -eq 'Windows') {
@@ -6272,16 +6985,40 @@ function Start-AMRActivationOperation {
             $roots = @($env:ProgramFiles, ${env:ProgramFiles(x86)}, $env:ProgramW6432) | Where-Object { $_ } | Select-Object -Unique
             $ospp = $null
             foreach ($root in $roots) {
-                foreach ($relative in @('Microsoft Office\root\Office16\OSPP.VBS','Microsoft Office\Office16\OSPP.VBS','Microsoft Office\Office15\OSPP.VBS','Microsoft Office\Office14\OSPP.VBS')) {
+                foreach ($relative in @('Microsoft Office\root\Office16\OSPP.VBS','Microsoft Office\Office16\OSPP.VBS','Microsoft Office\Office15\OSPP.VBS','Microsoft Office\Office14\OSPP.VBS','Common Files\Microsoft Shared\OfficeSoftwareProtectionPlatform\OSPP.VBS')) {
                     $candidate = Join-Path $root $relative
                     if (Test-Path -LiteralPath $candidate -PathType Leaf) { $ospp=$candidate; break }
                 }
                 if ($ospp) { break }
             }
+            if (-not $ospp) {
+                foreach ($registryPath in @('HKLM:\SOFTWARE\Microsoft\Office\ClickToRun\Configuration','HKLM:\SOFTWARE\WOW6432Node\Microsoft\Office\ClickToRun\Configuration')) {
+                    try {
+                        if (Test-Path -LiteralPath $registryPath) {
+                            $configuration = Get-ItemProperty -LiteralPath $registryPath -ErrorAction Stop
+                            $installPath = [string]$configuration.InstallationPath
+                            if ($installPath) {
+                                foreach ($relative in @('root\Office16\OSPP.VBS','Office16\OSPP.VBS')) {
+                                    $candidate = Join-Path $installPath $relative
+                                    if (Test-Path -LiteralPath $candidate -PathType Leaf) { $ospp = $candidate; break }
+                                }
+                            }
+                        }
+                    } catch {}
+                    if ($ospp) { break }
+                }
+            }
             if (-not $ospp) { throw 'Office OSPP.VBS was not found. This Office installation may use subscription-based activation or a different deployment layout.' }
             $output = & cscript.exe //nologo $ospp /act 2>&1 | Out-String
             [pscustomobject]@{ Target='Office'; ExitCode=$LASTEXITCODE; Output=$output.Trim(); Completed=(Get-Date).ToString('yyyy-MM-dd HH:mm:ss') }
         }
+        }
+    } catch {
+        $script:AMRActivationJob = $null
+        $script:AMRActivationStartedAt = $null
+        if ($status) { $status.Text = ('Could not start {0} activation request: {1}' -f $Target,$_.Exception.Message) }
+        try { Write-AMRLog (('Could not start {0} activation request: ' -f $Target) + $_.Exception.Message) WARNING Activation } catch { }
+        return
     }
     if (-not $script:AMRActivationPollTimer) {
         $script:AMRActivationPollTimer = New-Object Windows.Threading.DispatcherTimer
@@ -6289,6 +7026,18 @@ function Start-AMRActivationOperation {
         $script:AMRActivationPollTimer.Add_Tick({
             $job = $script:AMRActivationJob
             if (-not $job) { $script:AMRActivationPollTimer.Stop(); return }
+            if ($script:AMRActivationStartedAt -and ((Get-Date) - $script:AMRActivationStartedAt).TotalSeconds -gt 300 -and $job.State -notin @('Completed','Failed','Stopped')) {
+                try { Stop-Job -Job $job -ErrorAction SilentlyContinue } catch {}
+                try { Remove-Job -Job $job -Force -ErrorAction SilentlyContinue } catch {}
+                $script:AMRActivationJob = $null
+                $script:AMRActivationStartedAt = $null
+                $script:AMRActivationPollTimer.Stop()
+                $timeoutStatus = C 'ActivationTaskStatus'
+                if ($timeoutStatus) { $timeoutStatus.Text = 'Activation request timed out after 5 minutes. Refresh license status and check network connectivity, system time, and Microsoft activation services.' }
+                try { Write-AMRLog 'Activation request timed out after 300 seconds.' WARNING Activation } catch {}
+                Update-AMRActivationStatus
+                return
+            }
             if ($job.State -in @('Completed','Failed','Stopped')) {
                 $script:AMRActivationPollTimer.Stop()
                 $taskStatus = C 'ActivationTaskStatus'
@@ -6296,7 +7045,13 @@ function Start-AMRActivationOperation {
                     $result = @(Receive-Job -Job $job -ErrorAction SilentlyContinue)
                     if ($job.State -eq 'Completed' -and $result.Count -gt 0) {
                         $item = $result[-1]
-                        $summary = ('{0} request finished (exit code {1}) at {2}.' -f $item.Target,$item.ExitCode,$item.Completed)
+                        $summary = if ($null -eq $item.ExitCode) {
+                            ('{0} activation command returned no process exit code at {1}. Review the diagnostic output below.' -f $item.Target,$item.Completed)
+                        } elseif ([int]$item.ExitCode -eq 0) {
+                            ('{0} activation command completed (exit code 0) at {1}. Re-check the license status; command completion alone does not prove activation.' -f $item.Target,$item.Completed)
+                        } else {
+                            ('{0} activation command returned exit code {1} at {2}. Review the diagnostic output below.' -f $item.Target,$item.ExitCode,$item.Completed)
+                        }
                         if ($taskStatus) { $taskStatus.Text = $summary }
                         $diag = C 'ActivationDiagnostics'
                         if ($diag) { $diag.Text += [Environment]::NewLine + [Environment]::NewLine + 'ACTIVATION REQUEST RESULT' + [Environment]::NewLine + $summary + [Environment]::NewLine + $item.Output }
@@ -6309,16 +7064,71 @@ function Start-AMRActivationOperation {
                 } catch { if ($taskStatus) { $taskStatus.Text = ('Could not read activation result: {0}' -f $_.Exception.Message) } }
                 Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
                 $script:AMRActivationJob = $null
+                $script:AMRActivationStartedAt = $null
                 Update-AMRActivationStatus
             }
-        }.GetNewClosure())
+        })
     }
     $script:AMRActivationPollTimer.Start()
 }
 
+# Activation copy-button micro-interactions: restrained hover lift and press feedback.
+function Set-AMRActivationCopyButtonMotion {
+    param([System.Windows.Controls.Button]$Button)
+    if (-not $Button) { return }
+
+    $Button.RenderTransformOrigin = [System.Windows.Point]::new(0.5,0.5)
+    $scale = New-Object System.Windows.Media.ScaleTransform(1.0,1.0)
+    $Button.RenderTransform = $scale
+
+    $glow = New-Object System.Windows.Media.Effects.DropShadowEffect
+    $glow.Color = [System.Windows.Media.Color]::FromRgb(226,166,91)
+    $glow.BlurRadius = 7
+    $glow.ShadowDepth = 0
+    $glow.Opacity = 0.12
+    $Button.Effect = $glow
+
+    $scaleRef = $scale
+    $glowRef = $glow
+
+    $Button.Add_MouseEnter({
+        $up = [System.Windows.Media.Animation.DoubleAnimation]::new(1.0,1.055,[System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(135)))
+        $up.FillBehavior = [System.Windows.Media.Animation.FillBehavior]::HoldEnd
+        $scaleRef.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleXProperty,$up)
+        $scaleRef.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleYProperty,$up)
+        $shine = [System.Windows.Media.Animation.DoubleAnimation]::new(0.12,0.62,[System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(150)))
+        $glowRef.BeginAnimation([System.Windows.Media.Effects.DropShadowEffect]::OpacityProperty,$shine)
+    }.GetNewClosure())
+
+    $Button.Add_MouseLeave({
+        $down = [System.Windows.Media.Animation.DoubleAnimation]::new(1.055,1.0,[System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(145)))
+        $scaleRef.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleXProperty,$down)
+        $scaleRef.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleYProperty,$down)
+        $dim = [System.Windows.Media.Animation.DoubleAnimation]::new(0.62,0.12,[System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(160)))
+        $glowRef.BeginAnimation([System.Windows.Media.Effects.DropShadowEffect]::OpacityProperty,$dim)
+    }.GetNewClosure())
+}
+
+function Invoke-AMRActivationCopyButtonFeedback {
+    param([System.Windows.Controls.Button]$Button)
+    if (-not $Button -or -not ($Button.RenderTransform -is [System.Windows.Media.ScaleTransform])) { return }
+    $scale = $Button.RenderTransform
+    # A quick press-and-release pop; it does not alter the button's layout or content.
+    $press = [System.Windows.Media.Animation.DoubleAnimation]::new(0.93,1.0,[System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(175)))
+    $press.EasingFunction = [System.Windows.Media.Animation.QuadraticEase]::new()
+    $press.EasingFunction.EasingMode = [System.Windows.Media.Animation.EasingMode]::EaseOut
+    $scale.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleXProperty,$press)
+    $scale.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleYProperty,$press)
+    $effect = $Button.Effect
+    if ($effect -is [System.Windows.Media.Effects.DropShadowEffect]) {
+        $pulse = [System.Windows.Media.Animation.DoubleAnimation]::new(0.9,0.28,[System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(210)))
+        $effect.BeginAnimation([System.Windows.Media.Effects.DropShadowEffect]::OpacityProperty,$pulse)
+    }
+}
+
 try {
     $refreshActivation = C 'ActivationRefreshBtn'
-    if ($refreshActivation) { $refreshActivation.Add_Click({ Update-AMRActivationStatus }) }
+    if ($refreshActivation) { $refreshActivation.Add_Click({ Start-AMRRefreshButtonAnimation -Button (C 'ActivationRefreshBtn'); Update-AMRActivationStatus }) }
     $openActivationSettings = C 'ActivationOpenSettingsBtn'
     if ($openActivationSettings) { $openActivationSettings.Add_Click({ try { Start-Process 'ms-settings:activation' } catch { [System.Windows.MessageBox]::Show($_.Exception.Message,'AMR Activation','OK','Warning') | Out-Null } }) }
     $openSlui = C 'ActivationOpenSluiBtn'
@@ -6340,13 +7150,47 @@ try {
     if ($winActivate) { $winActivate.Add_Click({ Start-AMRActivationOperation -Target Windows }) }
     $officeActivate = C 'ActivationOfficeActivateBtn'
     if ($officeActivate) { $officeActivate.Add_Click({ Start-AMRActivationOperation -Target Office }) }
+    $copyDiagnosticsIcon = C 'ActivationCopyDiagnosticsIconBtn'
+    if ($copyDiagnosticsIcon) {
+        Set-AMRActivationCopyButtonMotion -Button $copyDiagnosticsIcon
+        $copyDiagnosticsIcon.Add_Click({
+        try {
+            $d = C 'ActivationDiagnostics'
+            if (-not $d -or [string]::IsNullOrWhiteSpace($d.Text) -or $d.Text -like 'Select Refresh Status*') {
+                Update-AMRActivationStatus
+                $t = C 'ActivationTaskStatus'; if ($t) { $t.Text = 'A fresh diagnostic scan has started. Copy the report after the scan completes.' }
+                return
+            }
+            [Windows.Clipboard]::SetText([string]$d.Text)
+            Invoke-AMRActivationCopyButtonFeedback -Button (C 'ActivationCopyDiagnosticsIconBtn')
+            $t = C 'ActivationTaskStatus'; if ($t) { $t.Text = 'License diagnostic report copied to clipboard.' }
+        } catch { [System.Windows.MessageBox]::Show($_.Exception.Message,'AMR Activation','OK','Warning') | Out-Null }
+    }) }
     $copyReport = C 'ActivationCopyReportBtn'
-    if ($copyReport) { $copyReport.Add_Click({ try { $d=C 'ActivationDiagnostics'; if ($d -and $d.Text) { [Windows.Clipboard]::SetText([string]$d.Text); $t=C 'ActivationTaskStatus'; if ($t) {$t.Text='Diagnostics copied to clipboard.'} } } catch { [System.Windows.MessageBox]::Show($_.Exception.Message,'AMR Activation','OK','Warning') | Out-Null } }) }
+    if ($copyReport) {
+        Set-AMRActivationCopyButtonMotion -Button $copyReport
+        $copyReport.Add_Click({
+        try {
+            $d=C 'ActivationDiagnostics'
+            if (-not $d -or [string]::IsNullOrWhiteSpace($d.Text) -or $d.Text -like 'Select Refresh Status*') {
+                Update-AMRActivationStatus
+                $t=C 'ActivationTaskStatus'; if ($t) { $t.Text='A fresh diagnostic scan has started. Copy the report after the scan completes.' }
+                return
+            }
+            [Windows.Clipboard]::SetText([string]$d.Text)
+            Invoke-AMRActivationCopyButtonFeedback -Button (C 'ActivationCopyReportBtn')
+            $t=C 'ActivationTaskStatus'; if ($t) {$t.Text='Diagnostics copied to clipboard.'}
+        } catch { [System.Windows.MessageBox]::Show($_.Exception.Message,'AMR Activation','OK','Warning') | Out-Null }
+    }) }
     $exportReport = C 'ActivationExportReportBtn'
     if ($exportReport) { $exportReport.Add_Click({
         try {
             $d=C 'ActivationDiagnostics'
-            if (-not $d -or [string]::IsNullOrWhiteSpace($d.Text)) { Update-AMRActivationStatus; $d=C 'ActivationDiagnostics' }
+            if ($script:AMRActivationScanState.Async -or -not $d -or [string]::IsNullOrWhiteSpace($d.Text) -or $d.Text -like 'Select Refresh Status*') {
+                if (-not $script:AMRActivationScanState.Async) { Update-AMRActivationStatus }
+                $t=C 'ActivationTaskStatus'; if ($t) { $t.Text='A fresh diagnostic scan is running or required. Export again after the scan completes.' }
+                return
+            }
             $folder = Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'AMR Utility Reports'
             if (-not (Test-Path -LiteralPath $folder)) { New-Item -ItemType Directory -Path $folder -Force | Out-Null }
             $path = Join-Path $folder ('Activation-Report-{0}.txt' -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
@@ -6355,7 +7199,19 @@ try {
             try { Write-AMRLog ('Activation report exported: ' + $path) INFO Activation } catch { }
         } catch { [System.Windows.MessageBox]::Show($_.Exception.Message,'AMR Activation','OK','Warning') | Out-Null }
     }) }
-    try { $script:Window.Dispatcher.BeginInvoke([System.Action]{ Update-AMRActivationStatus }, [Windows.Threading.DispatcherPriority]::Background) | Out-Null } catch { Update-AMRActivationStatus }
+    # Start the scan when the user opens Activation, not while its tab is hidden.
+    # This guarantees the status controls are visible while progress/results are applied.
+    $activationTab = C 'ActivationTab'
+    if ($activationTab) {
+        $activationTab.Add_Selected({
+            if (-not $script:AMRActivationScanState.Async -and -not $script:AMRActivationScanState.StartedAt) {
+                Update-AMRActivationStatus
+            }
+        })
+        try { Write-AMRLog 'Activation tab selection handler registered.' INFO Activation } catch {}
+    } else {
+        try { Write-AMRLog 'Activation tab control was not found; automatic scan will use the Refresh Status button.' WARNING Activation } catch {}
+    }
 } catch { try { Write-AMRLog ("Activation Center initialization failed: {0}" -f $_.Exception.Message) WARNING Activation } catch { } }
 
 
@@ -6696,11 +7552,12 @@ function Get-AMRSmartSearchTarget {
     if ($page -eq 'System') {
         $overview = C 'OverviewSubTabs'
         if ($overview -and $overview.SelectedItem -eq (C 'DriverCenterTab')) { return '__DriverSearch' }
+        if ($overview -and $overview.SelectedItem -and [string]$overview.SelectedItem.Header -eq 'Backups') { return 'BackupSearchBox' }
     }
     if ($page -eq 'Software') { return 'SearchBox' }
     if ($page -eq 'Logs') { return 'DriverLogSearchBox' }
     if ($page -eq 'System' -or $page -eq 'Overview' -or $page -eq 'About' -or $page -eq 'Activation') { return '__ContentFilter' }
-    if ($page -eq 'Backups') {
+    if ($page -eq 'Backups' -or ($page -eq 'System' -and (C 'OverviewSubTabs') -and (C 'OverviewSubTabs').SelectedItem -and [string](C 'OverviewSubTabs').SelectedItem.Header -eq 'Backups')) {
         $backup = C 'BackupSubTabs'
         $sub = if ($backup -and $backup.SelectedItem) { [string]$backup.SelectedItem.Header } else { 'Backup Center' }
         if ($sub -eq 'Backup Center') { return 'BackupSearchBox' }
@@ -6725,7 +7582,7 @@ function Get-AMRSmartCategoryTarget {
         $map = @{ Optimize='OptCategoryFilter'; Security='SecCategoryFilter'; System='SysCategoryFilter'; Networks='NetCategoryFilter'; Utilities='UtilCategoryFilter' }
         if ($map.ContainsKey($sub)) { return $map[$sub] }
     }
-    if ($page -eq 'Backups') {
+    if ($page -eq 'Backups' -or ($page -eq 'System' -and (C 'OverviewSubTabs') -and (C 'OverviewSubTabs').SelectedItem -and [string](C 'OverviewSubTabs').SelectedItem.Header -eq 'Backups')) {
         $backup = C 'BackupSubTabs'
         $sub = if ($backup -and $backup.SelectedItem) { [string]$backup.SelectedItem.Header } else { 'Backup Center' }
         if ($sub -eq 'Backup Center') { return 'BackupCategoryFilter' }
@@ -6797,7 +7654,13 @@ function Update-AMRSmartSearchContextCore {
         $overview = C 'OverviewSubTabs'
         if ($overview -and $overview.SelectedItem) {
             if ($overview.SelectedItem -eq (C 'DriverCenterTab')) { $page += ' / Driver Center' }
-            else { $page += ' / ' + [string]$overview.SelectedItem.Header }
+            else {
+                $page += ' / ' + [string]$overview.SelectedItem.Header
+                if ([string]$overview.SelectedItem.Header -eq 'Backups') {
+                    $backupTabs = C 'BackupSubTabs'
+                    if ($backupTabs -and $backupTabs.SelectedItem) { $page += ' / ' + [string]$backupTabs.SelectedItem.Header }
+                }
+            }
         }
     } elseif ($page -eq 'Backups') {
         $backupTabs = C 'BackupSubTabs'
@@ -6813,7 +7676,7 @@ function Update-AMRSmartSearchContextCore {
         '^Tool Kit / Networks$' { $placeholder = 'Search in Networks...'; break }
         '^Tool Kit / Utilities$' { $placeholder = 'Search in Utilities...'; break }
         '^Tool Kit / Activation$' { $placeholder = 'Search Windows, Office, licensing services or KMS configuration...'; break }
-        '^Backups / Backup Center$' { $placeholder = 'Search backup tools by name or category...'; break }
+        '^(Backups|System / Backups) / Backup Center$' { $placeholder = 'Search backup tools by name or category...'; break }
         '^System / Driver Center$' { $placeholder = 'Search driver names, devices, hardware IDs or versions...'; break }
         '^System.*$' { $placeholder = 'Search in ' + $page + '...'; break }
         '^Cleanup$' { $placeholder = 'Search cleanup options...'; break }
@@ -6839,7 +7702,24 @@ function Update-AMRSmartSearchContextCore {
                     [void]$sharedCategory.Items.Add($copy)
                 }
                 $sharedCategory.SelectedIndex = [Math]::Max(0,$categoryTarget.SelectedIndex)
+                $wasCategoryHidden = ($sharedCategory.Visibility -ne [System.Windows.Visibility]::Visible)
+                if ($wasCategoryHidden) {
+                    $sharedCategory.Opacity = 0
+                    $sharedCategory.RenderTransform = [System.Windows.Media.TranslateTransform]::new(0,-5)
+                }
                 $sharedCategory.Visibility = [System.Windows.Visibility]::Visible
+                if ($wasCategoryHidden) {
+                    try {
+                        $fadeIn = [System.Windows.Media.Animation.DoubleAnimation]::new(0.0,1.0,[TimeSpan]::FromMilliseconds(190))
+                        $fadeIn.EasingFunction = [System.Windows.Media.Animation.QuadraticEase]::new()
+                        $fadeIn.EasingFunction.EasingMode = [System.Windows.Media.Animation.EasingMode]::EaseOut
+                        $sharedCategory.BeginAnimation([System.Windows.UIElement]::OpacityProperty,$fadeIn)
+                        $slideIn = [System.Windows.Media.Animation.DoubleAnimation]::new(-5.0,0.0,[TimeSpan]::FromMilliseconds(190))
+                        $slideIn.EasingFunction = [System.Windows.Media.Animation.QuadraticEase]::new()
+                        $slideIn.EasingFunction.EasingMode = [System.Windows.Media.Animation.EasingMode]::EaseOut
+                        $sharedCategory.RenderTransform.BeginAnimation([System.Windows.Media.TranslateTransform]::YProperty,$slideIn)
+                    } catch { $sharedCategory.Opacity = 1 }
+                }
                 # Hide the old in-page category/search cluster; the shared selector is now the single visible control.
                 try { $categoryTarget.Parent.Visibility = [System.Windows.Visibility]::Collapsed } catch {}
             } else {
@@ -6970,6 +7850,53 @@ try {
 
     # Lightweight staggered entrance used by System pages and backup cards.
     # RenderTransform is layout-neutral; no timers or background workers are created.
+    # Premium, low-cost page transition for System navigation.
+    # Animate only the selected page root (not its child controls) so the
+    # transition stays smooth without triggering a cascade of layout/render work.
+    function Invoke-AMRSystemPageTransition {
+        param([object]$TabItem)
+        try {
+            if (-not $TabItem) { return }
+            $pageRoot = $TabItem.Content
+            if (-not ($pageRoot -is [System.Windows.UIElement])) { return }
+
+            $pageTransform = $pageRoot.RenderTransform
+            if (-not ($pageTransform -is [System.Windows.Media.TranslateTransform])) {
+                $pageTransform = New-Object System.Windows.Media.TranslateTransform
+                $pageRoot.RenderTransform = $pageTransform
+            }
+
+            $ease = New-Object System.Windows.Media.Animation.CubicEase
+            $ease.EasingMode = [System.Windows.Media.Animation.EasingMode]::EaseOut
+
+            # Almost imperceptible fade + 3px rise: elegant feedback, no heavy stagger.
+            $fade = New-Object System.Windows.Media.Animation.DoubleAnimation
+            $fade.From = 0.985
+            $fade.To = 1.0
+            $fade.Duration = [TimeSpan]::FromMilliseconds(210)
+            $fade.EasingFunction = $ease
+
+            $rise = New-Object System.Windows.Media.Animation.DoubleAnimation
+            $rise.From = 3.0
+            $rise.To = 0.0
+            $rise.Duration = [TimeSpan]::FromMilliseconds(230)
+            $rise.EasingFunction = $ease
+
+            $pageRoot.BeginAnimation(
+                [System.Windows.UIElement]::OpacityProperty,
+                $fade,
+                [System.Windows.Media.Animation.HandoffBehavior]::SnapshotAndReplace
+            )
+            $pageTransform.BeginAnimation(
+                [System.Windows.Media.TranslateTransform]::YProperty,
+                $rise,
+                [System.Windows.Media.Animation.HandoffBehavior]::SnapshotAndReplace
+            )
+        } catch {
+            try { Write-AMRLog ('System page transition skipped: ' + $_.Exception.Message) WARNING System } catch {}
+        }
+    }
+
     function Invoke-AMRSingleElementEntranceAnimation {
         param(
             [object]$Element,
@@ -7277,8 +8204,9 @@ $kitTabs = C 'ToolKitSubTabs'
             } elseif ($activeSection -eq 'System') {
                 $activeSystemTabs = C 'OverviewSubTabs'
                 if ($activeSystemTabs -and $activeSystemTabs.SelectedItem) {
+                    # Keep navigation immediate while giving the selected page a subtle root-only transition.
                     Invoke-AMRNavigationTilePressAnimation -Element $activeSystemTabs.SelectedItem
-                    Invoke-AMRContainerEntranceAnimation -Root $activeSystemTabs.SelectedItem.Content -StepDelayMs 52 -DurationMs 460
+                    Invoke-AMRSystemPageTransition -TabItem $activeSystemTabs.SelectedItem
                     if ([string]$activeSystemTabs.SelectedItem.Header -eq 'Overview') {
                         try {
                             Start-AMROverviewTelemetry -Force
@@ -7300,24 +8228,67 @@ $kitTabs = C 'ToolKitSubTabs'
                 if ($activeBackupTabs -and $activeBackupTabs.SelectedItem) {
                     Invoke-AMRContainerEntranceAnimation -Root $activeBackupTabs.SelectedItem.Content -StepDelayMs 58 -DurationMs 440
                     if ([string]$activeBackupTabs.SelectedItem.Header -eq 'Backup Center') {
-                        Invoke-AMRContainerEntranceAnimation -Root (C 'BackupActionsGrid') -StepDelayMs 34 -DurationMs 390
                     }
                 }
             }
         })
     }
 
+    # Initialize Startup navigation state before attaching routed WPF events.
+    # Set-StrictMode is enabled, so every script-scoped flag must exist before
+    # SelectionChanged can inspect it.
+    $script:StartupManagerLoaded = $false
+    $script:StartupEntryWorkQueued = $false
+    $script:StartupAutoFirstRefreshDone = $false
+    $script:StartupRenderState = $null
+
     $overviewTabs = C 'OverviewSubTabs'
     if ($overviewTabs) {
         $script:AMRSystemEntrancePlayed = @{}
         $overviewTabs.Add_SelectionChanged({
+            # Queue Startup's first refresh before filtering routed child events.
+            # WPF can report a TabItem/content element as OriginalSource even when
+            # OverviewSubTabs itself has changed selection.
+            $selectedSystemPage = $this.SelectedItem
+            if ($selectedSystemPage -and [string]$selectedSystemPage.Header -eq 'Startups') {
+                if (-not $script:StartupAutoFirstRefreshDone -and
+                    -not $script:StartupEntryWorkQueued -and
+                    -not $script:StartupManagerLoaded -and
+                    -not $script:StartupRenderState) {
+                    $script:StartupEntryWorkQueued = $true
+                    $startupDispatcher = $this.Dispatcher
+                    [void]$startupDispatcher.BeginInvoke([System.Action]{
+                        try {
+                            $activeStartupTabs = C 'OverviewSubTabs'
+                            if (-not $activeStartupTabs -or -not $activeStartupTabs.SelectedItem -or
+                                [string]$activeStartupTabs.SelectedItem.Header -ne 'Startups') { return }
+                            if ($script:StartupManagerLoaded -or $script:StartupRenderState) {
+                                $script:StartupAutoFirstRefreshDone = $true
+                                return
+                            }
+                            $startupHostPanel = C 'AMRStartupAppsHost'
+                            if (-not $startupHostPanel) { throw 'Startup applications panel is unavailable.' }
+                            # Match the real Refresh button action, including its visual
+                            # feedback and installed-inventory refresh.
+                            try { Start-AMRRefreshButtonAnimation -Button (C 'AMRStartupRefreshBtn') } catch {}
+                            Refresh-AMRStartupManager -RefreshInventory
+                            $script:StartupAutoFirstRefreshDone = $true
+                        } catch {
+                            $script:StartupAutoFirstRefreshDone = $false
+                            try { Write-AMRLog ('Startup manager automatic first refresh warning: ' + $_.Exception.Message) WARNING System } catch {}
+                        } finally {
+                            $script:StartupEntryWorkQueued = $false
+                        }
+                    }, [System.Windows.Threading.DispatcherPriority]::Background)
+                }
+            }
             if ($_.OriginalSource -ne $this) { return }
             Update-AMRSmartSearchContext
             $selectedSystemPage = $this.SelectedItem
             if ($selectedSystemPage) {
-                # Match Toolkit's selected-tile press feedback, then animate the page itself.
+                # Animate only the page surface: subtle, smooth, and layout-neutral.
                 Invoke-AMRNavigationTilePressAnimation -Element $selectedSystemPage
-                Invoke-AMRContainerEntranceAnimation -Root $selectedSystemPage.Content -StepDelayMs 52 -DurationMs 460
+                Invoke-AMRSystemPageTransition -TabItem $selectedSystemPage
 
                 # Overview must perform a fresh live sample when the user opens it,
                 # rather than relying only on the startup snapshot or placeholder text.
@@ -7334,12 +8305,6 @@ $kitTabs = C 'ToolKitSubTabs'
                         if ($overviewStatus) { $overviewStatus.Text = 'Refreshing live system readings…' }
                     } catch {
                         try { Write-AMRLog ('Overview entry refresh could not start: ' + $_.Exception.Message) WARNING Overview } catch {}
-                    }
-                }
-                elseif ([string]$selectedSystemPage.Header -eq 'Startups') {
-                    try { Refresh-AMRStartupManager } catch { Write-AMRLog ('Startup manager refresh warning: '+$_.Exception.Message) WARNING System }
-                    if($script:InstalledScanState -and -not $script:InstalledScanState.Ready -and -not $script:InstalledScanState.Current){
-                        try{Start-AMRInstalledCatalogScan}catch{Write-AMRLog ('Startup installed-app matching scan could not start: '+$_.Exception.Message) WARNING System}
                     }
                 }
             }
@@ -7487,6 +8452,21 @@ $script:Window.Add_Closed({
         try { $script:DriverLogRefreshTimer.Stop() } catch {}
         $script:DriverLogRefreshTimer = $null
     }
+    # Stop Startup-only background discovery and deferred icon work with the window.
+    try { if ($script:StartupIconTimer) { $script:StartupIconTimer.Stop(); $script:StartupIconTimer = $null } } catch {}
+    try { if ($script:StartupRenderTimer) { $script:StartupRenderTimer.Stop(); $script:StartupRenderTimer = $null }; $script:StartupRenderState = $null } catch {}
+    try {
+        $startupState = $script:StartupManagerAsyncState
+        if ($startupState) {
+            if ($startupState.Timer) { try { $startupState.Timer.Stop() } catch {}; $startupState.Timer = $null }
+            $startupJob = $startupState.Current
+            if ($startupJob) {
+                if ($startupJob.PowerShell) { try { $startupJob.PowerShell.Stop() } catch {}; try { $startupJob.PowerShell.Dispose() } catch {} }
+                if ($startupJob.Runspace) { try { $startupJob.Runspace.Close() } catch {}; try { $startupJob.Runspace.Dispose() } catch {} }
+                $startupState.Current = $null
+            }
+        }
+    } catch {}
     if ($script:OverviewTelemetryState) {
         if ($script:OverviewTelemetryState.Timer) { try { $script:OverviewTelemetryState.Timer.Stop() } catch {}; $script:OverviewTelemetryState.Timer = $null }
         $overviewJob = $script:OverviewTelemetryState.Current
@@ -7696,6 +8676,7 @@ $script:OverviewTelemetryState = [pscustomobject]@{
     ProcessSensorError = 'Activity sampler is starting'
     NetworkConnected = $false
     NetworkStatus = 'Sampling'
+    InternetReachable = $null
     NetworkSensorError = 'Network sampler is starting'
     NetRxBytes = $null
     NetTxBytes = $null
@@ -8722,12 +9703,12 @@ function Start-AMROverviewTelemetry {
             if (-not $state.InventoryCurrent) { $state.LastInventoryRefresh=Get-Date; Start-AMROverviewInventoryRefresh }
             (C 'ovLastRefresh').Text = 'Refresh queued — current sample will finish first…'
             $liveStatus=C 'ovLiveRefreshStatus';if($liveStatus){$liveStatus.Text='Refresh queued — current sample will finish first…'}
-            (C 'RefreshOverviewBtn').IsEnabled = $true; (C 'RefreshOverviewBtn').Content = '↻ Refresh'
+            (C 'RefreshOverviewBtn').IsEnabled = $true
         }
         return
     }
     $button = C 'RefreshOverviewBtn'
-    if ($button) { $button.IsEnabled = $true; $button.Content = '↻ Refresh' }; if($Force){(C 'ovLastRefresh').Text='Refreshing system readings…';$liveStatus=C 'ovLiveRefreshStatus';if($liveStatus){$liveStatus.Text='Collecting a fresh Windows sample…'}}
+    if ($button) { $button.IsEnabled = $true }; if($Force){(C 'ovLastRefresh').Text='Refreshing system readings…';$liveStatus=C 'ovLiveRefreshStatus';if($liveStatus){$liveStatus.Text='Collecting a fresh Windows sample…'}}
     $runspace = $state.FastRunspace; $powerShell = $null
     try {
         if(-not $runspace) {
@@ -8865,7 +9846,7 @@ function Start-AMROverviewTelemetry {
                     $activeState.FastWorkerFailures++
                     $activeState.LastFastWorkerError='Fast telemetry worker timed out'
                     Set-AMROverviewUnavailable 'Windows sensor query timed out'; $status = C 'ovLastRefresh'; if ($status) { $status.Text = 'Sensor query timed out. Press Refresh to retry.' }
-                    $button = C 'RefreshOverviewBtn'; if ($button) { $button.IsEnabled = $true; $button.Content = '↻ Refresh' }
+                    $button = C 'RefreshOverviewBtn'; if ($button) { $button.IsEnabled = $true }
                     Write-AMRLog 'Overview telemetry exceeded its 32-second safety timeout; the worker was cancelled.' WARNING Overview
                     $activeState.NextRefresh = if($activeState.RefreshRequested){[DateTime]::MinValue}else{(Get-Date).AddSeconds(4)}
                     if($activeState.RefreshRequested){$activeState.RefreshRequested=$false}
@@ -8919,7 +9900,7 @@ function Start-AMROverviewTelemetry {
                         $activeState.Current = $null
                         $activeState.NextRefresh = $job.StartedAt.AddSeconds($activeState.IntervalSeconds)
                         if ($activeState.RefreshRequested) { $activeState.RefreshRequested = $false; $activeState.NextRefresh = [DateTime]::MinValue; $status = C 'ovLastRefresh'; if($status){$status.Text='Running queued refresh…'} }
-                        $button = C 'RefreshOverviewBtn'; if ($button) { $button.IsEnabled = $true; $button.Content = '↻ Refresh' }
+                        $button = C 'RefreshOverviewBtn'; if ($button) { $button.IsEnabled = $true }
                     }
                     return
                 }
@@ -8934,7 +9915,7 @@ function Start-AMROverviewTelemetry {
         $state.FastWorkerFailures++
         $state.LastFastWorkerError=$_.Exception.ToString()
         $state.Current = $null
-        if ($button) { $button.IsEnabled = $true; $button.Content = '↻ Refresh' }
+        if ($button) { $button.IsEnabled = $true }
         (C 'ovLastRefresh').Text = 'Unable to start telemetry: ' + $_.Exception.Message
         Write-AMRLog ('Could not start Overview telemetry worker: ' + $_.Exception.ToString()) ERROR Overview
     }
@@ -8949,8 +9930,132 @@ function Refresh-AMROverview {
     Update-AMRDriverRestorePointStatus
 }
 
-(C 'RefreshOverviewBtn').Add_Click({ Start-AMROverviewTelemetry -Force })
-(C 'RefreshLivePerformanceBtn').Add_Click({ Start-AMROverviewTelemetry -Force; $liveStatus=C 'ovLiveRefreshStatus'; if($liveStatus){$liveStatus.Text='Refresh requested…'} })
+# Refresh-button visuals and click animation: intentionally limited to the three requested buttons.
+function Set-AMRRefreshButtonVisual {
+    param([Parameter(Mandatory=$true)]$Button, [Parameter(Mandatory=$true)][string]$Label)
+    $contentPanel = [System.Windows.Controls.StackPanel]::new()
+    $contentPanel.Orientation = [System.Windows.Controls.Orientation]::Horizontal
+    $contentPanel.HorizontalAlignment = [System.Windows.HorizontalAlignment]::Center
+    $contentPanel.VerticalAlignment = [System.Windows.VerticalAlignment]::Center
+
+    $refreshGlyph = [System.Windows.Controls.TextBlock]::new()
+    $refreshGlyph.Text = '↻'
+    $refreshGlyph.VerticalAlignment = [System.Windows.VerticalAlignment]::Center
+    $refreshGlyph.Margin = [System.Windows.Thickness]::new(0,0,5,0)
+    $refreshGlyph.RenderTransformOrigin = [System.Windows.Point]::new(0.5,0.5)
+    $refreshGlyph.RenderTransform = [System.Windows.Media.RotateTransform]::new(0)
+
+    $labelBlock = [System.Windows.Controls.TextBlock]::new()
+    $labelBlock.Text = $Label
+    $labelBlock.VerticalAlignment = [System.Windows.VerticalAlignment]::Center
+
+    [void]$contentPanel.Children.Add($refreshGlyph)
+    [void]$contentPanel.Children.Add($labelBlock)
+    $Button.Content = $contentPanel
+    $Button.RenderTransformOrigin = [System.Windows.Point]::new(0.5,0.5)
+
+    # Give the whole button its own transform so its body visibly moves,
+    # without changing its layout slot, dimensions, or surrounding controls.
+    $buttonTransforms = [System.Windows.Media.TransformGroup]::new()
+    [void]$buttonTransforms.Children.Add([System.Windows.Media.TranslateTransform]::new(0,0))
+    [void]$buttonTransforms.Children.Add([System.Windows.Media.RotateTransform]::new(0))
+    [void]$buttonTransforms.Children.Add([System.Windows.Media.ScaleTransform]::new(1,1))
+    $Button.RenderTransform = $buttonTransforms
+}
+
+function Start-AMRRefreshButtonAnimation {
+    param([Parameter(Mandatory=$true)]$Button)
+    if (-not $Button -or -not ($Button.Content -is [System.Windows.Controls.StackPanel])) { return }
+    $glyph = $Button.Content.Children[0]
+    if (-not $glyph -or -not ($glyph.RenderTransform -is [System.Windows.Media.RotateTransform])) { return }
+
+    # Keep the existing refresh-glyph spin.
+    $spin = [System.Windows.Media.Animation.DoubleAnimation]::new(0,360,[System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(620)))
+    $spin.EasingFunction = [System.Windows.Media.Animation.CubicEase]::new()
+    $spin.EasingFunction.EasingMode = [System.Windows.Media.Animation.EasingMode]::EaseOut
+    $glyph.RenderTransform.BeginAnimation([System.Windows.Media.RotateTransform]::AngleProperty,$spin)
+
+    # Animate the complete button body with a more visible, restrained wobble.
+    if (-not ($Button.RenderTransform -is [System.Windows.Media.TransformGroup]) -or $Button.RenderTransform.Children.Count -lt 2) {
+        $buttonTransforms = [System.Windows.Media.TransformGroup]::new()
+        [void]$buttonTransforms.Children.Add([System.Windows.Media.TranslateTransform]::new(0,0))
+        [void]$buttonTransforms.Children.Add([System.Windows.Media.RotateTransform]::new(0))
+        [void]$buttonTransforms.Children.Add([System.Windows.Media.ScaleTransform]::new(1,1))
+        $Button.RenderTransform = $buttonTransforms
+    }
+    if ($Button.RenderTransform.Children.Count -lt 3) {
+        [void]$Button.RenderTransform.Children.Add([System.Windows.Media.ScaleTransform]::new(1,1))
+    }
+    $move = $Button.RenderTransform.Children[0]
+    $tilt = $Button.RenderTransform.Children[1]
+
+    $xShake = [System.Windows.Media.Animation.DoubleAnimationUsingKeyFrames]::new()
+    [void]$xShake.KeyFrames.Add([System.Windows.Media.Animation.LinearDoubleKeyFrame]::new(0,[System.Windows.Media.Animation.KeyTime]::FromTimeSpan([TimeSpan]::FromMilliseconds(0))))
+    [void]$xShake.KeyFrames.Add([System.Windows.Media.Animation.LinearDoubleKeyFrame]::new(-3,[System.Windows.Media.Animation.KeyTime]::FromTimeSpan([TimeSpan]::FromMilliseconds(65))))
+    [void]$xShake.KeyFrames.Add([System.Windows.Media.Animation.LinearDoubleKeyFrame]::new(3,[System.Windows.Media.Animation.KeyTime]::FromTimeSpan([TimeSpan]::FromMilliseconds(130))))
+    [void]$xShake.KeyFrames.Add([System.Windows.Media.Animation.LinearDoubleKeyFrame]::new(-2,[System.Windows.Media.Animation.KeyTime]::FromTimeSpan([TimeSpan]::FromMilliseconds(195))))
+    [void]$xShake.KeyFrames.Add([System.Windows.Media.Animation.LinearDoubleKeyFrame]::new(0,[System.Windows.Media.Animation.KeyTime]::FromTimeSpan([TimeSpan]::FromMilliseconds(270))))
+
+    $yBounce = [System.Windows.Media.Animation.DoubleAnimationUsingKeyFrames]::new()
+    [void]$yBounce.KeyFrames.Add([System.Windows.Media.Animation.LinearDoubleKeyFrame]::new(0,[System.Windows.Media.Animation.KeyTime]::FromTimeSpan([TimeSpan]::FromMilliseconds(0))))
+    [void]$yBounce.KeyFrames.Add([System.Windows.Media.Animation.LinearDoubleKeyFrame]::new(-1.5,[System.Windows.Media.Animation.KeyTime]::FromTimeSpan([TimeSpan]::FromMilliseconds(65))))
+    [void]$yBounce.KeyFrames.Add([System.Windows.Media.Animation.LinearDoubleKeyFrame]::new(1.5,[System.Windows.Media.Animation.KeyTime]::FromTimeSpan([TimeSpan]::FromMilliseconds(130))))
+    [void]$yBounce.KeyFrames.Add([System.Windows.Media.Animation.LinearDoubleKeyFrame]::new(-0.75,[System.Windows.Media.Animation.KeyTime]::FromTimeSpan([TimeSpan]::FromMilliseconds(195))))
+    [void]$yBounce.KeyFrames.Add([System.Windows.Media.Animation.LinearDoubleKeyFrame]::new(0,[System.Windows.Media.Animation.KeyTime]::FromTimeSpan([TimeSpan]::FromMilliseconds(270))))
+
+    $tiltWobble = [System.Windows.Media.Animation.DoubleAnimationUsingKeyFrames]::new()
+    [void]$tiltWobble.KeyFrames.Add([System.Windows.Media.Animation.LinearDoubleKeyFrame]::new(0,[System.Windows.Media.Animation.KeyTime]::FromTimeSpan([TimeSpan]::FromMilliseconds(0))))
+    [void]$tiltWobble.KeyFrames.Add([System.Windows.Media.Animation.LinearDoubleKeyFrame]::new(-1.4,[System.Windows.Media.Animation.KeyTime]::FromTimeSpan([TimeSpan]::FromMilliseconds(65))))
+    [void]$tiltWobble.KeyFrames.Add([System.Windows.Media.Animation.LinearDoubleKeyFrame]::new(1.4,[System.Windows.Media.Animation.KeyTime]::FromTimeSpan([TimeSpan]::FromMilliseconds(130))))
+    [void]$tiltWobble.KeyFrames.Add([System.Windows.Media.Animation.LinearDoubleKeyFrame]::new(-0.6,[System.Windows.Media.Animation.KeyTime]::FromTimeSpan([TimeSpan]::FromMilliseconds(195))))
+    [void]$tiltWobble.KeyFrames.Add([System.Windows.Media.Animation.LinearDoubleKeyFrame]::new(0,[System.Windows.Media.Animation.KeyTime]::FromTimeSpan([TimeSpan]::FromMilliseconds(270))))
+
+    $move.BeginAnimation([System.Windows.Media.TranslateTransform]::XProperty,$xShake)
+    $move.BeginAnimation([System.Windows.Media.TranslateTransform]::YProperty,$yBounce)
+    $tilt.BeginAnimation([System.Windows.Media.RotateTransform]::AngleProperty,$tiltWobble)
+}
+
+# Immediate tactile press/release feedback for the same three Refresh buttons only.
+function Set-AMRRefreshButtonPressedState {
+    param([Parameter(Mandatory=$true)]$Button, [Parameter(Mandatory=$true)][bool]$Pressed)
+    if (-not $Button -or -not ($Button.RenderTransform -is [System.Windows.Media.TransformGroup])) { return }
+    if ($Button.RenderTransform.Children.Count -lt 3) { return }
+    $scale = $Button.RenderTransform.Children[2]
+    if (-not ($scale -is [System.Windows.Media.ScaleTransform])) { return }
+
+    $target = if ($Pressed) { 0.945 } else { 1.0 }
+    $duration = if ($Pressed) { 75 } else { 115 }
+    $currentX = [double]$scale.ScaleX
+    $currentY = [double]$scale.ScaleY
+    $pressEase = [System.Windows.Media.Animation.CubicEase]::new()
+    $pressEase.EasingMode = [System.Windows.Media.Animation.EasingMode]::EaseOut
+
+    $scaleXAnimation = [System.Windows.Media.Animation.DoubleAnimation]::new($currentX,$target,[System.Windows.Duration]::new([TimeSpan]::FromMilliseconds($duration)))
+    $scaleYAnimation = [System.Windows.Media.Animation.DoubleAnimation]::new($currentY,$target,[System.Windows.Duration]::new([TimeSpan]::FromMilliseconds($duration)))
+    $scaleXAnimation.EasingFunction = $pressEase
+    $scaleYAnimation.EasingFunction = $pressEase
+    $scale.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleXProperty,$scaleXAnimation,[System.Windows.Media.Animation.HandoffBehavior]::SnapshotAndReplace)
+    $scale.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleYProperty,$scaleYAnimation,[System.Windows.Media.Animation.HandoffBehavior]::SnapshotAndReplace)
+}
+
+function Enable-AMRRefreshButtonPressFeedback {
+    param([Parameter(Mandatory=$true)]$Button)
+    $Button.Add_PreviewMouseLeftButtonDown({ Set-AMRRefreshButtonPressedState -Button $Button -Pressed $true }.GetNewClosure())
+    $Button.Add_PreviewMouseLeftButtonUp({ Set-AMRRefreshButtonPressedState -Button $Button -Pressed $false }.GetNewClosure())
+    $Button.Add_LostMouseCapture({ Set-AMRRefreshButtonPressedState -Button $Button -Pressed $false }.GetNewClosure())
+}
+
+Set-AMRRefreshButtonVisual -Button (C 'RefreshOverviewBtn') -Label 'Refresh'
+Set-AMRRefreshButtonVisual -Button (C 'RefreshLivePerformanceBtn') -Label 'Refresh'
+Set-AMRRefreshButtonVisual -Button (C 'AMRStartupRefreshBtn') -Label 'Refresh'
+Set-AMRRefreshButtonVisual -Button (C 'ActivationRefreshBtn') -Label 'Refresh Status'
+Enable-AMRRefreshButtonPressFeedback -Button (C 'ActivationRefreshBtn')
+Enable-AMRRefreshButtonPressFeedback -Button (C 'RefreshOverviewBtn')
+Enable-AMRRefreshButtonPressFeedback -Button (C 'RefreshLivePerformanceBtn')
+Enable-AMRRefreshButtonPressFeedback -Button (C 'AMRStartupRefreshBtn')
+
+(C 'RefreshOverviewBtn').Add_Click({ Start-AMRRefreshButtonAnimation -Button (C 'RefreshOverviewBtn'); Start-AMROverviewTelemetry -Force })
+(C 'RefreshLivePerformanceBtn').Add_Click({ Start-AMRRefreshButtonAnimation -Button (C 'RefreshLivePerformanceBtn'); Start-AMROverviewTelemetry -Force; $liveStatus=C 'ovLiveRefreshStatus'; if($liveStatus){$liveStatus.Text='Refresh requested…'} })
 
 # --- AMR DRIVER RESTORE POINT MANAGEMENT ---
 function Get-AMRComputerRestorePoints {
@@ -15561,7 +16666,6 @@ function Update-AMRInstalledCatalogState {
 # The inventory scan runs in a dedicated runspace. Only the
 # final IsInstalled flags are copied back on the WPF UI thread.
 # ----------------------------------------------------------
-$script:StartupManagerLoaded = $false
 $script:StartupManagerEntries = @()
 
 $script:InstalledScanState = @{
@@ -15676,6 +16780,8 @@ $script:AMRLocalIconWorkerState = @{
     Async = $null
     Timer = $null
     RecordMap = @{}
+    PendingEntries = @()
+    NextEntryIndex = 0
 }
 
 function Start-AMRInstalledLocalIconRefresh {
@@ -15784,93 +16890,101 @@ function Start-AMRInstalledLocalIconRefresh {
         $script:AMRLocalIconWorkerState.Async = $Async
         $script:AMRLocalIconWorkerState.RecordMap = $RecordMap
 
-        $Timer = New-Object System.Windows.Threading.DispatcherTimer
-        $Timer.Interval = [TimeSpan]::FromMilliseconds(150)
+        # Apply local icons gradually on the UI dispatcher. The worker still
+        # discovers local files in the background, but decoding/binding is
+        # deliberately limited to three cards per low-priority tick to keep hydration smooth.
+        $Timer = [System.Windows.Threading.DispatcherTimer]::new([System.Windows.Threading.DispatcherPriority]::Background)
+        $Timer.Interval = [TimeSpan]::FromMilliseconds(40)
 
         $Timer.Add_Tick({
-
             $State = $script:AMRLocalIconWorkerState
 
-            if (-not $State.Async -or -not $State.Async.IsCompleted) {
+            if (-not $script:ShowInstalledOnly -and -not $State.Async) {
+                try { $State.Timer.Stop() } catch {}
+                $State.PendingEntries = @()
+                $State.NextEntryIndex = 0
+                $State.Timer = $null
+                $State.Started = $false
                 return
             }
 
-            $State.Timer.Stop()
-
-            try {
-                $Entries = @($State.PowerShell.EndInvoke($State.Async))
-
-                if ($script:ShowInstalledOnly) {
-
-                    foreach ($Entry in $Entries) {
-
-                        if (
-                            $Entry.Status -ne 'Available' -or
-                            $Entry.SelectedSource -ne 'LocalInstalledApp' -or
-                            [string]::IsNullOrWhiteSpace([string]$Entry.IconPath)
-                        ) {
-                            continue
+            # First wait for the background discovery worker, then transfer its
+            # lightweight path records to a small UI-thread application queue.
+            if ($State.Async) {
+                if (-not $State.Async.IsCompleted) { return }
+                try {
+                    $Entries = @($State.PowerShell.EndInvoke($State.Async))
+                    $State.PendingEntries = @(
+                        $Entries | Where-Object {
+                            $_.Status -eq 'Available' -and
+                            $_.SelectedSource -eq 'LocalInstalledApp' -and
+                            -not [string]::IsNullOrWhiteSpace([string]$_.IconPath) -and
+                            $State.RecordMap.ContainsKey([string]$_.AppId)
                         }
-
-                        $AppId = [string]$Entry.AppId
-
-                        if (-not $State.RecordMap.ContainsKey($AppId)) {
-                            continue
-                        }
-
-                        $Record = $State.RecordMap[$AppId]
-
-                        if ($null -eq $Record -or $null -ne $Record.Icon) {
-                            continue
-                        }
-
-                        $StillVisible = $false
-
-                        foreach ($CurrentRecord in $script:InstalledAppsInventory) {
-                            if ([object]::ReferenceEquals($CurrentRecord,$Record)) {
-                                $StillVisible = $true
-                                break
-                            }
-                        }
-
-                        if (-not $StillVisible) {
-                            continue
-                        }
-
-                        $ImageSource = Get-AMRIconImageSource -Path ([string]$Entry.IconPath)
-
-                        if ($null -ne $ImageSource -and $null -eq $Record.Icon) {
-                            $Record.Icon = $ImageSource
-                            Sync-AMRRealizedSoftwareIconItem -Item $Record
-                        }
-                    }
+                    )
+                    $State.NextEntryIndex = 0
+                    $AvailableCount = $State.PendingEntries.Count
+                    Write-AMRLog (
+                        'Local icon discovery completed. Records: {0}; queued local icons: {1}. Icons will be applied progressively.' -f
+                        $Entries.Count,$AvailableCount
+                    ) INFO Software
                 }
-
-                $AvailableCount = @(
-                    $Entries | Where-Object {
-                        $_.Status -eq 'Available' -and
-                        $_.SelectedSource -eq 'LocalInstalledApp'
-                    }
-                ).Count
-
-                Write-AMRLog (
-                    'Local icon engine completed. Records: {0}; local icons available: {1}.' -f
-                    $Entries.Count,$AvailableCount
-                ) INFO Software
+                catch {
+                    Write-AMRLog "Local icon worker completion failed: $($_.Exception.Message)" WARNING Software
+                    $State.PendingEntries = @()
+                    $State.NextEntryIndex = 0
+                }
+                finally {
+                    try { $State.PowerShell.Dispose() } catch {}
+                    try { $State.Runspace.Close() } catch {}
+                    try { $State.Runspace.Dispose() } catch {}
+                    $State.PowerShell = $null
+                    $State.Runspace = $null
+                    $State.Async = $null
+                }
             }
-            catch {
-                Write-AMRLog "Local icon worker completion failed: $($_.Exception.Message)" WARNING Software
-            }
-            finally {
-                try { $State.PowerShell.Dispose() } catch {}
-                try { $State.Runspace.Close() } catch {}
-                try { $State.Runspace.Dispose() } catch {}
 
-                $State.PowerShell = $null
-                $State.Runspace = $null
-                $State.Async = $null
+            # If the user returned to Show All while discovery was running,
+            # allow EndInvoke/worker cleanup to finish but do not touch installed cards.
+            if (-not $script:ShowInstalledOnly) {
+                $State.PendingEntries = @()
+                $State.NextEntryIndex = 0
+                try { $State.Timer.Stop() } catch {}
                 $State.Timer = $null
                 $State.Started = $false
+                return
+            }
+
+            # Keep each dispatcher turn short: at most three local icon decodes at Background priority.
+            $processed = 0
+            while ($State.NextEntryIndex -lt $State.PendingEntries.Count -and $processed -lt 3) {
+                $Entry = $State.PendingEntries[$State.NextEntryIndex]
+                $State.NextEntryIndex++
+                $processed++
+
+                $AppId = [string]$Entry.AppId
+                if (-not $State.RecordMap.ContainsKey($AppId)) { continue }
+                $Record = $State.RecordMap[$AppId]
+                if ($null -eq $Record -or $null -ne $Record.Icon) { continue }
+
+                try {
+                    $ImageSource = Get-AMRIconImageSource -Path ([string]$Entry.IconPath)
+                    if ($null -ne $ImageSource -and $null -eq $Record.Icon) {
+                        $Record.Icon = $ImageSource
+                        Sync-AMRRealizedSoftwareIconItem -Item $Record
+                    }
+                } catch {
+                    Write-AMRLog "Could not apply local icon for '$AppId': $($_.Exception.Message)" WARNING Software
+                }
+            }
+
+            if (-not $State.Async -and $State.NextEntryIndex -ge $State.PendingEntries.Count) {
+                try { $State.Timer.Stop() } catch {}
+                $State.PendingEntries = @()
+                $State.NextEntryIndex = 0
+                $State.Timer = $null
+                $State.Started = $false
+                Write-AMRLog 'Progressive local icon application completed.' INFO Software
             }
         })
 
@@ -15887,47 +17001,658 @@ function Start-AMRInstalledLocalIconRefresh {
     }
 }
 
+# Initialize software icon synchronization state before any dispatcher callback can use it.
+$script:SoftwareIconScrollSyncPending = $false
+$script:SoftwareIconSyncQueued = $false
+
+# Show Installed: lively, non-blocking feedback while the inventory worker scans.
+# The original button palette and layout are restored as soon as the scan completes.
+$script:ShowInstalledButtonBusyState = [pscustomobject]@{
+    Active = $false
+    OriginalContent = $null
+    OriginalBackground = $null
+    OriginalBorderBrush = $null
+    OriginalEffect = $null
+    OriginalRenderTransform = $null
+    OriginalRenderTransformOrigin = $null
+    SpinnerTransform = $null
+    ButtonScaleTransform = $null
+    BusyEffect = $null
+    BusyBorder = $null
+}
+
+function Set-AMRShowInstalledButtonBusy {
+    param(
+        [Parameter(Mandatory=$true)][bool]$Busy,
+        [string]$Label = 'Show Installed'
+    )
+
+    $button = C 'ShowInstalledBtn'
+    if (-not $button) { return }
+    $state = $script:ShowInstalledButtonBusyState
+
+    if ($Busy) {
+        if ($state.Active) { return }
+
+        $state.OriginalContent = $button.Content
+        $state.OriginalBackground = $button.Background
+        $state.OriginalBorderBrush = $button.BorderBrush
+        $state.OriginalEffect = $button.Effect
+        $state.OriginalRenderTransform = $button.RenderTransform
+        $state.OriginalRenderTransformOrigin = $button.RenderTransformOrigin
+
+        $content = [System.Windows.Controls.StackPanel]::new()
+        $content.Orientation = [System.Windows.Controls.Orientation]::Horizontal
+        $content.HorizontalAlignment = [System.Windows.HorizontalAlignment]::Center
+        $content.VerticalAlignment = [System.Windows.VerticalAlignment]::Center
+
+        $spinner = [System.Windows.Controls.TextBlock]::new()
+        $spinner.Text = '↻'
+        $spinner.FontSize = 16
+        $spinner.FontWeight = [System.Windows.FontWeights]::Bold
+        $spinner.Margin = [System.Windows.Thickness]::new(0,0,7,0)
+        $spinner.VerticalAlignment = [System.Windows.VerticalAlignment]::Center
+        $spinner.RenderTransformOrigin = [System.Windows.Point]::new(0.5,0.5)
+        $spinnerTransform = [System.Windows.Media.RotateTransform]::new(0)
+        $spinner.RenderTransform = $spinnerTransform
+
+        $labelBlock = [System.Windows.Controls.TextBlock]::new()
+        $labelBlock.Text = $Label
+        $labelBlock.FontSize = 12
+        $labelBlock.FontWeight = [System.Windows.FontWeights]::SemiBold
+        $labelBlock.VerticalAlignment = [System.Windows.VerticalAlignment]::Center
+
+        [void]$content.Children.Add($spinner)
+        [void]$content.Children.Add($labelBlock)
+        $button.Content = $content
+
+        # Match the current toggle mode: teal while entering Installed, violet
+        # while returning to the full catalog.
+        if ($script:ShowInstalledButtonMode -eq 'Installed') {
+            $busyBaseColor = [System.Windows.Media.Color]::FromRgb(133,101,196)
+            $busyGlowColor = [System.Windows.Media.Color]::FromRgb(218,198,255)
+        } else {
+            $busyBaseColor = [System.Windows.Media.Color]::FromRgb(69,107,101)
+            $busyGlowColor = [System.Windows.Media.Color]::FromRgb(167,216,206)
+        }
+        $busyBorder = [System.Windows.Media.SolidColorBrush]::new($busyBaseColor)
+        $button.BorderBrush = $busyBorder
+        $borderPulse = [System.Windows.Media.Animation.ColorAnimation]::new()
+        $borderPulse.From = $busyBaseColor
+        $borderPulse.To = $busyGlowColor
+        $borderPulse.Duration = [System.Windows.Duration]::new([TimeSpan]::FromSeconds(0.8))
+        $borderPulse.AutoReverse = $true
+        $borderPulse.RepeatBehavior = [System.Windows.Media.Animation.RepeatBehavior]::Forever
+        [void]$busyBorder.BeginAnimation([System.Windows.Media.SolidColorBrush]::ColorProperty, $borderPulse)
+
+        $busyEffect = [System.Windows.Media.Effects.DropShadowEffect]::new()
+        $busyEffect.Color = if ($script:ShowInstalledButtonMode -eq 'Installed') {
+            [System.Windows.Media.Color]::FromRgb(177,139,255)
+        } else {
+            [System.Windows.Media.Color]::FromRgb(111,190,177)
+        }
+        $busyEffect.ShadowDepth = 0
+        $busyEffect.BlurRadius = 10
+        $busyEffect.Opacity = 0.42
+        $button.Effect = $busyEffect
+
+        # Subtle breathing scale on the button surface; preserve and restore its
+        # original transform after the installed-app loading cycle.
+        $buttonScale = [System.Windows.Media.ScaleTransform]::new(1.0,1.0)
+        $button.RenderTransformOrigin = [System.Windows.Point]::new(0.5,0.5)
+        $button.RenderTransform = $buttonScale
+        $scalePulse = [System.Windows.Media.Animation.DoubleAnimation]::new()
+        $scalePulse.From = 1.0
+        $scalePulse.To = 1.025
+        $scalePulse.Duration = [System.Windows.Duration]::new([TimeSpan]::FromSeconds(0.8))
+        $scalePulse.AutoReverse = $true
+        $scalePulse.RepeatBehavior = [System.Windows.Media.Animation.RepeatBehavior]::Forever
+        [void]$buttonScale.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleXProperty, $scalePulse)
+        [void]$buttonScale.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleYProperty, $scalePulse)
+
+        $glowPulse = [System.Windows.Media.Animation.DoubleAnimation]::new()
+        $glowPulse.From = 0.28
+        $glowPulse.To = 0.78
+        $glowPulse.Duration = [System.Windows.Duration]::new([TimeSpan]::FromSeconds(0.8))
+        $glowPulse.AutoReverse = $true
+        $glowPulse.RepeatBehavior = [System.Windows.Media.Animation.RepeatBehavior]::Forever
+        [void]$busyEffect.BeginAnimation([System.Windows.Media.Effects.DropShadowEffect]::OpacityProperty, $glowPulse)
+
+        $blurPulse = [System.Windows.Media.Animation.DoubleAnimation]::new()
+        $blurPulse.From = 8
+        $blurPulse.To = 15
+        $blurPulse.Duration = [System.Windows.Duration]::new([TimeSpan]::FromSeconds(0.8))
+        $blurPulse.AutoReverse = $true
+        $blurPulse.RepeatBehavior = [System.Windows.Media.Animation.RepeatBehavior]::Forever
+        [void]$busyEffect.BeginAnimation([System.Windows.Media.Effects.DropShadowEffect]::BlurRadiusProperty, $blurPulse)
+
+        $spin = [System.Windows.Media.Animation.DoubleAnimation]::new()
+        $spin.From = 0
+        $spin.To = 360
+        $spin.Duration = [System.Windows.Duration]::new([TimeSpan]::FromSeconds(0.9))
+        $spin.RepeatBehavior = [System.Windows.Media.Animation.RepeatBehavior]::Forever
+        [void]$spinnerTransform.BeginAnimation([System.Windows.Media.RotateTransform]::AngleProperty, $spin)
+
+        $state.SpinnerTransform = $spinnerTransform
+        $state.ButtonScaleTransform = $buttonScale
+        $state.BusyEffect = $busyEffect
+        $state.BusyBorder = $busyBorder
+        $state.Active = $true
+        $button.IsEnabled = $true
+        return
+    }
+
+    if ($state.Active) {
+        try {
+            if ($state.SpinnerTransform) {
+                $state.SpinnerTransform.BeginAnimation([System.Windows.Media.RotateTransform]::AngleProperty, $null)
+            }
+            if ($state.BusyBorder) {
+                $state.BusyBorder.BeginAnimation([System.Windows.Media.SolidColorBrush]::ColorProperty, $null)
+            }
+            if ($state.BusyEffect) {
+                $state.BusyEffect.BeginAnimation([System.Windows.Media.Effects.DropShadowEffect]::OpacityProperty, $null)
+                $state.BusyEffect.BeginAnimation([System.Windows.Media.Effects.DropShadowEffect]::BlurRadiusProperty, $null)
+            }
+            if ($state.ButtonScaleTransform) {
+                $state.ButtonScaleTransform.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleXProperty, $null)
+                $state.ButtonScaleTransform.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleYProperty, $null)
+            }
+            $button.Background = $state.OriginalBackground
+            $button.BorderBrush = $state.OriginalBorderBrush
+            $button.Effect = $state.OriginalEffect
+            $button.RenderTransform = $state.OriginalRenderTransform
+            $button.RenderTransformOrigin = $state.OriginalRenderTransformOrigin
+        } catch {
+            Write-AMRLog "Could not fully restore Show Installed button visuals: $($_.Exception.Message)" WARNING Software
+        }
+        $state.Active = $false
+        $state.SpinnerTransform = $null
+        $state.ButtonScaleTransform = $null
+        $state.BusyEffect = $null
+        $state.BusyBorder = $null
+        $state.OriginalRenderTransform = $null
+        $state.OriginalRenderTransformOrigin = $null
+    }
+
+    $button.Content = $Label
+    $button.IsEnabled = $true
+}
+
+# Give the toggle a distinct, persistent visual identity while the installed
+# catalog is active, with a lightweight hover breathing/glow interaction.
+$script:ShowInstalledButtonMode = 'All'
+$script:ShowInstalledButtonHoverEffect = $null
+$script:ShowInstalledButtonHoverTransform = $null
+function Set-AMRShowInstalledButtonMode {
+    param([ValidateSet('All','Installed')][string]$Mode = 'All')
+    $button = C 'ShowInstalledBtn'
+    if (-not $button) { return }
+    $script:ShowInstalledButtonMode = $Mode
+    if ($script:ShowInstalledButtonBusyState.Active) { return }
+
+    if ($Mode -eq 'Installed') {
+        $button.Background = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.Color]::FromRgb(48,38,76))
+        $button.Foreground = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.Color]::FromRgb(218,198,255))
+        $button.BorderBrush = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.Color]::FromRgb(133,101,196))
+        $button.ToolTip = 'Return to the full software catalog.'
+    } else {
+        $button.Background = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.Color]::FromRgb(38,59,58))
+        $button.Foreground = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.Color]::FromRgb(167,216,206))
+        $button.BorderBrush = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.Color]::FromRgb(69,107,101))
+        $button.ToolTip = 'Show only applications detected as installed on this PC.'
+    }
+}
+
+$showInstalledButton = C 'ShowInstalledBtn'
+if ($showInstalledButton) {
+    $showInstalledButton.RenderTransformOrigin = [System.Windows.Point]::new(0.5,0.5)
+    $showInstalledButton.Add_MouseEnter({
+        $button = C 'ShowInstalledBtn'
+        if (-not $button -or $script:ShowInstalledButtonBusyState.Active) { return }
+        $scale = [System.Windows.Media.ScaleTransform]::new(1.0,1.0)
+        $button.RenderTransform = $scale
+        $script:ShowInstalledButtonHoverTransform = $scale
+        $pulse = [System.Windows.Media.Animation.DoubleAnimation]::new()
+        $pulse.From = 1.0
+        $pulse.To = 1.065
+        $pulse.Duration = [System.Windows.Duration]::new([TimeSpan]::FromSeconds(0.42))
+        $pulse.AutoReverse = $true
+        $pulse.RepeatBehavior = [System.Windows.Media.Animation.RepeatBehavior]::Forever
+        [void]$scale.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleXProperty, $pulse)
+        [void]$scale.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleYProperty, $pulse)
+        $glow = [System.Windows.Media.Effects.DropShadowEffect]::new()
+        $glow.Color = if ($script:ShowInstalledButtonMode -eq 'Installed') {
+            [System.Windows.Media.Color]::FromRgb(177,139,255)
+        } else {
+            [System.Windows.Media.Color]::FromRgb(111,190,177)
+        }
+        $glow.ShadowDepth = 0
+        $glow.BlurRadius = 13
+        $glow.Opacity = 0.62
+        $button.Effect = $glow
+        $script:ShowInstalledButtonHoverEffect = $glow
+    }.GetNewClosure())
+    $showInstalledButton.Add_MouseLeave({
+        $button = C 'ShowInstalledBtn'
+        if (-not $button -or $script:ShowInstalledButtonBusyState.Active) { return }
+        if ($script:ShowInstalledButtonHoverTransform) {
+            $script:ShowInstalledButtonHoverTransform.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleXProperty, $null)
+            $script:ShowInstalledButtonHoverTransform.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleYProperty, $null)
+        }
+        $button.RenderTransform = [System.Windows.Media.ScaleTransform]::new(1.0,1.0)
+        $button.Effect = $null
+        $script:ShowInstalledButtonHoverTransform = $null
+        $script:ShowInstalledButtonHoverEffect = $null
+    }.GetNewClosure())
+}
+
 # V14: preserve the original catalog categories in Show Installed, map installed
 # records to catalog categories in O(n), and keep installed cards compact/expandable.
-function Set-AMRInstalledViewVisible {
-    param([int]$InstalledCount)
+$script:InstalledGridPageBuildState = $null
+$script:CatalogGridPageBuildState = $null
+$script:InstalledViewPreparationState = $null
+# Reuse catalog ID/name indexes across Show Installed switches.
+$script:InstalledCatalogLookupSource = $null
+$script:InstalledCatalogLookupById = $null
+$script:InstalledCatalogLookupByName = $null
+$script:SuppressSoftwareCategorySelectionChanged = $false
 
-    $script:ShowInstalledOnly = $true
-    $InstalledCount = @($script:InstalledScanState.Inventory).Count
-    $script:InstalledAppsInventory.Clear()
+function Get-AMRShowInstalledDiagnosticDetails {
+    param(
+        [Parameter(Mandatory=$true)]$ErrorRecord,
+        [Parameter(Mandatory=$true)][string]$Stage
+    )
 
-    # Build lookup tables once. The previous nested catalog scan was O(installed x catalog)
-    # on the UI thread and caused a long pause when Show Installed contained many records.
-    $catalogById = @{}
-    $catalogByName = @{}
-    foreach ($catalogApp in $script:SoftwareCatalog) {
-        $catalogId = [string]$catalogApp.Id
-        if ($catalogId) { $catalogById[$catalogId.ToLowerInvariant()] = $catalogApp }
-        $catalogName = ([string]$catalogApp.Name -replace '[^a-zA-Z0-9]','').ToLowerInvariant()
-        if ($catalogName -and -not $catalogByName.ContainsKey($catalogName)) { $catalogByName[$catalogName] = $catalogApp }
-    }
-    foreach ($record in @($script:InstalledScanState.Inventory)) {
-        $record.IsUniversalInventory = $true
-        $record.DetailsExpanded = $false
-        $record.Category = ''
-        $copyablePath = if (-not [string]::IsNullOrWhiteSpace([string]$record.InstallLocation)) { [string]$record.InstallLocation } elseif (-not [string]::IsNullOrWhiteSpace([string]$record.PortableRootFolder)) { [string]$record.PortableRootFolder } elseif (-not [string]::IsNullOrWhiteSpace([string]$record.PortableExecutablePath)) { [string]$record.PortableExecutablePath } elseif (-not [string]::IsNullOrWhiteSpace([string]$record.PackageFamilyName)) { [string]$record.PackageFamilyName } else { '' }
-        $record.HasCopyableInstallPath = -not [string]::IsNullOrWhiteSpace($copyablePath)
-        $record.DisplayInstallPath = if ($record.HasCopyableInstallPath) { $copyablePath } else { 'Not recorded by Windows' }
-        $recordNorm = ([string]$record.Name -replace '[^a-zA-Z0-9]','').ToLowerInvariant()
-        $match = $null
-        $recordId = [string]$record.Id
-        if ($recordId -and $catalogById.ContainsKey($recordId.ToLowerInvariant())) { $match = $catalogById[$recordId.ToLowerInvariant()] }
-        elseif ($recordNorm -and $catalogByName.ContainsKey($recordNorm)) { $match = $catalogByName[$recordNorm] }
-        if ($null -ne $match) {
-            $record.IsCatalogApp = $true
-            $record.CatalogId = [string]$match.Id
-            $record.Category = [string]$match.Category
-            if ($null -eq $record.Icon) { $record.Icon = $match.Icon }
+    $lineNumber = 0
+    $commandName = ''
+    $positionMessage = ''
+    $stackTrace = ''
+    $errorId = ''
+    $targetObject = ''
+    try { $lineNumber = [int]$ErrorRecord.InvocationInfo.ScriptLineNumber } catch {}
+    try { $commandName = [string]$ErrorRecord.InvocationInfo.MyCommand.Name } catch {}
+    try { $positionMessage = [string]$ErrorRecord.InvocationInfo.PositionMessage } catch {}
+    try { $stackTrace = [string]$ErrorRecord.ScriptStackTrace } catch {}
+    try { $errorId = [string]$ErrorRecord.FullyQualifiedErrorId } catch {}
+    try { $targetObject = [string]$ErrorRecord.TargetObject } catch {}
+
+    $details = @(
+        ('Stage: {0}' -f $Stage)
+        ('Exception: {0}' -f $ErrorRecord.Exception.ToString())
+        ('Script line: {0}' -f $lineNumber)
+        ('Command: {0}' -f $commandName)
+        ('Error ID: {0}' -f $errorId)
+        ('Target object: {0}' -f $targetObject)
+        'Position:'
+        $positionMessage
+        'PowerShell stack trace:'
+        $stackTrace
+    )
+    return ($details -join [Environment]::NewLine)
+}
+
+function Start-AMRInstalledGridPageBuild {
+    param(
+        [Parameter(Mandatory=$true)]$View,
+        [bool]$WasInstalledViewVisible,
+        [int]$InstalledCount,
+        [string]$RestoreCategory = '',
+        [double]$RestoreScrollOffset = 0,
+        [int]$InventoryGeneration = -1
+    )
+
+    if ($script:InstalledGridPageBuildState) {
+        $existingBuild = $script:InstalledGridPageBuildState
+        if ([int]$existingBuild.InventoryGeneration -eq [int]$script:InstalledInventoryGeneration -and
+            [object]::ReferenceEquals($existingBuild.View,$View)) {
+            if ($existingBuild.Timer -and -not $existingBuild.Timer.IsEnabled) {
+                $existingBuild.Timer.Start()
+                Write-AMRLog 'Resumed the existing Installed page-build state; duplicate build was suppressed.' INFO Software
+            } elseif ($existingBuild.Timer) {
+                Write-AMRLog 'Duplicate Installed page-build request ignored; an equivalent build is already active.' INFO Software
+            }
+            return
         }
-        [void]$script:InstalledAppsInventory.Add($record)
+        try { if ($existingBuild.Timer) { $existingBuild.Timer.Stop() } } catch {}
+        try { if ($existingBuild.ViewEnumerator) { $existingBuild.ViewEnumerator.Dispose() } } catch {}
     }
-    $script:InstalledAppsView = [System.Windows.Data.CollectionViewSource]::GetDefaultView($script:InstalledAppsInventory)
-    $script:SelectedSoftwareCategory = 'All Applications'
+
+    # Do not enumerate the entire CollectionView synchronously on the WPF UI thread.
+    # The dispatcher state machine groups it directly in short time-budgeted slices.
+    $categoryNames = @($script:SoftwareCategoryNames)
+    $groups = @{}
+    $categoryOrdinals = @{}
+    for ($categoryIndex = 0; $categoryIndex -lt $categoryNames.Count; $categoryIndex++) {
+        $categoryName = [string]$categoryNames[$categoryIndex]
+        $groups[$categoryName] = New-Object 'System.Collections.Generic.List[object]'
+        $categoryOrdinals[$categoryName] = [int]($categoryIndex + 1)
+    }
+
+    $state = [pscustomobject]@{
+        View = $View
+        ViewEnumerator = $View.GetEnumerator()
+        CategoryNames = $categoryNames
+        Groups = $groups
+        CategoryOrdinals = $categoryOrdinals
+        Uncategorised = (New-Object 'System.Collections.Generic.List[object]')
+        OrderedItems = (New-Object 'System.Collections.Generic.List[object]')
+        Index = 0
+        Phase = 'Collect'
+        CategoryIndex = 0
+        GroupIndex = 0
+        CurrentGroup = $null
+        GroupItemIndex = 0
+        FirstInGroup = $true
+        AppIndexInGroup = 0
+        CurrentOrdinal = 0
+        Mode = 'Installed'
+        ScrollPrefetchPending = $false
+        BatchSize = 64
+        TickBudgetMilliseconds = 5
+        Timer = $null
+        FirstPageCommitted = $false
+        PageItems = $null
+        WasInstalledViewVisible = $WasInstalledViewVisible
+        InstalledCount = $InstalledCount
+        InventoryGeneration = if ($InventoryGeneration -ge 0) { $InventoryGeneration } else { [int]$script:InstalledInventoryGeneration }
+        RestoreCategory = $RestoreCategory
+        RestoreScrollOffset = $RestoreScrollOffset
+    }
+    # Never let Installed scroll paging read the previous All Applications source.
+    $script:SoftwareGridPageMode = 'Installed'
+    $script:SoftwareGridPageSource = @()
+    $script:SoftwareGridPageIndex = 0
+    $script:InstalledGridPageBuildState = $state
+
+    $timer = [System.Windows.Threading.DispatcherTimer]::new([System.Windows.Threading.DispatcherPriority]::Background)
+    $timer.Interval = [TimeSpan]::FromMilliseconds(15)
+    $timer.Add_Tick({ Complete-AMRInstalledGridPageBuildBatch })
+    $state.Timer = $timer
+    $timer.Start()
+}
+
+function Publish-AMRInstalledFirstPage {
+    param([Parameter(Mandatory=$true)]$State)
+
+    if (-not $script:ShowInstalledOnly) { return }
+    if ($State.OrderedItems.Count -lt 4) { return }
+    try {
+        if (-not $State.FirstPageCommitted) {
+            $pageItems = New-Object 'System.Collections.ObjectModel.ObservableCollection[object]'
+            for ($index = 0; $index -lt 4; $index++) {
+                [void]$pageItems.Add($State.OrderedItems[$index])
+            }
+            $State.PageItems = $pageItems
+            $State.FirstPageCommitted = $true
+            $script:SoftwareGridPageMode = 'Installed'
+            $script:SoftwareGridPageIndex = 4
+            $script:SoftwareGridPageSize = 4
+            $script:SoftwareGridPageItems = $pageItems
+            (C 'SoftwareGrid').ItemsSource = $pageItems
+            Invoke-AMRSoftwareGridViewTransition
+            Queue-AMRSoftwareIconSync
+            (C 'SoftwareScrollViewer').ScrollToTop()
+            Write-AMRLog ('Installed view first row published for inventory generation ' + [string]$State.InventoryGeneration + '; additional rows will appear progressively.') INFO Software
+            return
+        }
+
+        # Keep the early reveal capped at 64, then satisfy scroll demand directly
+        # from this Installed build's OrderedItems as additional rows become ready.
+        if ($State.PageItems.Count -lt 64) {
+            $available = $State.OrderedItems.Count - $State.PageItems.Count
+            if ($available -ge 4) {
+                $appendEnd = [Math]::Min([Math]::Min($State.PageItems.Count + 4,64),$State.OrderedItems.Count)
+                while ($State.PageItems.Count -lt $appendEnd) {
+                    [void]$State.PageItems.Add($State.OrderedItems[$State.PageItems.Count])
+                }
+                $script:SoftwareGridPageItems = $State.PageItems
+                $script:SoftwareGridPageIndex = [int]$State.PageItems.Count
+            }
+        }
+        Invoke-AMRSoftwareGridPrefetchDemand -State $State
+    } catch {
+        $State.FirstPageCommitted = $false
+        $State.PageItems = $null
+        Write-AMRLog ('Could not publish the Installed cards progressively: ' + $_.Exception.Message) WARNING Software
+    }
+}
+
+function Complete-AMRInstalledGridPageBuildBatch {
+    $state = $script:InstalledGridPageBuildState
+    if (-not $state -or -not $script:ShowInstalledOnly) { return }
+
+    try {
+        switch ($state.Phase) {
+            'Collect' {
+                $watch = [System.Diagnostics.Stopwatch]::StartNew()
+                while ($watch.ElapsedMilliseconds -lt $state.TickBudgetMilliseconds) {
+                    if (-not $state.ViewEnumerator.MoveNext()) {
+                        try { $state.ViewEnumerator.Dispose() } catch {}
+                        $state.ViewEnumerator = $null
+                        $state.Phase = 'CategoryStart'
+                        $state.Index = 0
+                        break
+                    }
+                    $item = $state.ViewEnumerator.Current
+                    $category = [string]$item.Category
+                    if ($state.Groups.ContainsKey($category)) {
+                        [void]$state.Groups[$category].Add($item)
+                    } elseif ([string]::IsNullOrWhiteSpace($category)) {
+                        [void]$state.Uncategorised.Add($item)
+                    }
+                }
+                return
+            }
+            'CategoryStart' {
+                while ($state.CategoryIndex -lt $state.CategoryNames.Count) {
+                    $categoryName = [string]$state.CategoryNames[$state.CategoryIndex]
+                    $groupItems = $state.Groups[$categoryName]
+                    if ($groupItems.Count -eq 0) {
+                        $state.CategoryIndex++
+                        continue
+                    }
+
+                    if ($state.GroupIndex -gt 0) {
+                        $remainder = $state.OrderedItems.Count % 4
+                        if ($remainder -ne 0) {
+                            $padCount = 4 - $remainder
+                            for ($pad = 0; $pad -lt $padCount; $pad++) {
+                                $spacer = [pscustomobject]@{
+                                    IsCategorySpacer = $true
+                                    IsCategoryStart = $false
+                                    IsCategoryHeaderRow = $false
+                                    CategoryNumber = ''
+                                    Category = ''
+                                    Icon = $null
+                                    Initials = ''
+                                }
+                                [void]$state.OrderedItems.Add($spacer)
+                            }
+                        }
+                    }
+
+                    $state.CurrentGroup = $groupItems
+                    $state.GroupItemIndex = 0
+                    $state.FirstInGroup = $true
+                    $state.AppIndexInGroup = 0
+                    $state.CurrentOrdinal = [int]$state.CategoryOrdinals[$categoryName]
+                    $state.Phase = 'CategoryItems'
+                    return
+                }
+                $state.Phase = 'Uncategorised'
+                $state.Index = 0
+                return
+            }
+            'CategoryItems' {
+                $watch = [System.Diagnostics.Stopwatch]::StartNew()
+                $endIndex = [Math]::Min(
+                    $state.GroupItemIndex + $state.BatchSize,
+                    $state.CurrentGroup.Count
+                )
+                while ($state.GroupItemIndex -lt $endIndex -and $watch.ElapsedMilliseconds -lt $state.TickBudgetMilliseconds) {
+                    $app = $state.CurrentGroup[$state.GroupItemIndex]
+                    foreach ($propertyName in @('IsCategorySpacer','IsCategoryStart','IsCategoryHeaderRow','CategoryNumber')) {
+                        if (-not $app.PSObject.Properties[$propertyName]) {
+                            $app | Add-Member -NotePropertyName $propertyName -NotePropertyValue $null
+                        }
+                    }
+                    $app.IsCategorySpacer = $false
+                    $app.IsCategoryStart = [bool]($state.FirstInGroup -and $state.CurrentOrdinal -gt 1)
+                    $app.IsCategoryHeaderRow = [bool]($state.CurrentOrdinal -gt 1 -and $state.AppIndexInGroup -lt 4)
+                    $app.CategoryNumber = if ($state.CurrentOrdinal -gt 1) { [string]$state.CurrentOrdinal } else { '' }
+                    [void]$state.OrderedItems.Add($app)
+                    $state.FirstInGroup = $false
+                    $state.AppIndexInGroup++
+                    $state.GroupItemIndex++
+                    if (-not $state.FirstPageCommitted -and $state.OrderedItems.Count -ge 4) {
+                        Publish-AMRInstalledFirstPage -State $state
+                        return
+                    }
+                }
+                Publish-AMRInstalledFirstPage -State $state
+                if ($state.GroupItemIndex -ge $state.CurrentGroup.Count) {
+                    $state.GroupIndex++
+                    $state.CategoryIndex++
+                    $state.Phase = 'CategoryStart'
+                }
+                return
+            }
+            'Uncategorised' {
+                $watch = [System.Diagnostics.Stopwatch]::StartNew()
+                $endIndex = [Math]::Min($state.Index + $state.BatchSize, $state.Uncategorised.Count)
+                while ($state.Index -lt $endIndex -and $watch.ElapsedMilliseconds -lt $state.TickBudgetMilliseconds) {
+                    $app = $state.Uncategorised[$state.Index]
+                    foreach ($propertyName in @('IsCategorySpacer','IsCategoryStart','IsCategoryHeaderRow','CategoryNumber')) {
+                        if (-not $app.PSObject.Properties[$propertyName]) {
+                            $app | Add-Member -NotePropertyName $propertyName -NotePropertyValue $null
+                        }
+                    }
+                    $app.IsCategorySpacer = $false
+                    $app.IsCategoryStart = $false
+                    $app.IsCategoryHeaderRow = $false
+                    $app.CategoryNumber = ''
+                    [void]$state.OrderedItems.Add($app)
+                    $state.Index++
+                    if (-not $state.FirstPageCommitted -and $state.OrderedItems.Count -ge 4) {
+                        Publish-AMRInstalledFirstPage -State $state
+                        return
+                    }
+                }
+                Publish-AMRInstalledFirstPage -State $state
+                if ($state.Index -ge $state.Uncategorised.Count) {
+                    $state.Phase = 'Commit'
+                }
+                return
+            }
+            'Commit' {
+                $state.Timer.Stop()
+                try { if ($state.ViewEnumerator) { $state.ViewEnumerator.Dispose() } } catch {}
+                $state.ViewEnumerator = $null
+                $script:SoftwareGridPageMode = 'Installed'
+                $script:SoftwareGridPageSource = $state.OrderedItems.ToArray()
+                $script:SoftwareGridPageSize = 4
+                $script:InstalledRefreshPending = $false
+                $script:InstalledViewCache = [pscustomobject]@{
+                    InventoryGeneration = [int]$state.InventoryGeneration
+                    SearchText = [string](C 'SearchBox').Text
+                    SelectedCategory = [string]$state.RestoreCategory
+                    Inventory = $script:InstalledAppsInventory
+                    View = $script:InstalledAppsView
+                    PageSource = $script:SoftwareGridPageSource
+                    PageItems = $script:SoftwareGridPageItems
+                    PageIndex = [int]$script:SoftwareGridPageIndex
+                    ScrollOffset = [double]$state.RestoreScrollOffset
+                }
+                if ($state.FirstPageCommitted -and $state.PageItems) {
+                    # Keep the first rendered row alive; the completed source now feeds progressive paging.
+                    $script:SoftwareGridPageItems = $state.PageItems
+                    $script:SoftwareGridPageIndex = [int]$state.PageItems.Count
+                } else {
+                    $newPageItems = New-Object 'System.Collections.ObjectModel.ObservableCollection[object]'
+                    $script:SoftwareGridPageIndex = 0
+                    $initialEnd = [Math]::Min(4, $script:SoftwareGridPageSource.Count)
+                    while ($script:SoftwareGridPageIndex -lt $initialEnd) {
+                        [void]$newPageItems.Add($script:SoftwareGridPageSource[$script:SoftwareGridPageIndex])
+                        $script:SoftwareGridPageIndex++
+                    }
+                    $script:SoftwareGridPageItems = $newPageItems
+                    (C 'SoftwareGrid').ItemsSource = $script:SoftwareGridPageItems
+                    Invoke-AMRSoftwareGridViewTransition
+                    Queue-AMRSoftwareIconSync
+                    (C 'SoftwareScrollViewer').ScrollToTop()
+                }
+                Start-AMRSoftwareGridWarmup
+                if ($script:InstalledViewCache) {
+                    $script:InstalledViewCache.PageItems = $script:SoftwareGridPageItems
+                    $script:InstalledViewCache.PageIndex = [int]$script:SoftwareGridPageIndex
+                    $script:InstalledViewCache.PageSource = $script:SoftwareGridPageSource
+                }
+
+                $script:SuppressSoftwareCategorySelectionChanged = $true
+                try {
+                    if ($state.RestoreCategory) {
+                        $categoryItem = @($script:SoftwareCategories | Where-Object {
+                            [string]$_.Name -eq $state.RestoreCategory
+                        } | Select-Object -First 1)
+                        if ($categoryItem.Count -gt 0) {
+                            $script:SelectedSoftwareCategory = $state.RestoreCategory
+                            (C 'SoftwareCategoryList').SelectedItem = $categoryItem[0]
+                        }
+                    } else {
+                        $script:SelectedSoftwareCategory = 'All Applications'
+                        (C 'SoftwareCategoryList').SelectedIndex = 0
+                    }
+                } finally {
+                    $script:SuppressSoftwareCategorySelectionChanged = $false
+                }
+
+                Start-AMRInstalledLocalIconRefresh
+                $button = C 'ShowInstalledBtn'
+                $button.Content = "Show All ($($state.InstalledCount))"
+                $button.ToolTip = 'Return to the full software catalog.'
+                $button.IsEnabled = $true
+                (C 'UninstallSelectedBtn').Visibility = 'Visible'
+                if ($state.RestoreCategory) {
+                    $restoreOffset = [double]$state.RestoreScrollOffset
+                    $null = $script:Window.Dispatcher.BeginInvoke([Action]{
+                        try { (C 'SoftwareScrollViewer').ScrollToVerticalOffset($restoreOffset) } catch {}
+                    }, [System.Windows.Threading.DispatcherPriority]::Loaded)
+                }
+                Write-AMRLog "Universal installed inventory displayed: $($state.InstalledCount) record(s)." INFO Software
+                $script:ProgressText.Text = ''
+                Set-AMRShowInstalledButtonBusy -Busy $false -Label "Show All ($($state.InstalledCount))"
+                Set-AMRShowInstalledButtonMode -Mode Installed
+                $button.Content = "Show All ($($state.InstalledCount))"
+                $button.ToolTip = 'Return to the full software catalog.'
+                $script:InstalledGridPageBuildState = $null
+                return
+            }
+        }
+    } catch {
+        try { if ($state.Timer) { $state.Timer.Stop() } } catch {}
+        try { if ($state.ViewEnumerator) { $state.ViewEnumerator.Dispose() } } catch {}
+        $state.ViewEnumerator = $null
+        if (-not $state.WasInstalledViewVisible) {
+            Set-AMRShowInstalledButtonBusy -Busy $false -Label 'Show Installed'
+            Reset-AMRInstalledViewAfterPreparationFailure
+        }
+        $diagnosticDetails = Get-AMRShowInstalledDiagnosticDetails -ErrorRecord $_ -Stage 'Installed card/page preparation'
+        Write-AMRLog "Could not prepare the Show Installed cards:`n$diagnosticDetails" ERROR Software
+        Show-AMRMessage "Could not prepare the installed-applications cards:`n`n$diagnosticDetails" 'Installed Apps' OK Error | Out-Null
+        $script:InstalledGridPageBuildState = $null
+    }
+}
+function Initialize-AMRInstalledViewContext {
+    param(
+        [Parameter(Mandatory=$true)]$Inventory,
+        [string]$RestoreCategory = ''
+    )
+
+    # This helper runs in the original script scope, not the DispatcherTimer
+    # closure module. Keep all script-scoped view state changes here.
+    $script:InstalledAppsView = [System.Windows.Data.CollectionViewSource]::GetDefaultView($Inventory)
+    $script:SelectedSoftwareCategory = if ($RestoreCategory) { $RestoreCategory } else { 'All Applications' }
     $script:InstalledAppsView.Filter = [System.Predicate[object]]{ param($item)
         $selectedCategory = [string]$script:SelectedSoftwareCategory
         if ($selectedCategory -and $selectedCategory -ne 'All Applications' -and [string]$item.Category -ne $selectedCategory) { return $false }
@@ -15936,17 +17661,322 @@ function Set-AMRInstalledViewVisible {
         $escaped = [regex]::Escape($searchText)
         return ([string]$item.Name -match "(?i)$escaped") -or ([string]$item.Id -match "(?i)$escaped") -or ([string]$item.Publisher -match "(?i)$escaped")
     }
-    (C 'SoftwareCategoryList').ItemsSource = $script:SoftwareCategories
-    (C 'SoftwareCategoryList').SelectedIndex = 0
+
+    $script:SuppressSoftwareCategorySelectionChanged = $true
+    try {
+        (C 'SoftwareCategoryList').ItemsSource = $script:SoftwareCategories
+    } finally {
+        $script:SuppressSoftwareCategorySelectionChanged = $false
+    }
     Update-AMRSoftwareCategoryCounts
-    Reset-AMRSoftwareGridPages -View $script:InstalledAppsView
-    Start-AMRInstalledLocalIconRefresh
-    (C 'ShowInstalledBtn').Content = "Show All ($InstalledCount)"
-    (C 'ShowInstalledBtn').ToolTip = 'Return to the full software catalog.'
-    (C 'ShowInstalledBtn').IsEnabled = $true
-    (C 'UninstallSelectedBtn').Visibility = 'Visible'
-    Write-AMRLog "Universal installed inventory displayed: $InstalledCount record(s)." INFO Software
+    return $script:InstalledAppsView
 }
+
+function Clear-AMRInstalledViewPreparationState {
+    $script:InstalledViewPreparationState = $null
+}
+
+function Reset-AMRInstalledViewAfterPreparationFailure {
+    $script:ShowInstalledOnly = $false
+    $script:SoftwareGridTransitionPending = $true
+
+    # A failed Installed preparation must not strand a paused catalog builder.
+    # Restore its original category and exact partial page when its search input
+    # is still current; otherwise discard it and rebuild from the current view.
+    $pausedCatalogBuild = $script:CatalogGridPageBuildState
+    if ($pausedCatalogBuild -and
+        [object]::ReferenceEquals($pausedCatalogBuild.View,$script:AppsView) -and
+        [string]$pausedCatalogBuild.SearchText -ceq [string](C 'SearchBox').Text) {
+        $script:SuppressSoftwareCategorySelectionChanged = $true
+        try {
+            $script:SelectedSoftwareCategory = [string]$pausedCatalogBuild.SelectedCategory
+            $savedCategoryItem = @($script:SoftwareCategories | Where-Object { [string]$_.Name -eq [string]$pausedCatalogBuild.SelectedCategory } | Select-Object -First 1)
+            if ($savedCategoryItem.Count -gt 0) { (C 'SoftwareCategoryList').SelectedItem = $savedCategoryItem[0] }
+            else { (C 'SoftwareCategoryList').SelectedIndex = 0 }
+        } finally { $script:SuppressSoftwareCategorySelectionChanged = $false }
+        $script:SoftwareGridPageMode = 'Catalog'
+        $catalogGrid = C 'SoftwareGrid'
+        if ($pausedCatalogBuild.FirstPageCommitted -and $pausedCatalogBuild.PageItems) {
+            $script:SoftwareGridPageItems = $pausedCatalogBuild.PageItems
+            $script:SoftwareGridPageIndex = [int]$pausedCatalogBuild.PageItems.Count
+            if (-not [object]::ReferenceEquals($catalogGrid.ItemsSource,$pausedCatalogBuild.PageItems)) {
+                $catalogGrid.ItemsSource = $pausedCatalogBuild.PageItems
+            }
+        }
+        try {
+            $restoreOffset = [double]$pausedCatalogBuild.ScrollOffset
+            $null = $script:Window.Dispatcher.BeginInvoke([Action]{
+                try { (C 'SoftwareScrollViewer').ScrollToVerticalOffset($restoreOffset) } catch {}
+            }, [System.Windows.Threading.DispatcherPriority]::Loaded)
+        } catch {}
+        if ($pausedCatalogBuild.Timer) { $pausedCatalogBuild.Timer.Start() }
+    } else {
+        if ($pausedCatalogBuild) {
+            try { if ($pausedCatalogBuild.Timer) { $pausedCatalogBuild.Timer.Stop() } } catch {}
+            try { if ($pausedCatalogBuild.ViewEnumerator) { $pausedCatalogBuild.ViewEnumerator.Dispose() } } catch {}
+            $script:CatalogGridPageBuildState = $null
+        }
+        if ($script:AppsView) {
+            $script:AppsView.Refresh()
+            Reset-AMRSoftwareGridPages -View $script:AppsView
+        }
+    }
+
+    Invoke-AMRSoftwareGridViewTransition
+    Resume-AMRSoftwareCatalogPaging -DelayMilliseconds 600
+}
+
+function Set-AMRInstalledViewVisible {
+    param(
+        [int]$InstalledCount,
+        [switch]$PreserveCurrentView
+    )
+
+    Suspend-AMRSoftwareCatalogPaging
+    if ($script:CatalogGridPageBuildState) {
+        # Keep the exact enumerator and partial ordered items while Installed owns
+        # the visible surface. Resume only after the catalog surface returns.
+        try { if ($script:CatalogGridPageBuildState.Timer) { $script:CatalogGridPageBuildState.Timer.Stop() } } catch {}
+        Write-AMRLog 'Paused the in-progress catalog builder without disposing its enumerator or partial ordered items.' INFO Software
+    }
+
+    # A background inventory refresh may complete while the user is on Show All.
+    # Never resume a paused Installed build that belongs to an older inventory generation.
+    if ($script:InstalledViewPreparationState -and
+        [int]$script:InstalledViewPreparationState.InventoryGeneration -ne [int]$script:InstalledInventoryGeneration) {
+        try { if ($script:InstalledViewPreparationState.Timer) { $script:InstalledViewPreparationState.Timer.Stop() } } catch {}
+        $script:InstalledViewPreparationState = $null
+        Write-AMRLog 'Discarded paused Installed mapping state because the inventory generation changed.' INFO Software
+    }
+    if ($script:InstalledGridPageBuildState -and
+        [int]$script:InstalledGridPageBuildState.InventoryGeneration -ne [int]$script:InstalledInventoryGeneration) {
+        try { if ($script:InstalledGridPageBuildState.Timer) { $script:InstalledGridPageBuildState.Timer.Stop() } } catch {}
+        try { if ($script:InstalledGridPageBuildState.ViewEnumerator) { $script:InstalledGridPageBuildState.ViewEnumerator.Dispose() } } catch {}
+        $script:InstalledGridPageBuildState = $null
+        Write-AMRLog 'Discarded paused Installed card-ordering state because the inventory generation changed.' INFO Software
+    }
+
+    # If the user switched away while Installed was still being prepared, resume that exact work.
+    # Do not clear the partially processed inventory or restart its dispatcher batches.
+    if (-not $PreserveCurrentView -and $script:InstalledViewPreparationState -and $script:InstalledViewPreparationState.Timer) {
+        $script:ShowInstalledOnly = $true
+        if ($script:ProgressText) { $script:ProgressText.Text = 'Resuming installed applications...' }
+        $script:InstalledViewPreparationState.Timer.Start()
+        Write-AMRLog 'Resumed the paused Installed inventory-to-card preparation at its previous index.' INFO Software
+        return
+    }
+    if (-not $PreserveCurrentView -and $script:InstalledGridPageBuildState -and $script:InstalledGridPageBuildState.Timer) {
+        $script:ShowInstalledOnly = $true
+        $buildState = $script:InstalledGridPageBuildState
+        if ($buildState.FirstPageCommitted -and $buildState.PageItems) {
+            $script:SoftwareGridPageMode = 'Installed'
+            $script:SoftwareGridPageItems = $buildState.PageItems
+            $script:SoftwareGridPageIndex = [int]$buildState.PageItems.Count
+            $activeInstalledGrid = C 'SoftwareGrid'
+            if (-not [object]::ReferenceEquals($activeInstalledGrid.ItemsSource,$script:SoftwareGridPageItems)) {
+                $activeInstalledGrid.ItemsSource = $script:SoftwareGridPageItems
+            }
+            Invoke-AMRSoftwareGridViewTransition
+        }
+        if ($script:ProgressText) { $script:ProgressText.Text = 'Resuming installed application cards...' }
+        $buildState.Timer.Start()
+        Write-AMRLog 'Resumed the paused Installed category-ordering/page build at its previous phase and index.' INFO Software
+        return
+    }
+
+    # Reattach the already-prepared Installed view when its inventory and filter are unchanged.
+    # A deferred background inventory update increments the generation and invalidates
+    # this cache, so the next explicit entry builds once from the fresh snapshot.
+    $savedInstalledView = $script:InstalledViewCache
+    if (-not $PreserveCurrentView -and $savedInstalledView -and
+        [int]$savedInstalledView.InventoryGeneration -eq [int]$script:InstalledInventoryGeneration -and
+        [string]$savedInstalledView.SearchText -ceq [string](C 'SearchBox').Text) {
+        try {
+            $script:ShowInstalledOnly = $true
+            $script:InstalledAppsInventory = $savedInstalledView.Inventory
+            $script:InstalledAppsView = $savedInstalledView.View
+            $script:SoftwareGridPageMode = 'Installed'
+            $script:SoftwareGridPageSource = $savedInstalledView.PageSource
+            $script:SoftwareGridPageItems = $savedInstalledView.PageItems
+            $script:SoftwareGridPageIndex = [int]$savedInstalledView.PageIndex
+            $script:SoftwareGridPageSize = 4
+            $script:SelectedSoftwareCategory = [string]$savedInstalledView.SelectedCategory
+            # The cache generation and search text were validated above. Refreshing
+            # this CollectionView here is unnecessary and can regenerate every card
+            # container during a simple view switch, producing a visible second pass.
+            $activeInstalledGrid = C 'SoftwareGrid'
+            if (-not [object]::ReferenceEquals($activeInstalledGrid.ItemsSource,$script:SoftwareGridPageItems)) {
+                $activeInstalledGrid.ItemsSource = $script:SoftwareGridPageItems
+            }
+            $script:SuppressSoftwareCategorySelectionChanged = $true
+            try {
+                $categoryItem = @($script:SoftwareCategories | Where-Object { [string]$_.Name -eq [string]$savedInstalledView.SelectedCategory } | Select-Object -First 1)
+                if ($categoryItem.Count -gt 0) { (C 'SoftwareCategoryList').SelectedItem = $categoryItem[0] }
+                else { (C 'SoftwareCategoryList').SelectedIndex = 0 }
+            } finally { $script:SuppressSoftwareCategorySelectionChanged = $false }
+            Invoke-AMRSoftwareGridViewTransition
+            Start-AMRSoftwareGridWarmup
+            $button = C 'ShowInstalledBtn'
+            if ($button) {
+                $button.Content = "Show All ($InstalledCount)"
+                $button.ToolTip = 'Return to the full software catalog.'
+                $button.IsEnabled = $true
+            }
+            (C 'UninstallSelectedBtn').Visibility = 'Visible'
+            Set-AMRShowInstalledButtonBusy -Busy $false -Label "Show All ($InstalledCount)"
+            Set-AMRShowInstalledButtonMode -Mode Installed
+            if ($script:ProgressText) { $script:ProgressText.Text = '' }
+            $scroll = C 'SoftwareScrollViewer'
+            if ($scroll) {
+                $restoreOffset = [double]$savedInstalledView.ScrollOffset
+                $null = $script:Window.Dispatcher.BeginInvoke([Action]{
+                    try { (C 'SoftwareScrollViewer').ScrollToVerticalOffset($restoreOffset) } catch {}
+                }, [System.Windows.Threading.DispatcherPriority]::Loaded)
+            }
+            Write-AMRLog 'Restored the existing Installed card collection from memory; inventory mapping and card ordering were skipped.' INFO Software
+            return
+        } catch {
+            Write-AMRLog ("Installed view cache restore failed; rebuilding safely: " + $_.Exception.Message) WARNING Software
+            $script:InstalledViewCache = $null
+        }
+    }
+
+    # Use one loading path for both cached and freshly scanned inventory.
+    # Keep the button animation alive while inventory records and cards are
+    # prepared in small UI-thread batches, allowing WPF to render between batches.
+    if (-not $script:ShowInstalledOnly -and -not $script:ShowInstalledButtonBusyState.Active) {
+        Set-AMRShowInstalledButtonBusy -Busy $true -Label 'Scanning...'
+    }
+
+    $wasInstalledViewVisible = [bool]$script:ShowInstalledOnly
+    $restoreCategory = ''
+    $restoreScrollOffset = 0.0
+    if ($PreserveCurrentView) {
+        $restoreCategory = [string]$script:SelectedSoftwareCategory
+        try { $restoreScrollOffset = [double](C 'SoftwareScrollViewer').VerticalOffset } catch {}
+    }
+
+    $script:ShowInstalledOnly = $true
+    $inventoryGenerationAtStart = [int]$script:InstalledInventoryGeneration
+    $inventorySnapshot = $script:InstalledScanState.Inventory
+    # Capture the original collection before creating the DispatcherTimer closure.
+    # GetNewClosure() has its own script scope, so $script: references inside the
+    # callback must not be used to reach this collection.
+    $installedAppsInventory = $script:InstalledAppsInventory
+    $installedAppsInventory.Clear()
+
+    # Build catalog lookup tables incrementally instead of blocking the UI
+    # before the first dispatcher tick. Preserve ID-first/name-fallback matching.
+    $catalogLookupCached = [bool](
+        $script:InstalledCatalogLookupById -and
+        $script:InstalledCatalogLookupByName -and
+        [object]::ReferenceEquals($script:InstalledCatalogLookupSource,$script:SoftwareCatalog)
+    )
+    $work = [pscustomobject]@{
+        Inventory = $inventorySnapshot
+        Index = 0
+        CatalogSnapshot = $script:SoftwareCatalog
+        CatalogIndex = if ($catalogLookupCached) { $script:SoftwareCatalog.Count } else { 0 }
+        CatalogById = if ($catalogLookupCached) { $script:InstalledCatalogLookupById } else { @{} }
+        CatalogByName = if ($catalogLookupCached) { $script:InstalledCatalogLookupByName } else { @{} }
+        LookupReady = $catalogLookupCached
+        LookupCachePublished = $catalogLookupCached
+        TickBudgetMilliseconds = 5
+        InventoryGeneration = $inventoryGenerationAtStart
+        Timer = $null
+    }
+    $script:InstalledViewPreparationState = $work
+
+    $timer = [System.Windows.Threading.DispatcherTimer]::new([System.Windows.Threading.DispatcherPriority]::Background)
+    $timer.Interval = [TimeSpan]::FromMilliseconds(15)
+    $work.Timer = $timer
+
+    $timer.Add_Tick({
+        try {
+            $watch = [System.Diagnostics.Stopwatch]::StartNew()
+
+            # Phase A: incrementally build lookup tables, yielding to WPF every
+            # few milliseconds even when the software catalog is large.
+            while (-not $work.LookupReady -and $watch.ElapsedMilliseconds -lt $work.TickBudgetMilliseconds) {
+                if ($work.CatalogIndex -ge $work.CatalogSnapshot.Count) {
+                    $work.LookupReady = $true
+                    break
+                }
+                $catalogApp = $work.CatalogSnapshot[$work.CatalogIndex]
+                $catalogId = [string]$catalogApp.Id
+                if ($catalogId) { $work.CatalogById[$catalogId.ToLowerInvariant()] = $catalogApp }
+                $catalogName = ([string]$catalogApp.Name -replace '[^a-zA-Z0-9]','').ToLowerInvariant()
+                if ($catalogName -and -not $work.CatalogByName.ContainsKey($catalogName)) { $work.CatalogByName[$catalogName] = $catalogApp }
+                $work.CatalogIndex++
+            }
+            if (-not $work.LookupReady) { return }
+            if (-not $work.LookupCachePublished) {
+                # The catalog is static for this app session. Retain its lookup
+                # indexes so subsequent Show Installed switches skip rebuilding
+                # 1,920 ID/name entries before matching the already-known inventory.
+                $script:InstalledCatalogLookupSource = $work.CatalogSnapshot
+                $script:InstalledCatalogLookupById = $work.CatalogById
+                $script:InstalledCatalogLookupByName = $work.CatalogByName
+                $work.LookupCachePublished = $true
+            }
+
+            $batchEnd = [Math]::Min($work.Index + 64, $work.Inventory.Count)
+            while ($work.Index -lt $batchEnd -and $watch.ElapsedMilliseconds -lt $work.TickBudgetMilliseconds) {
+                $record = $work.Inventory[$work.Index]
+                $work.Index++
+
+                $record.IsUniversalInventory = $true
+                $record.DetailsExpanded = $false
+                $record.Category = ''
+                $copyablePath = if (-not [string]::IsNullOrWhiteSpace([string]$record.InstallLocation)) { [string]$record.InstallLocation } elseif (-not [string]::IsNullOrWhiteSpace([string]$record.PortableRootFolder)) { [string]$record.PortableRootFolder } elseif (-not [string]::IsNullOrWhiteSpace([string]$record.PortableExecutablePath)) { [string]$record.PortableExecutablePath } elseif (-not [string]::IsNullOrWhiteSpace([string]$record.PackageFamilyName)) { [string]$record.PackageFamilyName } else { '' }
+                $record.HasCopyableInstallPath = -not [string]::IsNullOrWhiteSpace($copyablePath)
+                $record.DisplayInstallPath = if ($record.HasCopyableInstallPath) { $copyablePath } else { 'Not recorded by Windows' }
+                $recordNorm = ([string]$record.Name -replace '[^a-zA-Z0-9]','').ToLowerInvariant()
+                $match = $null
+                $recordId = [string]$record.Id
+                if ($recordId -and $work.CatalogById.ContainsKey($recordId.ToLowerInvariant())) { $match = $work.CatalogById[$recordId.ToLowerInvariant()] }
+                elseif ($recordNorm -and $work.CatalogByName.ContainsKey($recordNorm)) { $match = $work.CatalogByName[$recordNorm] }
+                if ($null -ne $match) {
+                    $record.IsCatalogApp = $true
+                    $record.CatalogId = [string]$match.Id
+                    $record.Category = [string]$match.Category
+                    if ($null -eq $record.Icon) { $record.Icon = $match.Icon }
+                }
+                [void]$installedAppsInventory.Add($record)
+            }
+
+            if ($work.Index -lt $work.Inventory.Count) { return }
+
+            $work.Timer.Stop()
+            Clear-AMRInstalledViewPreparationState
+            $installedAppsView = Initialize-AMRInstalledViewContext -Inventory $installedAppsInventory -RestoreCategory $restoreCategory
+
+            # Build category ordering and the first visible card page in separate
+            # Dispatcher batches; do not block WPF while preparing the card set.
+            Start-AMRInstalledGridPageBuild `
+                -View $installedAppsView `
+                -WasInstalledViewVisible $wasInstalledViewVisible `
+                -InstalledCount $installedAppsInventory.Count `
+                -RestoreCategory $restoreCategory `
+                -RestoreScrollOffset $restoreScrollOffset `
+                -InventoryGeneration $inventoryGenerationAtStart
+        }
+        catch {
+            try { $work.Timer.Stop() } catch {}
+            Clear-AMRInstalledViewPreparationState
+            if (-not $wasInstalledViewVisible) {
+                Set-AMRShowInstalledButtonBusy -Busy $false -Label 'Show Installed'
+                Reset-AMRInstalledViewAfterPreparationFailure
+            }
+            $diagnosticDetails = Get-AMRShowInstalledDiagnosticDetails -ErrorRecord $_ -Stage 'Installed view preparation'
+            Write-AMRLog "Could not prepare the Show Installed view:`n$diagnosticDetails" ERROR Software
+            Show-AMRMessage "Could not prepare the installed-applications view:`n`n$diagnosticDetails" 'Installed Apps' OK Error | Out-Null
+        }
+    }.GetNewClosure())
+
+    $timer.Start()
+}
+
 
 function Complete-AMRInstalledCatalogScan {
     param($JobState)
@@ -15994,41 +18024,70 @@ function Complete-AMRInstalledCatalogScan {
             # Preserve the current scroll position, category, search text and filters.
             if (-not $script:ShowInstalledOnly -and $script:AppsView) {
                 try {
-                    $softwareScroll = C 'SoftwareScrollViewer'
-                    $savedScrollOffset = [double]$softwareScroll.VerticalOffset
+                    # The catalog card objects are the same objects whose IsInstalled flags
+                    # were updated above. Refresh only the active collection view and re-notify
+                    # realized card bindings; do not rebuild the catalog page or reset paging.
                     $script:AppsView.Refresh()
-                    Reset-AMRSoftwareGridPages -View $script:AppsView
-                    $softwareScroll.UpdateLayout()
-                    $softwareScroll.ScrollToVerticalOffset($savedScrollOffset)
+                    $visibleCards = $script:SoftwareGridPageItems
+                    for ($cardIndex = 0; $cardIndex -lt $visibleCards.Count; $cardIndex++) {
+                        $visibleCards[$cardIndex] = $visibleCards[$cardIndex]
+                    }
                 } catch {
                     Write-AMRLog "Could not refresh installed indicators in the software catalog: $($_.Exception.Message)" WARNING Software
                 }
             }
 
+            $previousInventory = $JobState.Inventory
+            $freshInventory = $payload.Inventory
+            $inventoryChanged = $true
+            if ($JobState.Ready -and $previousInventory.Count -eq $freshInventory.Count) {
+                try {
+                    # Compare as a multiset in linear time. The former pipeline
+                    # created two sorted arrays on the UI thread and could stall
+                    # the Installed transition after a background scan completed.
+                    $previousCounts = [System.Collections.Generic.Dictionary[string,int]]::new([System.StringComparer]::OrdinalIgnoreCase)
+                    foreach ($record in $previousInventory) {
+                        $signature = '{0}|{1}|{2}|{3}' -f [string]$record.Name,[string]$record.Id,[string]$record.Version,[string]$record.Publisher
+                        if ($previousCounts.ContainsKey($signature)) { $previousCounts[$signature] = [int]$previousCounts[$signature] + 1 }
+                        else { $previousCounts[$signature] = 1 }
+                    }
+                    $inventoryChanged = $false
+                    foreach ($record in $freshInventory) {
+                        $signature = '{0}|{1}|{2}|{3}' -f [string]$record.Name,[string]$record.Id,[string]$record.Version,[string]$record.Publisher
+                        if (-not $previousCounts.ContainsKey($signature) -or $previousCounts[$signature] -le 0) {
+                            $inventoryChanged = $true
+                            break
+                        }
+                        $previousCounts[$signature] = [int]$previousCounts[$signature] - 1
+                    }
+                    if (-not $inventoryChanged) {
+                        foreach ($remaining in $previousCounts.Values) {
+                            if ($remaining -ne 0) { $inventoryChanged = $true; break }
+                        }
+                    }
+                } catch { $inventoryChanged = $true }
+            }
+
             $JobState.Ready = $true
             $JobState.Count = [int]$payload.Count
-            $JobState.Inventory = @($payload.Inventory)
+            $JobState.Inventory = $freshInventory
+            if ($inventoryChanged) {
+                $script:InstalledInventoryGeneration = [int]$script:InstalledInventoryGeneration + 1
+                $script:InstalledViewCache = $null
+            }
             $JobState.Error = ''
             [void](Save-AMRInstalledInventoryCache)
 
-            # If the user opened the cached Installed view while refresh was still
-            # running, replace its records with the fresh snapshot without losing
-            # the selected category, search text, or current scroll position.
-            if ($script:ShowInstalledOnly -and $script:InstalledAppsView) {
-                try {
-                    $savedInstalledCategory = [string]$script:SelectedSoftwareCategory
-                    $installedScroll = C 'SoftwareScrollViewer'
-                    $savedInstalledOffset = [double]$installedScroll.VerticalOffset
-                    Set-AMRInstalledViewVisible -InstalledCount $JobState.Count
-                    if ($savedInstalledCategory -and $savedInstalledCategory -ne 'All Applications') {
-                        $categoryItem = @($script:SoftwareCategories | Where-Object { [string]$_.Name -eq $savedInstalledCategory } | Select-Object -First 1)
-                        if ($categoryItem.Count -gt 0) { (C 'SoftwareCategoryList').SelectedItem = $categoryItem[0] }
-                    }
-                    $installedScroll.UpdateLayout()
-                    $installedScroll.ScrollToVerticalOffset($savedInstalledOffset)
-                } catch {
-                    Write-AMRLog "Could not refresh the visible Installed view from the new snapshot: $($_.Exception.Message)" WARNING Software
-                }
+            # Rebuild the visible Installed cards only when the actual inventory changed.
+            # An unchanged background refresh must not interrupt or restart a warm view.
+            if ($inventoryChanged -and $script:ShowInstalledOnly -and -not $JobState.PendingShow -and
+                ($script:InstalledAppsView -or $script:InstalledViewPreparationState -or $script:InstalledGridPageBuildState)) {
+                # Never clear/repopulate the currently visible Installed collection
+                # underneath the user. Keep the displayed snapshot stable; the fresh
+                # inventory is already saved in InstalledScanState and will be used
+                # on the next explicit entry into Show Installed.
+                $script:InstalledRefreshPending = $true
+                Write-AMRLog 'Installed inventory changed during an active Installed view; deferred visual refresh to the next entry to prevent cards disappearing and being recreated.' INFO Software
             }
             foreach ($entry in @($payload.Logs)) {
                 if ($entry -and $entry.Message) {
@@ -16046,9 +18105,11 @@ function Complete-AMRInstalledCatalogScan {
         $JobState.Error = $workerError
         Write-AMRLog "Background installed-app scan failed: $workerError" ERROR Software
         if ($JobState.PendingShow) {
-            (C 'ShowInstalledBtn').Content = 'Show Installed'
-            (C 'ShowInstalledBtn').IsEnabled = $true
+            Resume-AMRSoftwareCatalogPaging -DelayMilliseconds 600
+            Set-AMRShowInstalledButtonBusy -Busy $false -Label 'Show Installed'
             $JobState.PendingShow = $false
+            $script:SoftwareGridTransitionPending = $true
+            Invoke-AMRSoftwareGridViewTransition
             Show-AMRMessage "Could not finish the installed-app scan:`n`n$workerError" 'Installed Apps Scan' OK Error | Out-Null
         }
     }
@@ -16066,7 +18127,6 @@ function Complete-AMRInstalledCatalogScan {
         $JobState.PendingShow = $false
         Set-AMRInstalledViewVisible -InstalledCount $JobState.Count
     }
-    if($script:StartupManagerLoaded){try{Refresh-AMRStartupManager}catch{Write-AMRLog ('Startup app-name enrichment refresh warning: '+$_.Exception.Message) WARNING System}}
 }
 
 function Start-AMRInstalledCatalogScan {
@@ -16187,8 +18247,10 @@ $inventory = @(Get-AMRUniversalInstalledInventory -WingetRawOutput ([string]$sca
         $state.Error = $_.Exception.Message
         $state.Ready = $false
         $state.Current = $null
-        (C 'ShowInstalledBtn').Content = 'Show Installed'
-        (C 'ShowInstalledBtn').IsEnabled = $true
+        Resume-AMRSoftwareCatalogPaging -DelayMilliseconds 600
+        $script:SoftwareGridTransitionPending = $true
+        Invoke-AMRSoftwareGridViewTransition
+        Set-AMRShowInstalledButtonBusy -Busy $false -Label 'Show Installed'
         Write-AMRLog "Could not start the background installed-app scan: $($_.Exception.Message)" ERROR Software
         if ($state.PendingShow) {
             $state.PendingShow = $false
@@ -16214,37 +18276,284 @@ $script:AppsView.Filter = [System.Predicate[object]]{
 
 # Keep the existing four-column UniformGrid and card template. Populate the
 # grid incrementally so opening Software does not create the full catalog at once.
-# Note: the standard ItemsControl/UniformGrid remains non-virtualized; paging only
-# limits the number of cards currently added to the visual tree.
+# Note: this is progressive paging, not true WPF virtualization. The current
+# four-column UniformGrid remains non-virtualized; true recycling needs a panel refactor.
 $script:SoftwareGridPageItems = New-Object 'System.Collections.ObjectModel.ObservableCollection[object]'
 $script:SoftwareGridPageSource = @()
 $script:SoftwareGridPageIndex = 0
-$script:SoftwareGridPageSize = 16
+$script:SoftwareGridPageSize = 4
 $script:SoftwareGridPageBusy = $false
 $script:SoftwareGridPageDispatchPending = $false
+$script:SoftwareGridWarmupTimer = $null
+# Catalog paging is suspended while the Installed view is being prepared/displayed.
+# Installed cards keep their own small progressive batches; only catalog prefetch is paused.
+$script:SoftwareGridPagingPaused = $false
+$script:SoftwareGridPageMode = 'Catalog'
+$script:SoftwareGridResumeTimer = $null
+# Set only for an intentional Show All / Show Installed view switch.
+$script:SoftwareGridTransitionPending = $false
+# Keep both views as live UI state. Switching tabs must not rebuild their cards.
+$script:SoftwareCatalogViewCache = $null
+$script:InstalledViewCache = $null
+$script:InstalledInventoryGeneration = 0
+$script:InstalledRefreshPending = $false
+
+function Save-AMRSoftwareCatalogViewState {
+    try {
+        # A first row can already be visible while the catalog state machine is
+        # still collecting/ordering the remaining categories. That is NOT a
+        # complete cache: restoring it would permanently truncate Show All.
+        if ($script:CatalogGridPageBuildState) {
+            $script:SoftwareCatalogViewCache = $null
+            try { $script:CatalogGridPageBuildState.ScrollOffset = [double](C 'SoftwareScrollViewer').VerticalOffset } catch {}
+            Write-AMRLog 'Catalog build is still in progress; its enumerator, ordered items, and visible page will be paused and retained for Show All.' INFO Software
+            return
+        }
+
+        $viewItemCount = 0
+        try { $viewItemCount = [int]$script:AppsView.Count } catch { $viewItemCount = [int]$script:SoftwareCatalog.Count }
+        if ($script:SoftwareGridPageSource.Count -lt $viewItemCount) {
+            $script:SoftwareCatalogViewCache = $null
+            Write-AMRLog ("Catalog cache rejected as incomplete: source has {0} entries for {1} filtered catalog items." -f $script:SoftwareGridPageSource.Count,$viewItemCount) WARNING Software
+            return
+        }
+
+        $scroll = C 'SoftwareScrollViewer'
+        $script:SoftwareCatalogViewCache = [pscustomobject]@{
+            BuildComplete = $true
+            ViewItemCount = $viewItemCount
+            PageItems = $script:SoftwareGridPageItems
+            PageSource = $script:SoftwareGridPageSource
+            PageIndex = [int]$script:SoftwareGridPageIndex
+            PageSize = [int]$script:SoftwareGridPageSize
+            ScrollOffset = if ($scroll) { [double]$scroll.VerticalOffset } else { 0.0 }
+            SelectedCategory = [string]$script:SelectedSoftwareCategory
+            SearchText = [string](C 'SearchBox').Text
+        }
+        Write-AMRLog ("Saved completed catalog view state: {0}/{1} cards prepared; {2} filtered items." -f $script:SoftwareGridPageIndex, $script:SoftwareGridPageSource.Count,$viewItemCount) INFO Software
+    } catch {
+        $script:SoftwareCatalogViewCache = $null
+        Write-AMRLog ("Could not save catalog view state: " + $_.Exception.Message) WARNING Software
+    }
+}
+
+function Restore-AMRSoftwareCatalogViewState {
+    $cache = $script:SoftwareCatalogViewCache
+    if (-not $cache -or -not $cache.BuildComplete) { return $false }
+    if ([string](C 'SearchBox').Text -cne [string]$cache.SearchText) { return $false }
+    try {
+        $currentViewItemCount = [int]$script:AppsView.Count
+        if ([int]$cache.ViewItemCount -ne $currentViewItemCount -or
+            $cache.PageIndex -gt $cache.PageSource.Count) {
+            Write-AMRLog 'Catalog cache rejected because its source no longer matches the active filtered view.' WARNING Software
+            return $false
+        }
+    } catch {
+        Write-AMRLog ('Catalog cache validation failed; a complete rebuild will be used: ' + $_.Exception.Message) WARNING Software
+        return $false
+    }
+    try {
+        if ($script:SoftwareGridWarmupTimer) { try { $script:SoftwareGridWarmupTimer.Stop() } catch {}; $script:SoftwareGridWarmupTimer = $null }
+        $script:SoftwareGridPageItems = $cache.PageItems
+        $script:SoftwareGridPageSource = $cache.PageSource
+        $script:SoftwareGridPageIndex = [int]$cache.PageIndex
+        $script:SoftwareGridPageSize = [int]$cache.PageSize
+        $script:SoftwareGridPageMode = 'Catalog'
+        $activeCatalogGrid = C 'SoftwareGrid'
+        if (-not [object]::ReferenceEquals($activeCatalogGrid.ItemsSource,$script:SoftwareGridPageItems)) {
+            $activeCatalogGrid.ItemsSource = $script:SoftwareGridPageItems
+        }
+        $script:SuppressSoftwareCategorySelectionChanged = $true
+        try {
+            $script:SelectedSoftwareCategory = [string]$cache.SelectedCategory
+            $categoryItem = @($script:SoftwareCategories | Where-Object { [string]$_.Name -eq [string]$cache.SelectedCategory } | Select-Object -First 1)
+            if ($categoryItem.Count -gt 0) { (C 'SoftwareCategoryList').SelectedItem = $categoryItem[0] }
+            else { (C 'SoftwareCategoryList').SelectedIndex = 0 }
+        } finally { $script:SuppressSoftwareCategorySelectionChanged = $false }
+        $scroll = C 'SoftwareScrollViewer'
+        if ($scroll) {
+            $restoreOffset = [double]$cache.ScrollOffset
+            $null = $script:Window.Dispatcher.BeginInvoke([Action]{
+                try { (C 'SoftwareScrollViewer').ScrollToVerticalOffset($restoreOffset) } catch {}
+            }, [System.Windows.Threading.DispatcherPriority]::Loaded)
+        }
+        Invoke-AMRSoftwareGridViewTransition
+        Write-AMRLog 'Restored the existing catalog card collection without rebuilding it.' INFO Software
+        return $true
+    } catch {
+        Write-AMRLog ("Catalog view restore failed; a normal rebuild will be used: " + $_.Exception.Message) WARNING Software
+        return $false
+    }
+}
+
+function Suspend-AMRSoftwareCatalogPaging {
+    $script:SoftwareGridPagingPaused = $true
+    if ($script:SoftwareGridResumeTimer) {
+        try { $script:SoftwareGridResumeTimer.Stop() } catch {}
+        $script:SoftwareGridResumeTimer = $null
+    }
+    if ($script:SoftwareGridPageMode -eq 'Catalog' -and $script:SoftwareGridWarmupTimer) {
+        try { $script:SoftwareGridWarmupTimer.Stop() } catch {}
+        $script:SoftwareGridWarmupTimer = $null
+    }
+    Write-AMRLog 'Software catalog paging suspended while Installed view is active or preparing.' INFO Software
+}
+
+function Resume-AMRSoftwareCatalogPaging {
+    param([int]$DelayMilliseconds = 250)
+
+    if ($script:SoftwareGridResumeTimer) {
+        try { $script:SoftwareGridResumeTimer.Stop() } catch {}
+        $script:SoftwareGridResumeTimer = $null
+    }
+
+    # Keep paging paused until WPF has completed the view swap and had time to
+    # process input, layout, and rendering before background catalog work resumes.
+    $script:SoftwareGridPagingPaused = $true
+    $timer = [System.Windows.Threading.DispatcherTimer]::new([System.Windows.Threading.DispatcherPriority]::Background)
+    $timer.Interval = [TimeSpan]::FromMilliseconds([Math]::Max(150, $DelayMilliseconds))
+    $timer.Add_Tick({
+        $activeTimer = $script:SoftwareGridResumeTimer
+        if ($activeTimer) { $activeTimer.Stop() }
+        $script:SoftwareGridResumeTimer = $null
+        if ($script:ShowInstalledOnly) { return }
+        $script:SoftwareGridPageMode = 'Catalog'
+        $script:SoftwareGridPagingPaused = $false
+        Start-AMRSoftwareGridWarmup
+        Write-AMRLog 'Software catalog paging resumed after the UI transition settled.' INFO Software
+    })
+    $script:SoftwareGridResumeTimer = $timer
+    $timer.Start()
+}
 
 function Add-AMRSoftwareGridPage {
+    # Resolve the source from the active view. During a build, OrderedItems is
+    # the only safe source; the committed array may belong to the previous view.
+    if ($script:SoftwareGridPagingPaused -and $script:SoftwareGridPageMode -eq 'Catalog') { return }
+    if ($script:SoftwareGridTransitionPending -and $script:SoftwareGridPageMode -eq 'Installed') { return }
     if ($script:SoftwareGridPageBusy) { return }
 
+    $buildState = $null
+    if ($script:SoftwareGridPageMode -eq 'Installed') {
+        if (-not $script:ShowInstalledOnly) { return }
+        $buildState = $script:InstalledGridPageBuildState
+    } else {
+        if ($script:ShowInstalledOnly) { return }
+        $buildState = $script:CatalogGridPageBuildState
+    }
+
+    $source = $script:SoftwareGridPageSource
+    if ($buildState) {
+        if (-not $buildState.FirstPageCommitted -or -not $buildState.PageItems) {
+            $buildState.ScrollPrefetchPending = $true
+            return
+        }
+        $source = $buildState.OrderedItems
+        if (-not [object]::ReferenceEquals($script:SoftwareGridPageItems,$buildState.PageItems)) {
+            $script:SoftwareGridPageItems = $buildState.PageItems
+            $script:SoftwareGridPageIndex = [int]$buildState.PageItems.Count
+        }
+    }
+
+    if ($buildState -and ([int]$source.Count - [int]$script:SoftwareGridPageIndex) -lt 4) {
+        $buildState.ScrollPrefetchPending = $true
+        return
+    }
+
     $script:SoftwareGridPageBusy = $true
-
     try {
-        $end = [Math]::Min(
-            $script:SoftwareGridPageIndex + $script:SoftwareGridPageSize,
-            $script:SoftwareGridPageSource.Count
-        )
-
+        $end = [Math]::Min($script:SoftwareGridPageIndex + 4, $source.Count)
         while ($script:SoftwareGridPageIndex -lt $end) {
-            [void]$script:SoftwareGridPageItems.Add(
-                $script:SoftwareGridPageSource[$script:SoftwareGridPageIndex]
-            )
+            [void]$script:SoftwareGridPageItems.Add($source[$script:SoftwareGridPageIndex])
             $script:SoftwareGridPageIndex++
+        }
+        if ($buildState) {
+            $distanceToEnd = 0.0
+            try {
+                $scroll = C 'SoftwareScrollViewer'
+                $distanceToEnd = [double]$scroll.ScrollableHeight - [double]$scroll.VerticalOffset
+            } catch {}
+            $buildState.ScrollPrefetchPending = ($distanceToEnd -le 420)
+        } else {
+            try {
+                $scroll = C 'SoftwareScrollViewer'
+                if ($scroll -and ($scroll.ScrollableHeight - $scroll.VerticalOffset) -le 420) {
+                    Start-AMRSoftwareGridWarmup
+                }
+            } catch {}
         }
     } finally {
         $script:SoftwareGridPageBusy = $false
     }
+}
 
-    Queue-AMRSoftwareIconSync
+function Invoke-AMRSoftwareGridPrefetchDemand {
+    param([Parameter(Mandatory=$true)]$State)
+
+    if (-not $State.ScrollPrefetchPending -or -not $State.FirstPageCommitted -or -not $State.PageItems) { return }
+    if ($State.Mode -eq 'Catalog' -and $script:ShowInstalledOnly) { return }
+    if ($State.Mode -eq 'Installed' -and -not $script:ShowInstalledOnly) { return }
+
+    $scroll = C 'SoftwareScrollViewer'
+    if (-not $scroll) { return }
+    $distanceToEnd = [double]$scroll.ScrollableHeight - [double]$scroll.VerticalOffset
+    if ($distanceToEnd -gt 420) {
+        $State.ScrollPrefetchPending = $false
+        return
+    }
+
+    $available = [int]$State.OrderedItems.Count - [int]$State.PageItems.Count
+    if ($available -lt 4) { return }
+    $appendEnd = [Math]::Min([int]$State.PageItems.Count + 4,[int]$State.OrderedItems.Count)
+    while ($State.PageItems.Count -lt $appendEnd) {
+        [void]$State.PageItems.Add($State.OrderedItems[$State.PageItems.Count])
+    }
+    $script:SoftwareGridPageItems = $State.PageItems
+    $script:SoftwareGridPageIndex = [int]$State.PageItems.Count
+    # Keep demand active; the next Background tick rechecks after WPF layout.
+}
+
+function Start-AMRSoftwareGridWarmup {
+    if ($script:SoftwareGridPagingPaused -and $script:SoftwareGridPageMode -eq 'Catalog') { return }
+    # Fill the initial viewport one complete four-card row at a time. This avoids
+    # an empty/short grid while keeping every dispatcher turn intentionally small.
+    try {
+        if ($script:SoftwareGridWarmupTimer) {
+            try { $script:SoftwareGridWarmupTimer.Stop() } catch {}
+        }
+
+        $timer = [System.Windows.Threading.DispatcherTimer]::new([System.Windows.Threading.DispatcherPriority]::Background)
+        $timer.Interval = [TimeSpan]::FromMilliseconds(50)
+        $timer.Add_Tick({
+            try {
+                if ($script:SoftwareGridPageIndex -ge $script:SoftwareGridPageSource.Count) {
+                    $script:SoftwareGridWarmupTimer.Stop()
+                    $script:SoftwareGridWarmupTimer = $null
+                    return
+                }
+
+                Add-AMRSoftwareGridPage
+                $grid = C 'SoftwareGrid'
+                $scroll = C 'SoftwareScrollViewer'
+                # Let WPF perform layout naturally between dispatcher ticks; forcing UpdateLayout here stalls input during progressive card creation.
+
+                # Stop warmup once the viewport is filled with a small safety
+                # buffer. Further rows are requested by the scroll prefetch hook.
+                if ($scroll -and ($scroll.ScrollableHeight - $scroll.VerticalOffset) -gt 220) {
+                    $script:SoftwareGridWarmupTimer.Stop()
+                    $script:SoftwareGridWarmupTimer = $null
+                }
+            } catch {
+                try { $script:SoftwareGridWarmupTimer.Stop() } catch {}
+                $script:SoftwareGridWarmupTimer = $null
+                Write-AMRLog "Software grid warmup stopped: $($_.Exception.Message)" WARNING Software
+            }
+        })
+        $script:SoftwareGridWarmupTimer = $timer
+        $timer.Start()
+    } catch {
+        Write-AMRLog "Could not start progressive Software grid warmup: $($_.Exception.Message)" WARNING Software
+    }
 }
 
 function Get-AMRSoftwareVisualElements {
@@ -16334,111 +18643,360 @@ function Invoke-AMRSoftwarePremiumEntrance {
 }
 
 
-function Reset-AMRSoftwareGridPages {
+function Start-AMRSoftwareGridTransitionOut {
+    # Start visual feedback synchronously on the click, before inventory or
+    # collection preparation begins. Keep the old cards visible but gently dimmed.
+    try {
+        $grid = C 'SoftwareGrid'
+        if (-not ($grid -is [System.Windows.UIElement])) { return }
+        $transform = $grid.RenderTransform
+        if (-not ($transform -is [System.Windows.Media.TranslateTransform])) {
+            $transform = [System.Windows.Media.TranslateTransform]::new(0.0, 0.0)
+            $grid.RenderTransform = $transform
+        }
+        $ease = [System.Windows.Media.Animation.CubicEase]::new()
+        $ease.EasingMode = [System.Windows.Media.Animation.EasingMode]::EaseInOut
+        $fade = [System.Windows.Media.Animation.DoubleAnimation]::new()
+        $fade.To = 0.62
+        $fade.Duration = [TimeSpan]::FromMilliseconds(115)
+        $fade.EasingFunction = $ease
+        $slide = [System.Windows.Media.Animation.DoubleAnimation]::new()
+        $slide.To = -5.0
+        $slide.Duration = [TimeSpan]::FromMilliseconds(115)
+        $slide.EasingFunction = $ease
+        $grid.BeginAnimation([System.Windows.UIElement]::OpacityProperty,$fade,[System.Windows.Media.Animation.HandoffBehavior]::SnapshotAndReplace)
+        $transform.BeginAnimation([System.Windows.Media.TranslateTransform]::XProperty,$slide,[System.Windows.Media.Animation.HandoffBehavior]::SnapshotAndReplace)
+    } catch {
+        try { Write-AMRLog ('Software transition-out animation skipped: ' + $_.Exception.Message) WARNING Software } catch {}
+    }
+}
+
+function Invoke-AMRSoftwareGridViewTransition {
+    # Restore the new view with a noticeable but lightweight cross-fade + drift.
+    if (-not $script:SoftwareGridTransitionPending) { return }
+    $script:SoftwareGridTransitionPending = $false
+    try {
+        $grid = C 'SoftwareGrid'
+        if (-not ($grid -is [System.Windows.UIElement])) { return }
+        $transform = $grid.RenderTransform
+        if (-not ($transform -is [System.Windows.Media.TranslateTransform])) {
+            $transform = [System.Windows.Media.TranslateTransform]::new(0.0, 0.0)
+            $grid.RenderTransform = $transform
+        }
+        $ease = [System.Windows.Media.Animation.CubicEase]::new()
+        $ease.EasingMode = [System.Windows.Media.Animation.EasingMode]::EaseOut
+        $fade = [System.Windows.Media.Animation.DoubleAnimation]::new()
+        $fade.From = 0.78
+        $fade.To = 1.0
+        $fade.Duration = [TimeSpan]::FromMilliseconds(105)
+        $fade.EasingFunction = $ease
+        $slide = [System.Windows.Media.Animation.DoubleAnimation]::new()
+        $slide.From = 3.0
+        $slide.To = 0.0
+        $slide.Duration = [TimeSpan]::FromMilliseconds(115)
+        $slide.EasingFunction = $ease
+        $grid.BeginAnimation([System.Windows.UIElement]::OpacityProperty,$fade,[System.Windows.Media.Animation.HandoffBehavior]::SnapshotAndReplace)
+        $transform.BeginAnimation([System.Windows.Media.TranslateTransform]::XProperty,$slide,[System.Windows.Media.Animation.HandoffBehavior]::SnapshotAndReplace)
+    } catch {
+        try { Write-AMRLog ('Software view transition skipped: ' + $_.Exception.Message) WARNING Software } catch {}
+    }
+}
+
+function Start-AMRCatalogGridPageBuild {
     param([Parameter(Mandatory=$true)]$View)
 
-    # Prepare the replacement page off-screen, then swap ItemsSource once.
-    # Clearing the bound ObservableCollection first forces WPF to destroy every
-    # realized card and leaves the Software surface visibly empty during resize.
-    $newSoftwareGridPageItems = New-Object 'System.Collections.ObjectModel.ObservableCollection[object]'
-    $script:SoftwareGridPageIndex = 0
+    # Cancel any older catalog build before starting a new filtered/search result.
+    if ($script:CatalogGridPageBuildState) {
+        $oldState = $script:CatalogGridPageBuildState
+        try { if ($oldState.Timer) { $oldState.Timer.Stop() } } catch {}
+        try { if ($oldState.ViewEnumerator) { $oldState.ViewEnumerator.Dispose() } } catch {}
+        $script:CatalogGridPageBuildState = $null
+    }
 
-    # Build a stable category sequence: all applications from one category stay
-    # together, preserving their original order inside that category. This
-    # prevents separators from jumping backwards (e.g. 2, 1, 3, 2).
-    $viewItems = @($View)
-    $columns = 4 # Keep exactly four application cards per row in every window state.
-    $orderedItems = New-Object 'System.Collections.Generic.List[object]'
+    $categoryNames = @($script:SoftwareCategoryNames)
+    $groups = @{}
     $categoryOrdinals = @{}
-    for ($categoryIndex = 0; $categoryIndex -lt $script:SoftwareCategoryNames.Count; $categoryIndex++) {
-        $categoryName = [string]$script:SoftwareCategoryNames[$categoryIndex]
+    for ($categoryIndex = 0; $categoryIndex -lt $categoryNames.Count; $categoryIndex++) {
+        $categoryName = [string]$categoryNames[$categoryIndex]
+        $groups[$categoryName] = New-Object 'System.Collections.Generic.List[object]'
         $categoryOrdinals[$categoryName] = [int]($categoryIndex + 1)
     }
 
-    $groupIndex = 0
-    foreach ($categoryName in $script:SoftwareCategoryNames) {
-        $groupItems = @($viewItems | Where-Object { [string]$_.Category -eq [string]$categoryName })
-        if ($groupItems.Count -eq 0) { continue }
-
-        # Pad to the first column before each new category. The hidden cells
-        # reserve UniformGrid positions so every blue separator shares one X axis.
-        if ($groupIndex -gt 0) {
-            $remainder = $orderedItems.Count % $columns
-            if ($remainder -ne 0) {
-                $padCount = $columns - $remainder
-                for ($pad = 0; $pad -lt $padCount; $pad++) {
-                    $spacer = [pscustomobject]@{ IsCategorySpacer = $true; IsCategoryStart = $false; IsCategoryHeaderRow = $false; CategoryNumber = ''; Category = ''; Icon = $null; Initials = '' }
-                    [void]$orderedItems.Add($spacer)
-                }
-            }
-        }
-
-        $ordinal = [int]$categoryOrdinals[[string]$categoryName]
-        $firstInGroup = $true
-        $appIndexInGroup = 0
-        foreach ($app in $groupItems) {
-            foreach ($propertyName in @('IsCategorySpacer','IsCategoryStart','IsCategoryHeaderRow','CategoryNumber')) {
-                if (-not $app.PSObject.Properties[$propertyName]) {
-                    $app | Add-Member -NotePropertyName $propertyName -NotePropertyValue $null
-                }
-            }
-            # Category 1 is the initial All Applications section: deliberately
-            # no numbered marker is shown before it.
-            $app.IsCategorySpacer = $false
-            $app.IsCategoryStart = [bool]($firstInGroup -and $ordinal -gt 1)
-            # All cards in the category's first grid row reserve the same header gap.
-            # This keeps the separator spacing continuous across columns without shifting later rows.
-            $app.IsCategoryHeaderRow = [bool]($ordinal -gt 1 -and $appIndexInGroup -lt $columns)
-            $app.CategoryNumber = if ($ordinal -gt 1) { [string]$ordinal } else { '' }
-            [void]$orderedItems.Add($app)
-            $firstInGroup = $false
-            $appIndexInGroup++
-        }
-        $groupIndex++
+    $state = [pscustomobject]@{
+        View = $View
+        ViewEnumerator = $View.GetEnumerator()
+        CategoryNames = $categoryNames
+        Groups = $groups
+        CategoryOrdinals = $categoryOrdinals
+        Uncategorised = (New-Object 'System.Collections.Generic.List[object]')
+        OrderedItems = (New-Object 'System.Collections.Generic.List[object]')
+        Phase = 'Collect'
+        CategoryIndex = 0
+        GroupIndex = 0
+        CurrentGroup = $null
+        GroupItemIndex = 0
+        FirstInGroup = $true
+        AppIndexInGroup = 0
+        CurrentOrdinal = 0
+        Index = 0
+        Mode = 'Catalog'
+        ScrollPrefetchPending = $false
+        SearchText = [string](C 'SearchBox').Text
+        SelectedCategory = [string]$script:SelectedSoftwareCategory
+        ScrollOffset = 0.0
+        TickBudgetMilliseconds = 4
+        Timer = $null
+        FirstPageCommitted = $false
+        PageItems = $null
     }
+    # A new catalog generation must not page from the previous view's source.
+    $script:SoftwareGridPageMode = 'Catalog'
+    $script:SoftwareGridPageSource = @()
+    $script:SoftwareGridPageIndex = 0
+    $script:CatalogGridPageBuildState = $state
 
-    # Keep any uncategorized entries at the end without introducing fake numbers.
-    $uncategorized = @($viewItems | Where-Object { [string]::IsNullOrWhiteSpace([string]$_.Category) })
-    foreach ($app in $uncategorized) {
-        foreach ($propertyName in @('IsCategorySpacer','IsCategoryStart','IsCategoryHeaderRow','CategoryNumber')) {
-            if (-not $app.PSObject.Properties[$propertyName]) { $app | Add-Member -NotePropertyName $propertyName -NotePropertyValue $null }
-        }
-        $app.IsCategorySpacer = $false
-        $app.IsCategoryStart = $false
-        $app.IsCategoryHeaderRow = $false
-        $app.CategoryNumber = ''
-        [void]$orderedItems.Add($app)
-    }
-
-    $script:SoftwareGridPageSource = $orderedItems.ToArray()
-    # Keep the visual tree deliberately small on every launch. A UniformGrid
-    # inside a regular ScrollViewer is NOT virtualized, so add a small first batch.
-    $script:SoftwareGridPageSize = 16
-    # Prefill complete four-card rows to avoid a partially populated row on first display.
-    $initialCount = 48
-    $initialEnd = [Math]::Min($initialCount, $script:SoftwareGridPageSource.Count)
-    while ($script:SoftwareGridPageIndex -lt $initialEnd) {
-        [void]$newSoftwareGridPageItems.Add($script:SoftwareGridPageSource[$script:SoftwareGridPageIndex])
-        $script:SoftwareGridPageIndex++
-    }
-    # Commit the completed collection in one UI operation. This avoids the
-    # empty-grid flash and repeated visual-tree teardown during maximize/restore.
-    $script:SoftwareGridPageItems = $newSoftwareGridPageItems
-    try {
-        (C 'SoftwareGrid').ItemsSource = $script:SoftwareGridPageItems
-        Queue-AMRSoftwareIconSync
-        (C 'SoftwareScrollViewer').ScrollToTop()
-    } catch {}
+    $timer = [System.Windows.Threading.DispatcherTimer]::new([System.Windows.Threading.DispatcherPriority]::Background)
+    $timer.Interval = [TimeSpan]::FromMilliseconds(15)
+    $timer.Add_Tick({ Complete-AMRCatalogGridPageBuildBatch })
+    $state.Timer = $timer
+    $timer.Start()
 }
 
+function Publish-AMRCatalogFirstPage {
+    param([Parameter(Mandatory=$true)]$State)
+
+    if ($script:ShowInstalledOnly) { return }
+    if (-not $State.FirstPageCommitted) {
+        if ($State.OrderedItems.Count -lt 8) { return }
+        $pageItems = New-Object 'System.Collections.ObjectModel.ObservableCollection[object]'
+        for ($index = 0; $index -lt 8; $index++) {
+            [void]$pageItems.Add($State.OrderedItems[$index])
+        }
+        $State.PageItems = $pageItems
+        $State.FirstPageCommitted = $true
+        $script:SoftwareGridPageMode = 'Catalog'
+        $script:SoftwareGridPageIndex = 8
+        $script:SoftwareGridPageSize = 4
+        $script:SoftwareGridPageItems = $pageItems
+        (C 'SoftwareGrid').ItemsSource = $pageItems
+        Invoke-AMRSoftwareGridViewTransition
+        Queue-AMRSoftwareIconSync
+        (C 'SoftwareScrollViewer').ScrollToTop()
+        return
+    }
+
+    # Reveal the first 64 cards in small rows. After that, continue only when
+    # the user is near the end of the currently visible catalog.
+    if ($State.PageItems.Count -lt 64) {
+        $available = $State.OrderedItems.Count - $State.PageItems.Count
+        if ($available -ge 4) {
+            $appendEnd = [Math]::Min([Math]::Min($State.PageItems.Count + 4,64),$State.OrderedItems.Count)
+            while ($State.PageItems.Count -lt $appendEnd) {
+                [void]$State.PageItems.Add($State.OrderedItems[$State.PageItems.Count])
+            }
+            $script:SoftwareGridPageItems = $State.PageItems
+            $script:SoftwareGridPageIndex = [int]$State.PageItems.Count
+        }
+    }
+    Invoke-AMRSoftwareGridPrefetchDemand -State $State
+}
+
+function Complete-AMRCatalogGridPageBuildBatch {
+    $state = $script:CatalogGridPageBuildState
+    if (-not $state -or $script:ShowInstalledOnly) { return }
+
+    try {
+        switch ($state.Phase) {
+            'Collect' {
+                $watch = [System.Diagnostics.Stopwatch]::StartNew()
+                while ($watch.ElapsedMilliseconds -lt $state.TickBudgetMilliseconds) {
+                    if (-not $state.ViewEnumerator.MoveNext()) {
+                        try { $state.ViewEnumerator.Dispose() } catch {}
+                        $state.ViewEnumerator = $null
+                        $state.Phase = 'CategoryStart'
+                        break
+                    }
+                    $item = $state.ViewEnumerator.Current
+                    $category = [string]$item.Category
+                    if ($state.Groups.ContainsKey($category)) {
+                        [void]$state.Groups[$category].Add($item)
+                    } else {
+                        # Preserve every catalog record even if its category is
+                        # blank or was added/changed after the navigation list
+                        # was initialized. All Applications must never drop it.
+                        [void]$state.Uncategorised.Add($item)
+                    }
+                }
+                return
+            }
+            'CategoryStart' {
+                while ($state.CategoryIndex -lt $state.CategoryNames.Count) {
+                    $categoryName = [string]$state.CategoryNames[$state.CategoryIndex]
+                    $groupItems = $state.Groups[$categoryName]
+                    if ($groupItems.Count -eq 0) {
+                        $state.CategoryIndex++
+                        continue
+                    }
+                    if ($state.GroupIndex -gt 0) {
+                        $remainder = $state.OrderedItems.Count % 4
+                        if ($remainder -ne 0) {
+                            $padCount = 4 - $remainder
+                            for ($pad = 0; $pad -lt $padCount; $pad++) {
+                                [void]$state.OrderedItems.Add([pscustomobject]@{
+                                    IsCategorySpacer = $true; IsCategoryStart = $false
+                                    IsCategoryHeaderRow = $false; CategoryNumber = ''
+                                    Category = ''; Icon = $null; Initials = ''
+                                })
+                            }
+                        }
+                    }
+                    $state.CurrentGroup = $groupItems
+                    $state.GroupItemIndex = 0
+                    $state.FirstInGroup = $true
+                    $state.AppIndexInGroup = 0
+                    $state.CurrentOrdinal = [int]$state.CategoryOrdinals[$categoryName]
+                    $state.Phase = 'CategoryItems'
+                    return
+                }
+                $state.Phase = 'Uncategorised'
+                $state.Index = 0
+                return
+            }
+            'CategoryItems' {
+                $watch = [System.Diagnostics.Stopwatch]::StartNew()
+                while ($state.GroupItemIndex -lt $state.CurrentGroup.Count -and $watch.ElapsedMilliseconds -lt $state.TickBudgetMilliseconds) {
+                    $app = $state.CurrentGroup[$state.GroupItemIndex]
+                    foreach ($propertyName in @('IsCategorySpacer','IsCategoryStart','IsCategoryHeaderRow','CategoryNumber')) {
+                        if (-not $app.PSObject.Properties[$propertyName]) {
+                            $app | Add-Member -NotePropertyName $propertyName -NotePropertyValue $null
+                        }
+                    }
+                    $app.IsCategorySpacer = $false
+                    $app.IsCategoryStart = [bool]($state.FirstInGroup -and $state.CurrentOrdinal -gt 1)
+                    $app.IsCategoryHeaderRow = [bool]($state.CurrentOrdinal -gt 1 -and $state.AppIndexInGroup -lt 4)
+                    $app.CategoryNumber = if ($state.CurrentOrdinal -gt 1) { [string]$state.CurrentOrdinal } else { '' }
+                    [void]$state.OrderedItems.Add($app)
+                    $state.FirstInGroup = $false
+                    $state.AppIndexInGroup++
+                    $state.GroupItemIndex++
+                    if (-not $state.FirstPageCommitted -and $state.OrderedItems.Count -ge 8) {
+                        Publish-AMRCatalogFirstPage -State $state
+                        return
+                    }
+                }
+                Publish-AMRCatalogFirstPage -State $state
+                if ($state.GroupItemIndex -ge $state.CurrentGroup.Count) {
+                    $state.GroupIndex++
+                    $state.CategoryIndex++
+                    $state.Phase = 'CategoryStart'
+                }
+                return
+            }
+            'Uncategorised' {
+                $watch = [System.Diagnostics.Stopwatch]::StartNew()
+                while ($state.Index -lt $state.Uncategorised.Count -and $watch.ElapsedMilliseconds -lt $state.TickBudgetMilliseconds) {
+                    $app = $state.Uncategorised[$state.Index]
+                    foreach ($propertyName in @('IsCategorySpacer','IsCategoryStart','IsCategoryHeaderRow','CategoryNumber')) {
+                        if (-not $app.PSObject.Properties[$propertyName]) {
+                            $app | Add-Member -NotePropertyName $propertyName -NotePropertyValue $null
+                        }
+                    }
+                    $app.IsCategorySpacer = $false
+                    $app.IsCategoryStart = $false
+                    $app.IsCategoryHeaderRow = $false
+                    $app.CategoryNumber = ''
+                    [void]$state.OrderedItems.Add($app)
+                    $state.Index++
+                    if (-not $state.FirstPageCommitted -and $state.OrderedItems.Count -ge 8) {
+                        Publish-AMRCatalogFirstPage -State $state
+                        return
+                    }
+                }
+                Publish-AMRCatalogFirstPage -State $state
+                if ($state.Index -ge $state.Uncategorised.Count) { $state.Phase = 'Commit' }
+                return
+            }
+            'Commit' {
+                $state.Timer.Stop()
+                try { if ($state.ViewEnumerator) { $state.ViewEnumerator.Dispose() } } catch {}
+                $state.ViewEnumerator = $null
+                $script:SoftwareGridPageMode = 'Catalog'
+                $script:SoftwareGridPageSource = $state.OrderedItems.ToArray()
+                $script:SoftwareGridPageSize = 4
+                if ($state.FirstPageCommitted -and $state.PageItems) {
+                    $script:SoftwareGridPageItems = $state.PageItems
+                    $script:SoftwareGridPageIndex = [int]$state.PageItems.Count
+                } else {
+                    $pageItems = New-Object 'System.Collections.ObjectModel.ObservableCollection[object]'
+                    $initialEnd = [Math]::Min(8, $script:SoftwareGridPageSource.Count)
+                    for ($index = 0; $index -lt $initialEnd; $index++) { [void]$pageItems.Add($script:SoftwareGridPageSource[$index]) }
+                    $script:SoftwareGridPageItems = $pageItems
+                    $script:SoftwareGridPageIndex = $initialEnd
+                    (C 'SoftwareGrid').ItemsSource = $pageItems
+                    Invoke-AMRSoftwareGridViewTransition
+                    Queue-AMRSoftwareIconSync
+                    (C 'SoftwareScrollViewer').ScrollToTop()
+                }
+                Start-AMRSoftwareGridWarmup
+                $script:CatalogGridPageBuildState = $null
+                Write-AMRLog ('Software catalog page source prepared incrementally: ' + [string]$script:SoftwareGridPageSource.Count + ' item(s).') INFO Software
+                return
+            }
+        }
+    } catch {
+        try { if ($state.Timer) { $state.Timer.Stop() } } catch {}
+        try { if ($state.ViewEnumerator) { $state.ViewEnumerator.Dispose() } } catch {}
+        $script:CatalogGridPageBuildState = $null
+        Write-AMRLog ('Could not prepare the software catalog incrementally: ' + $_.Exception.Message) ERROR Software
+    }
+}
+
+function Reset-AMRSoftwareGridPages {
+    param([Parameter(Mandatory=$true)]$View)
+
+    # A filter/search/refresh rebuild invalidates cached catalog snapshots.
+    $script:SoftwareCatalogViewCache = $null
+    if ($script:ShowInstalledOnly) { $script:InstalledViewCache = $null }
+
+    if ($script:SoftwareGridWarmupTimer) {
+        try { $script:SoftwareGridWarmupTimer.Stop() } catch {}
+        $script:SoftwareGridWarmupTimer = $null
+    }
+    if ($script:CatalogGridPageBuildState) {
+        $oldState = $script:CatalogGridPageBuildState
+        try { if ($oldState.Timer) { $oldState.Timer.Stop() } } catch {}
+        try { if ($oldState.ViewEnumerator) { $oldState.ViewEnumerator.Dispose() } } catch {}
+        $script:CatalogGridPageBuildState = $null
+    }
+
+    $script:SoftwareGridPageMode = if ($script:ShowInstalledOnly) { 'Installed' } else { 'Catalog' }
+    $script:SoftwareGridPageSource = @()
+    $script:SoftwareGridPageIndex = 0
+    $script:SoftwareGridPageSize = 4
+    if ($script:ShowInstalledOnly) {
+        if ($script:InstalledGridPageBuildState) {
+            $installedBuild = $script:InstalledGridPageBuildState
+            try { if ($installedBuild.Timer) { $installedBuild.Timer.Stop() } } catch {}
+            try { if ($installedBuild.ViewEnumerator) { $installedBuild.ViewEnumerator.Dispose() } } catch {}
+            $script:InstalledGridPageBuildState = $null
+        }
+        $installedCount = 0
+        try { $installedCount = [int]$script:InstalledAppsInventory.Count } catch {}
+        Start-AMRInstalledGridPageBuild -View $View -WasInstalledViewVisible $true -InstalledCount $installedCount -RestoreCategory ([string]$script:SelectedSoftwareCategory) -RestoreScrollOffset 0 -InventoryGeneration ([int]$script:InstalledInventoryGeneration)
+        return
+    }
+    Start-AMRCatalogGridPageBuild -View $View
+}
 
 (C 'SoftwareCategoryList').Add_SelectionChanged({
+    if ($script:SuppressSoftwareCategorySelectionChanged) { return }
     $selected = (C 'SoftwareCategoryList').SelectedItem
     if ($null -ne $selected) {
         $categoryList = C 'SoftwareCategoryList'
         $categoryContainer = $categoryList.ItemContainerGenerator.ContainerFromItem($selected)
         Invoke-AMRNavigationTilePressAnimation -Element $categoryContainer
         $script:SelectedSoftwareCategory = [string]$selected.Name
+        $script:InstalledViewCache = $null
         if ($script:ShowInstalledOnly -and $script:InstalledAppsView) {
             $script:InstalledAppsView.Refresh()
             Reset-AMRSoftwareGridPages -View $script:InstalledAppsView
@@ -16450,6 +19008,8 @@ function Reset-AMRSoftwareGridPages {
 })
 
 (C 'SearchBox').Add_TextChanged({
+    $script:InstalledViewCache = $null
+    $script:SoftwareCatalogViewCache = $null
     if ($script:ShowInstalledOnly -and $script:InstalledAppsView) {
         $script:InstalledAppsView.Refresh()
         Reset-AMRSoftwareGridPages -View $script:InstalledAppsView
@@ -16460,31 +19020,184 @@ function Reset-AMRSoftwareGridPages {
 })
 (C 'ShowInstalledBtn').Add_Click({
     if (-not $script:ShowInstalledOnly) {
+        if ($script:InstalledScanState.PendingShow) {
+            # A second click while the first inventory scan is pending cancels only the view switch;
+            # the background scan may finish and populate the cache for a later, instant entry.
+            $script:InstalledScanState.PendingShow = $false
+            Set-AMRShowInstalledButtonBusy -Busy $false -Label 'Show Installed'
+            if ($script:ProgressText) { $script:ProgressText.Text = '' }
+            $script:SoftwareGridTransitionPending = $true
+            Invoke-AMRSoftwareGridViewTransition
+            Set-AMRShowInstalledButtonMode -Mode All
+            Resume-AMRSoftwareCatalogPaging -DelayMilliseconds 500
+            Write-AMRLog 'Cancelled the pending Installed view switch; the background inventory scan continues for cache refresh.' INFO Software
+            return
+        }
+        Save-AMRSoftwareCatalogViewState
+        Suspend-AMRSoftwareCatalogPaging
+        Start-AMRSoftwareGridTransitionOut
+        $script:SoftwareGridTransitionPending = $true
+        Set-AMRShowInstalledButtonBusy -Busy $true -Label 'Loading Installed...'
         if ($script:InstalledScanState.Ready) {
-            Set-AMRInstalledViewVisible -InstalledCount $script:InstalledScanState.Count
+            # A validated cache is useful immediately. Do not make the user wait
+            # for an already-running startup refresh; its fresh result will replace
+            # this snapshot through Complete-AMRInstalledCatalogScan.
+            $script:ProgressText.Text = 'Showing saved inventory; checking for changes...'
+            if ($script:InstalledScanState.Current) {
+                $script:InstalledScanState.PendingShow = $false
+                Set-AMRInstalledViewVisible -InstalledCount $script:InstalledScanState.Count
+            } else {
+                Set-AMRInstalledViewVisible -InstalledCount $script:InstalledScanState.Count
+                Start-AMRInstalledCatalogScan -Refresh
+            }
         } else {
-            (C 'ShowInstalledBtn').Content = 'Loading Installed...'
-            (C 'ShowInstalledBtn').IsEnabled = $false
-            $script:ProgressText.Text = 'Preparing installed applications in the background...'
+            $script:ProgressText.Text = 'Scanning installed applications. Your current catalog stays visible until the first installed row is ready...'
+            # First launch without a valid snapshot: wait for the first complete scan.
             Start-AMRInstalledCatalogScan -ShowWhenReady
         }
     } else {
-        $script:ShowInstalledOnly = $false
-        Reset-AMRSoftwareGridPages -View $script:AppsView
-        (C 'SoftwareCategoryList').ItemsSource = $script:SoftwareCategories
-        Update-AMRSoftwareCategoryCounts
-        (C 'ShowInstalledBtn').Content = 'Show Installed'
-        (C 'ShowInstalledBtn').ToolTip = 'Show only applications detected as installed on this PC.'
-        (C 'ShowInstalledBtn').IsEnabled = $true
-        (C 'UninstallSelectedBtn').Visibility = 'Collapsed'
-        Update-AMRSoftwareCategoryCounts
-        $script:AppsView.Refresh()
-        Write-AMRLog 'Installed-app filter disabled; showing the full software catalog.' INFO Software
+        # Allow switching back even while Installed cards are still preparing; their timer state is paused and retained below.
+        if ($script:ShowInstalledButtonBusyState.Active) {
+            Set-AMRShowInstalledButtonBusy -Busy $false -Label 'Show Installed'
+        }
+        # Freeze all Installed-side UI mutations BEFORE the outgoing animation.
+        # Previously these timers were stopped 190ms later, so they could publish
+        # another batch or replace the visible first row while the transition ran.
+        if ($script:CatalogGridPageBuildState) {
+            # Keep the paused catalog enumerator and its partial ordered list.
+            try { if ($script:CatalogGridPageBuildState.Timer) { $script:CatalogGridPageBuildState.Timer.Stop() } } catch {}
+        }
+        try {
+            if ($script:InstalledViewCache) { $script:InstalledViewCache.ScrollOffset = [double](C 'SoftwareScrollViewer').VerticalOffset }
+        } catch {}
+        if ($script:InstalledViewPreparationState -and $script:InstalledViewPreparationState.Timer) {
+            try { $script:InstalledViewPreparationState.Timer.Stop() } catch {}
+            Write-AMRLog 'Paused Installed inventory mapping immediately before leaving the view.' INFO Software
+        }
+        if ($script:InstalledGridPageBuildState -and $script:InstalledGridPageBuildState.Timer) {
+            try { $script:InstalledGridPageBuildState.Timer.Stop() } catch {}
+            Write-AMRLog 'Paused Installed card ordering immediately before leaving the view.' INFO Software
+        }
+        if ($script:SoftwareGridWarmupTimer -and $script:SoftwareGridPageMode -eq 'Installed') {
+            try { $script:SoftwareGridWarmupTimer.Stop() } catch {}
+            $script:SoftwareGridWarmupTimer = $null
+            Write-AMRLog 'Paused Installed card warmup immediately before leaving the view.' INFO Software
+        }
+        Start-AMRSoftwareGridTransitionOut
+        $script:SoftwareGridTransitionPending = $true
+        Set-AMRShowInstalledButtonBusy -Busy $true -Label 'Loading All...'
+        # IMPORTANT: do not call GetNewClosure() for this DispatcherTimer.
+        # A closure creates a child script scope; $script:ShowInstalledOnly would
+        # then be written in that child scope while AppsView.Filter reads the
+        # original script scope. The original filter would remain Installed-only.
+        # Keep the timer in the original script scope and execute this handler
+        # there so the toggle state and the CollectionView filter stay in sync.
+        $script:ShowAllReturnTimer = [System.Windows.Threading.DispatcherTimer]::new()
+        $script:ShowAllReturnTimer.Interval = [TimeSpan]::FromMilliseconds(190)
+        $script:ShowAllReturnTimer.Add_Tick({
+            $timer = $script:ShowAllReturnTimer
+            if ($timer) { $timer.Stop() }
+            try {
+                # Installed-side dispatcher work was paused synchronously before
+                # the outgoing animation; keep its partial state intact here.
+                $script:InstalledScanState.PendingShow = $false
+
+                # Clear the flag in the same script scope used by AppsView.Filter,
+                # then refresh and rebuild the full catalog from that view.
+                $script:ShowInstalledOnly = $false
+                $script:SoftwareGridTransitionPending = $true
+                Set-AMRShowInstalledButtonMode -Mode All
+
+                $restoredCatalog = $false
+                $pausedCatalogBuild = $script:CatalogGridPageBuildState
+                if ($pausedCatalogBuild -and
+                    [object]::ReferenceEquals($pausedCatalogBuild.View,$script:AppsView) -and
+                    [string]$pausedCatalogBuild.SearchText -ceq [string](C 'SearchBox').Text) {
+                    # AppsView was not refreshed on entry to Installed, so the paused
+                    # enumerator is still valid. Restore the catalog's own category
+                    # selection (Installed has its own current selection) and resume in place.
+                    $script:SuppressSoftwareCategorySelectionChanged = $true
+                    try {
+                        $script:SelectedSoftwareCategory = [string]$pausedCatalogBuild.SelectedCategory
+                        $savedCategoryItem = @($script:SoftwareCategories | Where-Object { [string]$_.Name -eq [string]$pausedCatalogBuild.SelectedCategory } | Select-Object -First 1)
+                        if ($savedCategoryItem.Count -gt 0) { (C 'SoftwareCategoryList').SelectedItem = $savedCategoryItem[0] }
+                        else { (C 'SoftwareCategoryList').SelectedIndex = 0 }
+                    } finally { $script:SuppressSoftwareCategorySelectionChanged = $false }
+                    $script:SoftwareGridPageMode = 'Catalog'
+                    $script:SoftwareGridPageSource = @()
+                    $catalogGrid = C 'SoftwareGrid'
+                    if ($pausedCatalogBuild.FirstPageCommitted -and $pausedCatalogBuild.PageItems) {
+                        $script:SoftwareGridPageItems = $pausedCatalogBuild.PageItems
+                        $script:SoftwareGridPageIndex = [int]$pausedCatalogBuild.PageItems.Count
+                        if (-not [object]::ReferenceEquals($catalogGrid.ItemsSource,$pausedCatalogBuild.PageItems)) {
+                            $catalogGrid.ItemsSource = $pausedCatalogBuild.PageItems
+                        }
+                    }
+                    try {
+                        $restoreOffset = [double]$pausedCatalogBuild.ScrollOffset
+                        $null = $script:Window.Dispatcher.BeginInvoke([Action]{
+                            try { (C 'SoftwareScrollViewer').ScrollToVerticalOffset($restoreOffset) } catch {}
+                        }, [System.Windows.Threading.DispatcherPriority]::Loaded)
+                    } catch {}
+                    if ($pausedCatalogBuild.Timer) { $pausedCatalogBuild.Timer.Start() }
+                    Invoke-AMRSoftwareGridViewTransition
+                    $restoredCatalog = $true
+                    Write-AMRLog 'Resumed the paused All Applications builder and its existing card collection without re-enumerating the catalog.' INFO Software
+                } else {
+                    # Search/category changes while Installed was visible invalidate
+                    # the paused enumerator; rebuild only in that case.
+                    if ($pausedCatalogBuild) {
+                        try { if ($pausedCatalogBuild.Timer) { $pausedCatalogBuild.Timer.Stop() } } catch {}
+                        try { if ($pausedCatalogBuild.ViewEnumerator) { $pausedCatalogBuild.ViewEnumerator.Dispose() } } catch {}
+                        $script:CatalogGridPageBuildState = $null
+                    }
+                    if ($script:SoftwareCatalogViewCache -and
+                        [string]$script:SoftwareCatalogViewCache.SearchText -ceq [string](C 'SearchBox').Text) {
+                        $script:SelectedSoftwareCategory = [string]$script:SoftwareCatalogViewCache.SelectedCategory
+                    }
+                    $script:AppsView.Refresh()
+                    $restoredCatalog = Restore-AMRSoftwareCatalogViewState
+                    if (-not $restoredCatalog) {
+                        Reset-AMRSoftwareGridPages -View $script:AppsView
+                    }
+                }
+
+                (C 'SoftwareCategoryList').ItemsSource = $script:SoftwareCategories
+                Update-AMRSoftwareCategoryCounts
+                (C 'ShowInstalledBtn').Content = 'Show Installed'
+                (C 'ShowInstalledBtn').ToolTip = 'Show only applications detected as installed on this PC.'
+                (C 'UninstallSelectedBtn').Visibility = 'Collapsed'
+                Write-AMRLog 'Installed-app filter disabled; the saved catalog view was restored when available.' INFO Software
+            }
+            catch {
+                Write-AMRLog "Could not restore the full software catalog: $($_.Exception.Message)" ERROR Software
+                try {
+                    $script:ShowInstalledOnly = $false
+                    if ($script:AppsView) { $script:AppsView.Refresh() }
+                    if ($script:AppsView) { Reset-AMRSoftwareGridPages -View $script:AppsView }
+                } catch {
+                    Write-AMRLog "Fallback full-catalog rebuild also failed: $($_.Exception.Message)" ERROR Software
+                }
+            }
+            finally {
+                Set-AMRShowInstalledButtonBusy -Busy $false -Label 'Show Installed'
+                Set-AMRShowInstalledButtonMode -Mode All
+                $button = C 'ShowInstalledBtn'
+                if ($button) {
+                    $button.Content = 'Show Installed'
+                    $button.ToolTip = 'Show only applications detected as installed on this PC.'
+                    $button.IsEnabled = $true
+                }
+                $script:ShowAllReturnTimer = $null
+                Resume-AMRSoftwareCatalogPaging -DelayMilliseconds 250
+            }
+        })
+        $script:ShowAllReturnTimer.Start()
     }
 })
 (C 'SoftwareGrid').ItemsSource = $script:SoftwareGridPageItems
 # Copy button lives inside the installed-card DataTemplate; handle its routed click once at the grid.
-(C 'SoftwareGrid').AddHandler([System.Windows.Controls.Button]::ClickEvent, [System.Windows.RoutedEventHandler]{
+(C 'SoftwareScrollViewer').AddHandler([System.Windows.Controls.Button]::ClickEvent, [System.Windows.RoutedEventHandler]{
     param($sender, $e)
     $copyButton = $e.OriginalSource
     if ($null -eq $copyButton -or [string]$copyButton.Name -ne 'InstalledCopyPathBtn') { return }
@@ -16495,7 +19208,7 @@ function Reset-AMRSoftwareGridPages {
 # Explicitly control the installed details panel on the UI thread. PSCustomObject
 # inventory rows do not implement INotifyPropertyChanged, so XAML-only triggers
 # can fail to refresh after the arrow is clicked.
-(C 'SoftwareGrid').AddHandler([System.Windows.Controls.Primitives.ToggleButton]::ClickEvent, [System.Windows.RoutedEventHandler]{
+(C 'SoftwareScrollViewer').AddHandler([System.Windows.Controls.Primitives.ToggleButton]::ClickEvent, [System.Windows.RoutedEventHandler]{
     param($sender, $e)
     $toggle = $e.OriginalSource
     if ($null -eq $toggle -or [string]$toggle.Name -ne 'InstalledDetailsToggle') { return }
@@ -16530,6 +19243,10 @@ function Reset-AMRSoftwareGridPages {
     } catch { Write-AMRLog ("Could not toggle installed application details: $($_.Exception.Message)") WARNING Software }
 }, $true)
 Reset-AMRSoftwareGridPages -View $script:AppsView
+try {
+    $script:AMRStartupPhaseTimings['InitialCatalogPreparedMs'] = [int]$script:AMRStartupStopwatch.ElapsedMilliseconds
+    Write-AMRLog ('Startup timing checkpoint: ' + (($script:AMRStartupPhaseTimings.GetEnumerator() | ForEach-Object { '{0}={1}ms' -f $_.Key,$_.Value }) -join '; ')) INFO Startup
+} catch {}
 
 # Keep a consistent four-column Software card layout in normal and maximized states.
 function Find-AMRVisualChildByType {
@@ -16565,6 +19282,33 @@ function Find-AMRNamedVisualChild {
     return $null
 }
 
+function Set-AMRSoftwareIconImageSource {
+    param(
+        [Parameter(Mandatory=$true)][System.Windows.Controls.Image]$Image,
+        [object]$Source
+    )
+    try {
+        $oldSource = $Image.Source
+        if ([object]::ReferenceEquals($oldSource,$Source)) { return }
+        $Image.BeginAnimation([System.Windows.UIElement]::OpacityProperty,$null)
+        $Image.Source = $Source
+        if ($null -ne $Source) {
+            $Image.Opacity = 0.0
+            $fade = [System.Windows.Media.Animation.DoubleAnimation]::new()
+            $fade.From = 0.0
+            $fade.To = 1.0
+            $fade.Duration = [TimeSpan]::FromMilliseconds(190)
+            $fade.EasingFunction = [System.Windows.Media.Animation.QuadraticEase]::new()
+            $fade.EasingFunction.EasingMode = [System.Windows.Media.Animation.EasingMode]::EaseOut
+            $Image.BeginAnimation([System.Windows.UIElement]::OpacityProperty,$fade,[System.Windows.Media.Animation.HandoffBehavior]::SnapshotAndReplace)
+        } else {
+            $Image.Opacity = 1.0
+        }
+    } catch {
+        try { $Image.Source = $Source; $Image.Opacity = 1.0 } catch {}
+    }
+}
+
 function Sync-AMRRealizedSoftwareIcons {
     try {
         $grid = C 'SoftwareGrid'
@@ -16576,7 +19320,7 @@ function Sync-AMRRealizedSoftwareIcons {
             $item = $grid.Items[$i]
             $image = Find-AMRNamedVisualChild -Parent $container -Name 'SoftwareIconImage'
             $initials = Find-AMRNamedVisualChild -Parent $container -Name 'SoftwareIconInitials'
-            if ($null -ne $image) { $image.Source = $item.Icon }
+            if ($null -ne $image) { Set-AMRSoftwareIconImageSource -Image $image -Source $item.Icon }
             if ($null -ne $initials) {
                 $initials.Visibility = if ($null -eq $item.Icon) { [System.Windows.Visibility]::Visible } else { [System.Windows.Visibility]::Collapsed }
             }
@@ -16605,7 +19349,7 @@ function Queue-AMRSoftwareIconSync {
             } catch {
                 $script:SoftwareIconSyncQueued = $false
             }
-        }, [System.Windows.Threading.DispatcherPriority]::Loaded)
+        }, [System.Windows.Threading.DispatcherPriority]::Background)
     } catch {
         $script:SoftwareIconSyncQueued = $false
     }
@@ -16628,9 +19372,8 @@ function Sync-AMRRealizedSoftwareIconItem {
 
         if ($null -eq $container) {
             # An icon may arrive for a catalog item that has not been added to
-            # the current paged ItemsSource yet. Do not schedule a full-grid
-            # synchronization for an item that is not on the active page set;
-            # Add-AMRSoftwareGridPage queues the sync when that page is added.
+            # the current paged ItemsSource yet. Its model retains the decoded
+            # icon, and the DataTemplate binding applies it when the card is added.
             if ($grid.Items.Contains($Item)) {
                 Queue-AMRSoftwareIconSync
             }
@@ -16641,7 +19384,7 @@ function Sync-AMRRealizedSoftwareIconItem {
         $initials = Find-AMRNamedVisualChild -Parent $container -Name 'SoftwareIconInitials'
 
         if ($null -ne $image) {
-            $image.Source = $Item.Icon
+            Set-AMRSoftwareIconImageSource -Image $image -Source $Item.Icon
         }
 
         if ($null -ne $initials) {
@@ -16654,8 +19397,6 @@ function Sync-AMRRealizedSoftwareIconItem {
     } catch {}
 }
 
-$script:SoftwareIconScrollSyncPending = $false
-
 try {
     $softwareScroll = C 'SoftwareScrollViewer'
     $softwareScroll.Add_ScrollChanged({
@@ -16664,7 +19405,7 @@ try {
         # non-virtualized UniformGrid that would repeatedly inspect every card.
         # Icons are synchronized after a page is created and when an individual
         # icon is delivered; scrolling only schedules the next small page.
-        if ($eventArgs.VerticalChange -gt 0 -and $sender.VerticalOffset -gt 0 -and $sender.VerticalOffset -ge ($sender.ScrollableHeight - 900) -and -not $script:SoftwareGridPageDispatchPending) {
+        if ((-not $script:SoftwareGridPagingPaused -or $script:SoftwareGridPageMode -eq 'Installed') -and $eventArgs.VerticalChange -gt 0 -and $sender.VerticalOffset -gt 0 -and $sender.VerticalOffset -ge ($sender.ScrollableHeight - 420) -and -not $script:SoftwareGridPageDispatchPending) {
             # Queue at most one page append; avoid a burst of duplicate dispatcher work.
             $script:SoftwareGridPageDispatchPending = $true
             $null = $script:Window.Dispatcher.BeginInvoke([Action]{
@@ -17981,6 +20722,17 @@ function Complete-AMRInstallQueue {
     if (-not $Result) {
         Show-AMRMessage "The operation finished without returning a result." "Engine Warning" OK Warning | Out-Null
         return
+    }
+
+    # Do not assume an installer exit code alone proves the app is registered.
+    # Re-scan after verified or pending-verification successes so catalog flags,
+    # the Installed view and the persistent snapshot reflect Windows' actual state.
+    if ([int]$Result.SuccessCount -gt 0 -or [int]$Result.UnverifiedCount -gt 0) {
+        try {
+            Start-AMRInstalledCatalogScan -Refresh -ShowWhenReady:([bool]$script:ShowInstalledOnly)
+        } catch {
+            Write-AMRLog ("Could not schedule the post-install inventory refresh: {0}" -f $_.Exception.Message) WARNING Software
+        }
     }
 
     $summary = "$($Result.ActionName) Summary:`n`n" +
@@ -22345,15 +25097,15 @@ function Get-AMRReadOnlyFileInventory {
 
 # BACKUP ENGINE - searchable catalog; all actions export/report unless explicitly creating restore point
 $script:BackupActions = @(
-@{Name='Create System Restore Point';Category='Recovery';Key='RestorePoint'},
-@{Name='Export Safety Registry Backup';Category='Registry & System';Key='Registry'},
-@{Name='Export All User Registry (HKCU)';Category='Registry & System';Key='HKCU'},
-@{Name='Export Machine Software Registry';Category='Registry & System';Key='HKLMSoftware'},
-@{Name='Export Installed Programs';Category='Configuration & Reports';Key='Programs'},
-@{Name='Export Installed Windows Features';Category='Configuration & Reports';Key='Features'},
-@{Name='Export Optional Features';Category='Configuration & Reports';Key='OptionalFeatures'},
-@{Name='Export Drivers List';Category='Drivers & Hardware';Key='DriversList'},
-@{Name='Export Third-Party Drivers';Category='Drivers & Hardware';Key='DriverExport'},
+@{Name='Create System Restore Point';Category='System';Key='RestorePoint'},
+@{Name='Export Safety Registry Backup';Category='System';Key='Registry'},
+@{Name='Export All User Registry (HKCU)';Category='System';Key='HKCU'},
+@{Name='Export Machine Software Registry';Category='System';Key='HKLMSoftware'},
+@{Name='Export Installed Programs';Category='Utilities';Key='Programs'},
+@{Name='Export Installed Windows Features';Category='System';Key='Features'},
+@{Name='Export Optional Features';Category='System';Key='OptionalFeatures'},
+@{Name='Export Drivers List';Category='Optimize';Key='DriversList'},
+@{Name='Export Third-Party Drivers';Category='Optimize';Key='DriverExport'},
 @{Name='Export Network Adapter Configuration';Category='Network';Key='IPConfig'},
 @{Name='Export IP Routing Table';Category='Network';Key='Routes'},
 @{Name='Export DNS Cache';Category='Network';Key='DNSCache'},
@@ -22364,37 +25116,37 @@ $script:BackupActions = @(
 @{Name='Export Local Users';Category='Security';Key='Users'},
 @{Name='Export Local Groups';Category='Security';Key='Groups'},
 @{Name='Export Local Group Membership';Category='Security';Key='GroupMembers'},
-@{Name='Export Services List';Category='Configuration & Reports';Key='Services'},
-@{Name='Export Running Services';Category='Configuration & Reports';Key='RunningServices'},
-@{Name='Export Scheduled Tasks';Category='Configuration & Reports';Key='Tasks'},
-@{Name='Export Startup Commands';Category='Configuration & Reports';Key='Startup'},
-@{Name='Export Environment Variables';Category='Configuration & Reports';Key='Environment'},
-@{Name='Export System Information';Category='Configuration & Reports';Key='SystemInfo'},
-@{Name='Export Windows Version';Category='Configuration & Reports';Key='WindowsVersion'},
-@{Name='Export Boot Configuration (BCD)';Category='Recovery';Key='BCD'},
-@{Name='Export Disk Partition Layout';Category='Recovery';Key='Disks'},
-@{Name='Export Volume List';Category='Recovery';Key='Volumes'},
+@{Name='Export Services List';Category='Optimize';Key='Services'},
+@{Name='Export Running Services';Category='Optimize';Key='RunningServices'},
+@{Name='Export Scheduled Tasks';Category='Optimize';Key='Tasks'},
+@{Name='Export Startup Commands';Category='Optimize';Key='Startup'},
+@{Name='Export Environment Variables';Category='System';Key='Environment'},
+@{Name='Export System Information';Category='Utilities';Key='SystemInfo'},
+@{Name='Export Windows Version';Category='System';Key='WindowsVersion'},
+@{Name='Export Boot Configuration (BCD)';Category='System';Key='BCD'},
+@{Name='Export Disk Partition Layout';Category='System';Key='Disks'},
+@{Name='Export Volume List';Category='System';Key='Volumes'},
 @{Name='Export BitLocker Status';Category='Security';Key='BitLocker'},
 @{Name='Export Certificates (Current User)';Category='Security';Key='Certificates'},
 @{Name='Export Trusted Root Certificates';Category='Security';Key='RootCerts'},
 @{Name='Export Hosts File';Category='Network';Key='Hosts'},
 @{Name='Export Proxy Settings';Category='Network';Key='Proxy'},
-@{Name='Export Windows Update History';Category='Configuration & Reports';Key='Updates'},
-@{Name='Export Restore Point Inventory';Category='Recovery';Key='RestoreInventory'},
-@{Name='Export Shadow Storage';Category='Recovery';Key='ShadowStorage'},
-@{Name='Export System Protection Status';Category='Recovery';Key='Protection'},
-@{Name='Export Event Log List';Category='Configuration & Reports';Key='EventLogs'},
-@{Name='Export Recent System Errors';Category='Configuration & Reports';Key='SystemErrors'},
-@{Name='Export Disk Health Summary';Category='Drivers & Hardware';Key='DiskHealth'},
-@{Name='Export PnP Device List';Category='Drivers & Hardware';Key='Devices'},
-@{Name='Export Audio Devices';Category='Drivers & Hardware';Key='Audio'},
-@{Name='Export Printer List';Category='Drivers & Hardware';Key='Printers'},
+@{Name='Export Windows Update History';Category='System';Key='Updates'},
+@{Name='Export Restore Point Inventory';Category='System';Key='RestoreInventory'},
+@{Name='Export Shadow Storage';Category='System';Key='ShadowStorage'},
+@{Name='Export System Protection Status';Category='System';Key='Protection'},
+@{Name='Export Event Log List';Category='Utilities';Key='EventLogs'},
+@{Name='Export Recent System Errors';Category='Utilities';Key='SystemErrors'},
+@{Name='Export Disk Health Summary';Category='Optimize';Key='DiskHealth'},
+@{Name='Export PnP Device List';Category='Optimize';Key='Devices'},
+@{Name='Export Audio Devices';Category='Utilities';Key='Audio'},
+@{Name='Export Printer List';Category='Utilities';Key='Printers'},
 @{Name='Export SMB Shares';Category='Network';Key='Shares'},
 @{Name='Export Network Profiles';Category='Network';Key='NetProfiles'},
 @{Name='Export Windows Defender Status';Category='Security';Key='Defender'},
 @{Name='Export Defender Threat History';Category='Security';Key='Threats'},
-@{Name='Export Power Plans';Category='Configuration & Reports';Key='PowerPlans'},
-@{Name='Open Backup Folder';Category='Recovery';Key='OpenFolder'}
+@{Name='Export Power Plans';Category='Optimize';Key='PowerPlans'},
+@{Name='Open Backup Folder';Category='Utilities';Key='OpenFolder'}
 )
 
 function Invoke-AMRNativeCommand {
@@ -22535,10 +25287,11 @@ function Get-AMRBackupInfoText {
   default {
    switch ([string]$Action.Category) {
     'Recovery' { 'Creates a recovery and system-state report that can help review Windows recovery configuration before troubleshooting or maintenance.'; break }
-    'Registry & System' { 'Exports system or registry configuration information to the AMR backup folder for documentation and recovery reference.'; break }
-    'Drivers & Hardware' { 'Collects hardware, device, disk, audio, printer, or driver inventory information for diagnostics and future reference.'; break }
+    'System' { 'Exports system or registry configuration information to the AMR backup folder for documentation and recovery reference.'; break }
+    'Optimize' { 'Collects hardware, device, disk, audio, printer, or driver inventory information for diagnostics and future reference.'; break }
     'Network' { 'Exports network configuration details such as adapters, routes, DNS, proxy, profiles, or shared-resource settings.'; break }
     'Security' { 'Exports Windows security configuration or status information for auditing and troubleshooting. Sensitive information should be stored securely.'; break }
+    'Utilities' { 'Creates a useful system inventory or diagnostic report, or opens the folder containing generated backup files.'; break }
     default { 'Generates a configuration or system report and saves it in the AMR backup folder for review and troubleshooting.' }
    }
   }
@@ -22547,9 +25300,22 @@ function Get-AMRBackupInfoText {
 }
 
 function Update-AMRBackupView {
- $grid=C 'BackupActionsGrid'; $grid.Children.Clear(); $search=[string](C 'BackupSearchBox').Text
+ # Category changes can leave the Backup Center ScrollViewer at a stale offset.
+ # Always restore the filtered results to the top before rebuilding the cards.
+ $backupScroll=C 'BackupCenterScrollViewer'
+ if($backupScroll){$backupScroll.ScrollToTop()}
+ $grid=C 'BackupActionsGrid'; $grid.VerticalAlignment='Top'; $grid.HorizontalAlignment='Stretch'; $grid.Children.Clear(); $search=[string](C 'BackupSearchBox').Text
  $selected=(C 'BackupCategoryFilter').SelectedItem; $category='All Categories'; if($selected){$category=([string]$selected.Content -replace '^[^A-Za-z0-9]+\s*','')}
  $visible=0
+ # Responsive Backup-only card layout: use up to three columns and give each
+ # card the remaining width so action names are readable without changing Tool Kit.
+ $availableWidth=[double]$grid.ActualWidth
+ if($availableWidth -lt 300){$availableWidth=1180}
+ $columnCount=[Math]::Max(1,[Math]::Min(3,[Math]::Floor(($availableWidth + 8) / 188)))
+ $columnCount=[int]$columnCount
+ $cardWidth=[Math]::Floor(($availableWidth - ($columnCount * 8)) / $columnCount)
+ $cardWidth=[Math]::Max(180,$cardWidth)
+ $grid.ItemWidth=$cardWidth + 8
  foreach($a in $script:BackupActions){
   if($category -ne 'All Categories' -and $a.Category -ne $category){continue}
   if(-not [string]::IsNullOrWhiteSpace($search) -and ($a.Name -notlike "*$search*" -and $a.Category -notlike "*$search*")){continue}
@@ -22557,20 +25323,21 @@ function Update-AMRBackupView {
   $card=New-Object System.Windows.Controls.Border
   $card.Background=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#202A35')
   $card.BorderBrush=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#344455')
-  $card.BorderThickness='1'; $card.CornerRadius='7'; $card.Padding='4'; $card.Margin='0,0,8,8'; $card.MinHeight=48
+  $card.BorderThickness='1'; $card.CornerRadius='7'; $card.Padding='4'; $card.Margin='0,0,8,7'; $card.Width=$cardWidth; $card.Height=50
+  $card.HorizontalAlignment='Left'; $card.VerticalAlignment='Top'
 
   $layout=New-Object System.Windows.Controls.Grid
   $colMain=New-Object System.Windows.Controls.ColumnDefinition
   $colMain.Width=[System.Windows.GridLength]::new(1,[System.Windows.GridUnitType]::Star)
   $colInfo=New-Object System.Windows.Controls.ColumnDefinition
-  $colInfo.Width=[System.Windows.GridLength]::new(28)
+  $colInfo.Width=[System.Windows.GridLength]::new(26)
   [void]$layout.ColumnDefinitions.Add($colMain); [void]$layout.ColumnDefinitions.Add($colInfo)
 
   $actionButton=New-Object System.Windows.Controls.Button
   $actionButton.Content=('💾  ' + [string]$a.Name); $actionButton.Tag=[string]$a.Key
   $actionButton.Background=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#263646')
   $actionButton.Foreground=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#E7EDF3')
-  $actionButton.BorderThickness='0'; $actionButton.Padding='7,5'; $actionButton.FontSize=11
+  $actionButton.BorderThickness='0'; $actionButton.Padding='7,4'; $actionButton.FontSize=10
   $actionButton.FontWeight='SemiBold'; $actionButton.MinHeight=34; $actionButton.Width=[double]::NaN
   $actionButton.HorizontalAlignment='Stretch'; $actionButton.HorizontalContentAlignment='Left'
   $actionButton.VerticalContentAlignment='Center'; $actionButton.ToolTip=$null
@@ -22578,8 +25345,8 @@ function Update-AMRBackupView {
   [System.Windows.Controls.Grid]::SetColumn($actionButton,0); [void]$layout.Children.Add($actionButton)
 
   $infoButton=New-Object System.Windows.Controls.Button
-  $infoButton.Content='i'; $infoButton.Width=23; $infoButton.Height=23; $infoButton.Padding='0'
-  $infoButton.FontSize=12; $infoButton.FontWeight='Bold'; $infoButton.BorderThickness='0'
+  $infoButton.Content='i'; $infoButton.Width=21; $infoButton.Height=21; $infoButton.Padding='0'
+  $infoButton.FontSize=11; $infoButton.FontWeight='Bold'; $infoButton.BorderThickness='0'
   $infoButton.Background=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#B89A62')
   $infoButton.Foreground=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#17212B')
   $infoButton.ToolTip=$null; $infoButton.HorizontalAlignment='Center'; $infoButton.VerticalAlignment='Center'
@@ -22589,14 +25356,21 @@ function Update-AMRBackupView {
 
   $card.Child=$layout
   [void]$grid.Children.Add($card)
-  # Stagger each card lightly; the existing card palette and click/info actions stay untouched.
-  Invoke-AMRSingleElementEntranceAnimation -Element $card -DelayMs ([Math]::Min(420,($visible * 34))) -DurationMs 390 -OffsetY 11
   $visible++
  }
  (C 'BackupResultsCount').Text=('{0} backup actions shown' -f $visible)
 }
+$backupActionsGrid=C 'BackupActionsGrid'
 (C 'BackupSearchBox').Add_TextChanged({ Update-AMRBackupView })
 (C 'BackupCategoryFilter').Add_SelectionChanged({ Update-AMRBackupView })
+$script:AMRBackupGridLastWidth=0
+$backupActionsGrid.Add_SizeChanged({
+ $newWidth=[double]$this.ActualWidth
+ if([Math]::Abs($newWidth - [double]$script:AMRBackupGridLastWidth) -ge 48){
+  $script:AMRBackupGridLastWidth=$newWidth
+  Update-AMRBackupView
+ }
+}.GetNewClosure())
 
 # ----------------------------------------------------------
 # AMR Startup Manager — Task Manager-aligned Windows startup inventory
@@ -22631,18 +25405,31 @@ function Set-AMRStartupEntryEnabled {
     return $true
 }
 
+function Update-AMRStartupInstalledMatchIndex {
+    $index=@{}
+    try {
+        foreach($record in @($script:InstalledScanState.Inventory)) {
+            if($null -eq $record){continue}
+            $normalized=([string]$record.Name -replace '[^a-zA-Z0-9]','').ToLowerInvariant()
+            if($normalized -and -not $index.ContainsKey($normalized)){$index[$normalized]=$record}
+        }
+    } catch {}
+    $script:StartupInstalledMatchIndex=$index
+}
+
 function Get-AMRStartupInstalledMatch {
     param([string]$DisplayName,[string]$CommandText)
     $inventory=@()
     try{if($script:InstalledScanState -and $script:InstalledScanState.Inventory){$inventory=@($script:InstalledScanState.Inventory)}}catch{}
     if($inventory.Count -eq 0){return $null}
     $norm=($DisplayName -replace '[^a-zA-Z0-9]','').ToLowerInvariant()
-    $exe='';try{$m=[regex]::Match($CommandText,'(?i)([A-Z]:\\[^\"]+?\.exe)');if($m.Success){$exe=[IO.Path]::GetFileNameWithoutExtension($m.Groups[1].Value)}}catch{}
+    if($norm -and $script:StartupInstalledMatchIndex -and $script:StartupInstalledMatchIndex.ContainsKey($norm)){return $script:StartupInstalledMatchIndex[$norm]}
+    $exe='';try{$m=[regex]::Match($CommandText,'(?i)([A-Z]:\\[^"]+?\.exe)');if($m.Success){$exe=[IO.Path]::GetFileNameWithoutExtension($m.Groups[1].Value)}}catch{}
+    $exeNorm=if($exe){($exe -replace '[^a-zA-Z0-9]','').ToLowerInvariant()}else{''}
     foreach($record in $inventory){
-        $recordName=[string]$record.Name
-        $recordNorm=($recordName -replace '[^a-zA-Z0-9]','').ToLowerInvariant()
+        $recordNorm=([string]$record.Name -replace '[^a-zA-Z0-9]','').ToLowerInvariant()
         if($norm -and ($recordNorm -eq $norm -or ($recordNorm.Length -ge 4 -and $norm.Contains($recordNorm)) -or ($norm.Length -ge 4 -and $recordNorm.Contains($norm)))){return $record}
-        if($exe){$exeNorm=($exe -replace '[^a-zA-Z0-9]','').ToLowerInvariant();if($recordNorm -eq $exeNorm -or ($recordNorm.Length -ge 4 -and $exeNorm.Contains($recordNorm))){return $record}}
+        if($exeNorm -and ($recordNorm -eq $exeNorm -or ($recordNorm.Length -ge 4 -and $exeNorm.Contains($recordNorm)))){return $record}
     }
     return $null
 }
@@ -22709,6 +25496,7 @@ function Get-AMRStartupIconSource {
 }
 
 function Get-AMRStartupEntries {
+    param([switch]$SkipCim,[switch]$SkipIcons)
     $entries=New-Object 'System.Collections.Generic.List[object]'
     $seen=New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
     $seenCommands=New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
@@ -22768,8 +25556,8 @@ function Get-AMRStartupEntries {
         }catch{Write-AMRLog ('Startup folder discovery warning: '+$folder.Path+' · '+$_.Exception.Message) WARNING System}
     }
 
-    # Windows' own startup inventory catches additional registered entries and
-    # normalizes the list toward the same inventory surfaced by Task Manager.
+    # Windows' own startup inventory is collected separately after the first UI render.
+    if(-not $SkipCim){
     try {
         foreach($item in @(Get-CimInstance -ClassName Win32_StartupCommand -ErrorAction Stop)){
             $name=[string]$item.Name; $command=[string]$item.Command; $location=[string]$item.Location
@@ -22799,9 +25587,12 @@ function Get-AMRStartupEntries {
             [void]$seen.Add($identity); if($commandKey){[void]$seenCommands.Add($commandKey)}
         }
     } catch { Write-AMRLog ('Windows startup inventory (Win32_StartupCommand) warning: '+$_.Exception.Message) WARNING System }
+    }
 
-    foreach($entry in $entries){
-        if(-not $entry.IconSource){$entry.IconSource=Get-AMRStartupIconSource -Entry $entry}
+    if(-not $SkipIcons){
+        foreach($entry in $entries){
+            if(-not $entry.IconSource){$entry.IconSource=Get-AMRStartupIconSource -Entry $entry}
+        }
     }
     return @($entries | Sort-Object @{Expression={if($_.Enabled){0}else{1}}},Name)
 }
@@ -22826,17 +25617,38 @@ function Set-AMRStartupSwitchVisual {
 }
 
 function Refresh-AMRStartupManager {
-    param([switch]$RefreshInventory)
+    param([object[]]$Entries,[switch]$RefreshInventory,[switch]$SkipDeferredCim)
     $hostPanel=C 'AMRStartupAppsHost';if(-not $hostPanel){return}
+    # Re-entering Startups must reuse the existing cards. Only an explicit refresh
+    # or a supplied replacement entry set is allowed to rebuild the visual tree.
+    if(-not $PSBoundParameters.ContainsKey('Entries') -and -not $RefreshInventory -and
+       ($script:StartupManagerLoaded -or $script:StartupRenderState)){return}
+    try { if($script:StartupRenderTimer){$script:StartupRenderTimer.Stop()} } catch {}
     $hostPanel.Children.Clear()
-    $entries=@(Get-AMRStartupEntries)
-    $script:StartupManagerEntries=$entries
+    if($PSBoundParameters.ContainsKey('Entries')){$entries=@($Entries)}else{
+        Update-AMRStartupInstalledMatchIndex
+        # Registry and Startup-folder discovery is fast; CIM and icons are deferred.
+        $entries=@(Get-AMRStartupEntries -SkipCim -SkipIcons)
+    }
+    $script:StartupManagerEntries=@($entries)
     $enabledCount=@($entries|Where-Object {$_.Enabled}).Count
     $summary=C 'AMRStartupSummary';if($summary){$summary.Text=('{0} startup item(s) detected  ·  {1} enabled  ·  {2} disabled' -f $entries.Count,$enabledCount,($entries.Count-$enabledCount))}
     $empty=C 'AMRStartupEmptyState';if($empty){$empty.Visibility=if($entries.Count -eq 0){'Visible'}else{'Collapsed'}}
     if($entries.Count -eq 0){$title=C 'AMRStartupEmptyTitle';$detail=C 'AMRStartupEmptyDetail';if($title){$title.Text='No startup applications detected'};if($detail){$detail.Text='No entries were found in the Windows startup inventory, Run keys, or Startup folders.'}}
-    $index=0
-    foreach($entry in $entries){
+    $queue=New-Object 'System.Collections.Generic.Queue[object]'
+    foreach($queuedEntry in $entries){$queue.Enqueue($queuedEntry)}
+    $script:StartupRenderState=@{Queue=$queue;Index=0;RenderedEntries=(New-Object 'System.Collections.Generic.List[object]');RefreshInventory=[bool]$RefreshInventory;SkipDeferredCim=[bool]$SkipDeferredCim}
+    $timer=New-Object System.Windows.Threading.DispatcherTimer
+    $timer.Interval=[TimeSpan]::FromMilliseconds(24)
+    $script:StartupRenderHostPanel=$hostPanel
+    $timer.Add_Tick({
+        try {
+        $state=$script:StartupRenderState
+        if(-not $state){$script:StartupRenderTimer.Stop();return}
+        for($batch=0;$batch -lt 2 -and $state.Queue.Count -gt 0;$batch++){
+            $entry=$state.Queue.Dequeue()
+            $index=[int]$state.Index
+
         $card=New-Object System.Windows.Controls.Border
         $card.Background=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#80172638')
         $card.BorderBrush=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#5030465C')
@@ -22851,11 +25663,14 @@ function Refresh-AMRStartupManager {
         $grid.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition -Property @{Width=[System.Windows.GridLength]::new(82)}))
         $grid.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition -Property @{Width=[System.Windows.GridLength]::new(52)}))
         $glyph=New-Object System.Windows.Controls.Border;$glyph.Width=32;$glyph.Height=32;$glyph.CornerRadius=[System.Windows.CornerRadius]::new(9);$glyph.Background=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#80263D55');$glyph.VerticalAlignment='Center'
-        $initial=New-Object System.Windows.Controls.TextBlock;$initial.Text=if($entry.Name.Length -gt 0){$entry.Name.Substring(0,1).ToUpperInvariant()}else{'A'};$initial.Foreground=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#D9BD8B');$initial.FontSize=14;$initial.FontWeight='Bold';$initial.HorizontalAlignment='Center';$initial.VerticalAlignment='Center';$glyph.Child=$initial
-        if($entry.IconSource){$appImage=New-Object System.Windows.Controls.Image;$appImage.Source=$entry.IconSource;$appImage.Width=27;$appImage.Height=27;$appImage.Stretch='Uniform';$appImage.HorizontalAlignment='Center';$appImage.VerticalAlignment='Center';$glyph.Child=$appImage}
+        $initial=New-Object System.Windows.Controls.TextBlock;$entryDisplayName=[string]$entry.Name;$initial.Text=if($entryDisplayName.Length -gt 0){$entryDisplayName.Substring(0,1).ToUpperInvariant()}else{'A'};$initial.Foreground=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#D9BD8B');$initial.FontSize=14;$initial.FontWeight='Bold';$initial.HorizontalAlignment='Center';$initial.VerticalAlignment='Center';$glyph.Child=$initial
+        $appImage=New-Object System.Windows.Controls.Image;$appImage.Width=27;$appImage.Height=27;$appImage.Stretch='Uniform';$appImage.HorizontalAlignment='Center';$appImage.VerticalAlignment='Center'
+        if($entry.IconSource){$appImage.Source=$entry.IconSource;$glyph.Child=$appImage}
+        $entry | Add-Member -NotePropertyName IconControl -NotePropertyValue $appImage -Force
+        $entry | Add-Member -NotePropertyName GlyphControl -NotePropertyValue $glyph -Force
         [System.Windows.Controls.Grid]::SetColumn($glyph,0);[void]$grid.Children.Add($glyph)
         $details=New-Object System.Windows.Controls.StackPanel;$details.VerticalAlignment='Center'
-        $name=New-Object System.Windows.Controls.TextBlock;$name.Text=[string]$entry.Name;$name.Foreground=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#F0F5FA');$name.FontSize=12;$name.FontWeight='SemiBold';$name.TextTrimming='CharacterEllipsis'
+        $name=New-Object System.Windows.Controls.TextBlock;$name.Text=$entryDisplayName;$name.Foreground=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#F0F5FA');$name.FontSize=12;$name.FontWeight='SemiBold';$name.TextTrimming='CharacterEllipsis'
         $source=New-Object System.Windows.Controls.TextBlock;$source.Text=[string]$entry.Source;$source.Foreground=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#8FA6BC');$source.FontSize=9;$source.Margin=[System.Windows.Thickness]::new(0,3,0,0);$source.TextTrimming='CharacterEllipsis'
         [void]$details.Children.Add($name);[void]$details.Children.Add($source);[System.Windows.Controls.Grid]::SetColumn($details,1);[void]$grid.Children.Add($details)
         $status=New-Object System.Windows.Controls.TextBlock;$status.Text=if($entry.Enabled){'ON'}else{'OFF'};$status.Foreground=[System.Windows.Media.BrushConverter]::new().ConvertFromString($(if($entry.Enabled){'#72D9BC'}else{'#A3B2C1'}));$status.FontSize=9;$status.FontWeight='Bold';$status.VerticalAlignment='Center';$status.HorizontalAlignment='Center';[System.Windows.Controls.Grid]::SetColumn($status,2);[void]$grid.Children.Add($status)
@@ -22883,13 +25698,117 @@ function Refresh-AMRStartupManager {
         $switch.ToolTip=if($entry.CanToggle){'Smooth ON/OFF control · Windows StartupApproved'}else{'Detected by Windows; no safe StartupApproved switch was exposed for this item.'}
         if(-not $entry.CanToggle){$switch.Opacity=0.45;$status.Text='INFO';$status.Foreground=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#A3B2C1')}
         [System.Windows.Controls.Grid]::SetColumn($switch,3)
-        $card.Child=$grid;[void]$hostPanel.Children.Add($card)
-        Invoke-AMRSingleElementEntranceAnimation -Element $card -DelayMs ([Math]::Min(360,($index*26))) -DurationMs 360 -OffsetY 8
+        $card.Child=$grid;[void]$script:StartupRenderHostPanel.Children.Add($card)
         $index++
+            $state.Index=$index
+            [void]$state.RenderedEntries.Add($entry)
+        }
+        if($state.Queue.Count -eq 0){
+            $script:StartupRenderTimer.Stop()
+            $script:StartupManagerLoaded=$true
+            $rendered=@($state.RenderedEntries.ToArray())
+            Start-AMRStartupIconHydration -Entries $rendered
+            if(-not $state.SkipDeferredCim){Start-AMRStartupCimScan}
+            if($state.RefreshInventory -and $script:InstalledScanState -and -not $script:InstalledScanState.Current){
+                try{Start-AMRInstalledCatalogScan -Refresh}catch{Write-AMRLog ('Startup manager inventory refresh could not start: '+$_.Exception.Message) WARNING System}
+            }
+            $script:StartupRenderState=$null
+        }
+        } catch {
+            $renderError=$_.Exception.ToString()
+            try { Write-AMRLog ('Startup card rendering failed: '+$renderError) ERROR System } catch {}
+            try { if($script:StartupRenderTimer){$script:StartupRenderTimer.Stop()} } catch {}
+            $script:StartupRenderState=$null
+        }
+    })
+    $script:StartupRenderTimer=$timer
+    $timer.Start()
+}
+
+function Start-AMRStartupIconHydration {
+    param([object[]]$Entries)
+    try { if($script:StartupIconTimer){$script:StartupIconTimer.Stop()} } catch {}
+    $queue=New-Object 'System.Collections.Generic.Queue[object]'
+    foreach($entry in @($Entries)){if($entry.PSObject.Properties['IconControl'] -and $entry.PSObject.Properties['GlyphControl']){$queue.Enqueue($entry)}}
+    $script:StartupIconQueue=$queue
+    if($queue.Count -eq 0){return}
+    $timer=New-Object System.Windows.Threading.DispatcherTimer
+    $timer.Interval=[TimeSpan]::FromMilliseconds(140)
+    $timer.Add_Tick({
+        try {
+            if(-not $script:StartupIconQueue -or $script:StartupIconQueue.Count -eq 0){$script:StartupIconTimer.Stop();return}
+            $entry=$script:StartupIconQueue.Dequeue()
+            $source=Get-AMRStartupIconSource -Entry $entry
+            if($source){$entry.IconControl.Source=$source;$entry.GlyphControl.Child=$entry.IconControl}
+        } catch { try{Write-AMRLog ('Deferred startup icon warning: '+$_.Exception.Message) WARNING System}catch{} }
+    })
+    $script:StartupIconTimer=$timer
+    $timer.Start()
+}
+
+function Add-AMRStartupCimEntries {
+    param([object[]]$Items)
+    $entries=@($script:StartupManagerEntries)
+    if($entries.Count -eq 0 -and @($Items).Count -eq 0){return}
+    $seenCommands=New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    foreach($entry in $entries){
+        $key=([Environment]::ExpandEnvironmentVariables([string]$entry.Command) -replace '\s+',' ').Trim().ToLowerInvariant()
+        if($key){[void]$seenCommands.Add($key)}
     }
-    $script:StartupManagerLoaded=$true
-    if($RefreshInventory -and $script:InstalledScanState -and -not $script:InstalledScanState.Current){
-        try{Start-AMRInstalledCatalogScan -Refresh}catch{Write-AMRLog ('Startup manager inventory refresh could not start: '+$_.Exception.Message) WARNING System}
+    $added=0
+    foreach($item in @($Items)){
+        $name=[string]$item.Name;$command=[string]$item.Command;$location=[string]$item.Location
+        if([string]::IsNullOrWhiteSpace($name) -and [string]::IsNullOrWhiteSpace($command)){continue}
+        $expanded=[Environment]::ExpandEnvironmentVariables($command);$commandKey=($expanded -replace '\s+',' ').Trim().ToLowerInvariant()
+        if($commandKey -and $seenCommands.Contains($commandKey)){continue}
+        $approvalPath=$null;$approvalName=$name;$sourceLabel='Windows startup inventory'
+        if($location -match '(?i)(HKCU|HKEY_CURRENT_USER).*(CurrentVersion\Run|CurrentVersion/Run)'){
+            if($location -match '(?i)Run32|Wow6432Node'){$approvalPath='HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run32'}else{$approvalPath='HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run'}
+            $sourceLabel='Current user · Windows startup inventory'
+        } elseif($location -match '(?i)(HKLM|HKEY_LOCAL_MACHINE).*(CurrentVersion\Run|CurrentVersion/Run)'){
+            if($location -match '(?i)Run32|Wow6432Node'){$approvalPath='HKLM:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run32'}else{$approvalPath='HKLM:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run'}
+            $sourceLabel='All users · Windows startup inventory'
+        } elseif($location -match '(?i)Startup'){$approvalPath='HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\StartupFolder';$sourceLabel='Startup folder · Windows inventory'}
+        $match=Get-AMRStartupInstalledMatch -DisplayName $name -CommandText $command
+        $display=if($match){[string]$match.Name}else{$name}
+        $canToggle=($null -ne $approvalPath);$enabled=if($canToggle){Get-AMRStartupApprovalState -ApprovalPath $approvalPath -ValueName $approvalName}else{$true}
+        $newEntry=[pscustomobject]@{Name=$display;EntryName=$name;Command=$command;Source=$sourceLabel;Kind='WindowsInventory';ApprovalPath=$approvalPath;ApprovalValueName=$approvalName;Enabled=[bool]$enabled;CanToggle=$canToggle;InstalledMatch=($null -ne $match);InstalledRecord=$match;Identity=('CIM|'+$location+'|'+$name+'|'+$commandKey);IconSource=$null;IconLocation=''}
+        $entries+=,$newEntry;$added++;if($commandKey){[void]$seenCommands.Add($commandKey)}
+    }
+    if($added -gt 0){
+        $script:StartupManagerEntries=@($entries | Sort-Object @{Expression={if($_.Enabled){0}else{1}}},Name)
+        if(Get-Command Save-AMRStartupManagerCache -ErrorAction SilentlyContinue){[void](Save-AMRStartupManagerCache -Entries $script:StartupManagerEntries)}
+        Refresh-AMRStartupManager -Entries $script:StartupManagerEntries -SkipDeferredCim
+    }
+}
+
+function Start-AMRStartupCimScan {
+    if($script:StartupCimState -and $script:StartupCimState.Current){return}
+    try {
+        $rs=[System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace()
+        $rs.ApartmentState=[System.Threading.ApartmentState]::MTA
+        $rs.ThreadOptions=[System.Management.Automation.Runspaces.PSThreadOptions]::ReuseThread
+        $rs.Open()
+        $ps=[PowerShell]::Create();$ps.Runspace=$rs
+        [void]$ps.AddScript('Import-Module CimCmdlets -ErrorAction SilentlyContinue; Get-CimInstance -ClassName Win32_StartupCommand -ErrorAction Stop | Select-Object Name,Command,Location')
+        $handle=$ps.BeginInvoke()
+        $script:StartupCimState=@{Current=$true;PowerShell=$ps;Runspace=$rs;Handle=$handle}
+        try{if($script:StartupCimTimer){$script:StartupCimTimer.Stop()}}catch{}
+        $poll=New-Object System.Windows.Threading.DispatcherTimer;$poll.Interval=[TimeSpan]::FromMilliseconds(180)
+        $poll.Add_Tick({
+            $state=$script:StartupCimState
+            if(-not $state -or -not $state.Current){$script:StartupCimTimer.Stop();return}
+            if($state.Handle.IsCompleted){
+                $script:StartupCimTimer.Stop()
+                try{$items=@($state.PowerShell.EndInvoke($state.Handle));Add-AMRStartupCimEntries -Items $items}
+                catch{Write-AMRLog ('Deferred Windows startup inventory warning: '+$_.Exception.Message) WARNING System}
+                finally{try{$state.PowerShell.Dispose()}catch{};try{$state.Runspace.Close();$state.Runspace.Dispose()}catch{};$script:StartupCimState=@{Current=$false}}
+            }
+        })
+        $script:StartupCimTimer=$poll;$poll.Start()
+    } catch {
+        Write-AMRLog ('Could not start deferred Windows startup inventory: '+$_.Exception.Message) WARNING System
+        try{if($rs){$rs.Close();$rs.Dispose()}}catch{}
     }
 }
 
@@ -22915,7 +25834,7 @@ function Set-AMRBackupSubTab {
   $backupButton.BorderBrush=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#34465B')
  }
 }
-(C 'AMRStartupRefreshBtn').Add_Click({ Refresh-AMRStartupManager -RefreshInventory })
+(C 'AMRStartupRefreshBtn').Add_Click({ Start-AMRRefreshButtonAnimation -Button (C 'AMRStartupRefreshBtn'); Refresh-AMRStartupManager -RefreshInventory })
 (C 'BackupCenterChoiceBtn').Add_Click({ Set-AMRBackupSubTab 0 })
 (C 'DriverBackupChoiceBtn').Add_Click({ Set-AMRBackupSubTab 1 })
 Set-AMRBackupSubTab 0
@@ -23141,17 +26060,16 @@ function Start-AMRBackgroundIconRefresh {
     if ($script:IconRefreshStarted) { return }
     $script:IconRefreshStarted = $true
 
-    # Existing cache: icons have already been assigned directly to catalog items
-    # before the window was built. Do not create a runspace, timer, queue, archive
-    # check, network request, or icon refresh worker on subsequent launches.
+    # Cache validation, file reads and image decoding are intentionally deferred
+    # until after the window has rendered and run in the isolated worker below.
     if ($script:IconCacheUsableAtStartup) {
         $cachedCount = @($script:SoftwareCatalog | Where-Object { $null -ne $_.Icon }).Count
         Write-AMRLog (("Local icon cache loaded synchronously: {0}/{1}. Background icon worker skipped." -f $cachedCount,$script:SoftwareCatalog.Count)) INFO Software
         return
     }
 
-    # First install only: no usable local cache exists, so the original isolated
-    # download/extract worker remains responsible for acquiring the icon package.
+    # The isolated worker first hydrates any usable local cache, then performs
+    # the existing bounded archive refresh/download flow when required.
     try {
         $script:IconRefreshApps = @($RawApps)
         $script:IconRefreshStartedUtc = [DateTime]::UtcNow
@@ -23605,6 +26523,8 @@ $script:Window.Add_ContentRendered({
     Start-AMRBackgroundIconRefresh
 })
 
+# Fix40: validated cached inventory can render immediately while an in-flight refresh continues;
+# intentional catalog/installed switches use a low-cost grid-level cross-fade + slide.
 # Inventory is warmed in a dedicated background runspace at startup. The UI only
 # consumes the last cached snapshot and the completed refresh payload.
 [void]$script:Window.ShowDialog()
