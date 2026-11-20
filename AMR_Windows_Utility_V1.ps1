@@ -4105,7 +4105,7 @@ Write-AMRLog ("Startup catalog ready: {0} preloaded icons from local cache. Cach
        <!-- Reserve the vertical scrollbar gutter permanently: Auto can change the viewport width
              when a filtered/short page crosses the scroll threshold, which changes card widths. -->
         <ScrollViewer x:Name="SoftwareScrollViewer" Grid.Row="0" Grid.Column="0" FlowDirection="RightToLeft" VerticalScrollBarVisibility="Visible" HorizontalScrollBarVisibility="Disabled" CanContentScroll="False" Background="Transparent" Padding="0" Margin="-5,0,0,0">
-        <ItemsControl Name="SoftwareGrid" FlowDirection="LeftToRight" Margin="0,2,0,155" Background="Transparent">
+        <ItemsControl Name="SoftwareGrid" FlowDirection="LeftToRight" Margin="0,2,0,0" Background="Transparent">
          <ItemsControl.ItemsPanel>
           <ItemsPanelTemplate><UniformGrid Columns="4"/></ItemsPanelTemplate>
          </ItemsControl.ItemsPanel>
@@ -6149,11 +6149,262 @@ function C {
     return $script:Window.FindName($Name)
 }
 
+# Four-column real virtualization for the existing Software card template.
+# The original card objects and paging pipeline remain unchanged. The custom
+# panel measures the actual ScrollViewer viewport, returns the full logical
+# extent, and realizes/recycles only visible rows plus one cache row.
+$script:SoftwareVirtualPanelReady = $false
+try {
+    if (-not ('AMR.SoftwareVirtualizingUniformGridPanel' -as [type])) {
+        $wpfReferences = @(
+            [System.Windows.Controls.ItemsControl].Assembly.Location,
+            [System.Windows.Media.Visual].Assembly.Location,
+            [System.Windows.DependencyObject].Assembly.Location
+        ) | Select-Object -Unique
+        Add-Type -Language CSharp -ReferencedAssemblies $wpfReferences -TypeDefinition @'
+
+using System;
+using System.Collections.Generic;
+using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
+using System.Windows.Media;
+
+namespace AMR {
+    // Four-column, vertically virtualized ItemsControl panel.
+    // Only viewport rows plus a small cache are generated; containers are recycled.
+    public sealed class SoftwareVirtualizingUniformGridPanel : VirtualizingPanel {
+        private const int ColumnCount = 4;
+        private const double DefaultItemHeight = 76.0;
+        private const double EndPadding = 24.0;
+        private const int CacheRows = 1;
+
+        private readonly SortedDictionary<int, UIElement> _realized =
+            new SortedDictionary<int, UIElement>();
+
+        private ScrollViewer _scrollHost;
+        private double _viewportWidth = 800.0;
+        private double _viewportHeight = 480.0;
+        private double _verticalOffset;
+        private double _extentHeight;
+        private double _itemHeight = DefaultItemHeight;
+
+        public int RealizedItemCount { get { return _realized.Count; } }
+        public int TotalItemCount {
+            get {
+                ItemsControl owner = ItemsControl.GetItemsOwner(this);
+                return owner == null ? 0 : owner.Items.Count;
+            }
+        }
+        public int FirstRealizedIndex {
+            get {
+                foreach (KeyValuePair<int, UIElement> item in _realized) return item.Key;
+                return -1;
+            }
+        }
+        public int LastRealizedIndex {
+            get {
+                int result = -1;
+                foreach (KeyValuePair<int, UIElement> item in _realized) result = item.Key;
+                return result;
+            }
+        }
+        public bool ScrollHostConnected {
+            get { return _scrollHost != null; }
+        }
+        public bool RecyclingGeneratorAvailable {
+            get { return ItemContainerGenerator is IRecyclingItemContainerGenerator; }
+        }
+        public double LogicalExtentHeight { get { return _extentHeight; } }
+        public double LogicalViewportHeight { get { return _viewportHeight; } }
+
+        protected override void OnVisualParentChanged(DependencyObject oldParent) {
+            base.OnVisualParentChanged(oldParent);
+            AttachScrollHost();
+            InvalidateMeasure();
+        }
+
+        private ScrollViewer FindAncestorScrollViewer() {
+            DependencyObject current = VisualTreeHelper.GetParent(this);
+            while (current != null) {
+                ScrollViewer candidate = current as ScrollViewer;
+                if (candidate != null) return candidate;
+                current = VisualTreeHelper.GetParent(current);
+            }
+            return null;
+        }
+
+        private void AttachScrollHost() {
+            ScrollViewer found = FindAncestorScrollViewer();
+            if (Object.ReferenceEquals(found, _scrollHost)) return;
+
+            if (_scrollHost != null) {
+                _scrollHost.ScrollChanged -= OnScrollHostChanged;
+                _scrollHost.SizeChanged -= OnScrollHostSizeChanged;
+            }
+
+            _scrollHost = found;
+            if (_scrollHost != null) {
+                _scrollHost.ScrollChanged += OnScrollHostChanged;
+                _scrollHost.SizeChanged += OnScrollHostSizeChanged;
+            }
+        }
+
+        private void OnScrollHostChanged(object sender, ScrollChangedEventArgs e) {
+            _verticalOffset = _scrollHost == null ? 0.0 : _scrollHost.VerticalOffset;
+            InvalidateMeasure();
+        }
+
+        private void OnScrollHostSizeChanged(object sender, SizeChangedEventArgs e) {
+            InvalidateMeasure();
+        }
+
+        protected override Size MeasureOverride(Size availableSize) {
+            AttachScrollHost();
+
+            ItemsControl owner = ItemsControl.GetItemsOwner(this);
+            if (owner == null) return new Size(0, 0);
+
+            int itemCount = owner.Items.Count;
+            double width = availableSize.Width;
+            if (Double.IsNaN(width) || Double.IsInfinity(width) || width <= 0) {
+                width = (_scrollHost != null && _scrollHost.ViewportWidth > 0)
+                    ? _scrollHost.ViewportWidth : _viewportWidth;
+            }
+
+            double viewportHeight = (_scrollHost != null && _scrollHost.ViewportHeight > 0)
+                ? _scrollHost.ViewportHeight
+                : ((!Double.IsNaN(availableSize.Height) && !Double.IsInfinity(availableSize.Height) && availableSize.Height > 0)
+                    ? availableSize.Height : _viewportHeight);
+
+            _viewportWidth = Math.Max(1.0, width);
+            _viewportHeight = Math.Max(1.0, viewportHeight);
+            _verticalOffset = _scrollHost == null ? 0.0 : Math.Max(0.0, _scrollHost.VerticalOffset);
+            _itemHeight = DefaultItemHeight;
+
+            int rowCount = (int)Math.Ceiling(itemCount / (double)ColumnCount);
+            _extentHeight = rowCount == 0 ? 0.0 : (rowCount * _itemHeight) + EndPadding;
+
+            int firstRow = Math.Max(0, (int)Math.Floor(_verticalOffset / _itemHeight) - CacheRows);
+            int lastRow = Math.Min(rowCount - 1,
+                (int)Math.Ceiling((_verticalOffset + _viewportHeight) / _itemHeight) + CacheRows);
+            int firstIndex = rowCount == 0 ? 0 : firstRow * ColumnCount;
+            int lastIndex = rowCount == 0 ? -1 : Math.Min(itemCount - 1, ((lastRow + 1) * ColumnCount) - 1);
+
+            CleanUpItems(firstIndex, lastIndex);
+
+            if (lastIndex >= firstIndex) {
+                IItemContainerGenerator generator = ItemContainerGenerator;
+                for (int itemIndex = firstIndex; itemIndex <= lastIndex; itemIndex++) {
+                    UIElement child;
+                    if (_realized.TryGetValue(itemIndex, out child)) {
+                        child.Measure(new Size(_viewportWidth / ColumnCount, _itemHeight));
+                        continue;
+                    }
+
+                    GeneratorPosition position = generator.GeneratorPositionFromIndex(itemIndex);
+                    int childIndex = position.Index + (position.Offset == 0 ? 1 : 0);
+                    using (generator.StartAt(position, GeneratorDirection.Forward, true)) {
+                        bool newlyRealized;
+                        child = generator.GenerateNext(out newlyRealized) as UIElement;
+                        if (child != null) {
+                            if (newlyRealized) {
+                                childIndex = Math.Max(0, Math.Min(childIndex, InternalChildren.Count));
+                                InsertInternalChild(childIndex, child);
+                                generator.PrepareItemContainer(child);
+                            }
+                            _realized[itemIndex] = child;
+                            child.Measure(new Size(_viewportWidth / ColumnCount, _itemHeight));
+                        }
+                    }
+                }
+            }
+
+            // Return the full logical content height so the outer ScrollViewer
+            // gets a real extent. Only viewport rows plus one cache row exist
+            // in the visual tree; the 24px breathing room exists only at the
+            // actual end of the currently published list, never under each page.
+            return new Size(_viewportWidth, _extentHeight);
+        }
+
+        private void CleanUpItems(int firstIndex, int lastIndex) {
+            IItemContainerGenerator generator = ItemContainerGenerator;
+            IRecyclingItemContainerGenerator recycling = generator as IRecyclingItemContainerGenerator;
+
+            for (int childIndex = InternalChildren.Count - 1; childIndex >= 0; childIndex--) {
+                UIElement child = InternalChildren[childIndex];
+                int itemIndex = -1;
+                foreach (KeyValuePair<int, UIElement> pair in _realized) {
+                    if (Object.ReferenceEquals(pair.Value, child)) {
+                        itemIndex = pair.Key;
+                        break;
+                    }
+                }
+
+                if (itemIndex >= firstIndex && itemIndex <= lastIndex) continue;
+
+                GeneratorPosition position = new GeneratorPosition(childIndex, 0);
+                if (recycling != null) recycling.Recycle(position, 1);
+                else generator.Remove(position, 1);
+
+                RemoveInternalChildRange(childIndex, 1);
+                if (itemIndex >= 0) _realized.Remove(itemIndex);
+            }
+        }
+
+        protected override Size ArrangeOverride(Size finalSize) {
+            double columnWidth = Math.Max(1.0, finalSize.Width / ColumnCount);
+            foreach (KeyValuePair<int, UIElement> pair in _realized) {
+                int row = pair.Key / ColumnCount;
+                int column = pair.Key % ColumnCount;
+                double x = column * columnWidth;
+                double y = row * _itemHeight;
+                pair.Value.Arrange(new Rect(x, y, columnWidth, _itemHeight));
+            }
+            return finalSize;
+        }
+
+        protected override void OnItemsChanged(object sender, ItemsChangedEventArgs args) {
+            base.OnItemsChanged(sender, args);
+
+            if (args.Action == System.Collections.Specialized.NotifyCollectionChangedAction.Reset) {
+                try { ItemContainerGenerator.RemoveAll(); } catch { }
+                if (InternalChildren.Count > 0) RemoveInternalChildRange(0, InternalChildren.Count);
+                _realized.Clear();
+                _verticalOffset = 0.0;
+                if (_scrollHost != null) _scrollHost.ScrollToTop();
+            }
+
+            InvalidateMeasure();
+        }
+
+        protected override void OnRenderSizeChanged(SizeChangedInfo sizeInfo) {
+            base.OnRenderSizeChanged(sizeInfo);
+            InvalidateMeasure();
+        }
+
+        protected override void BringIndexIntoView(int index) {
+            if (index < 0 || _scrollHost == null) return;
+            double target = (index / ColumnCount) * _itemHeight;
+            _scrollHost.ScrollToVerticalOffset(target);
+        }
+    }
+}
+
+'@
+    }
+    $script:SoftwareVirtualPanelReady = ($null -ne ('AMR.SoftwareVirtualizingUniformGridPanel' -as [type]))
+} catch {
+    $script:SoftwareVirtualPanelReady = $false
+    Write-AMRLog ('Software virtualization panel type could not compile; keeping the original non-virtualized card panel as a safe fallback: ' + $_.Exception.Message) WARNING Software
+}
+
 # Create a dedicated Installed ItemsControl using the exact catalog templates.
 # The two grids share immutable WPF templates, but never share ItemsSource or
 # generated visual containers. This is intentionally initialized once.
 try {
     $script:SoftwareCatalogGrid = $script:Window.FindName('SoftwareGrid')
+    $script:SoftwareOriginalItemsPanel = $script:SoftwareCatalogGrid.ItemsPanel
     $script:InstalledSoftwareGrid = New-Object System.Windows.Controls.ItemsControl
     $script:InstalledSoftwareGrid.ItemTemplate = $script:SoftwareCatalogGrid.ItemTemplate
     $script:InstalledSoftwareGrid.ItemsPanel = $script:SoftwareCatalogGrid.ItemsPanel
@@ -6171,10 +6422,39 @@ try {
     $script:InstalledSoftwareGrid.ItemsSource = New-Object 'System.Collections.ObjectModel.ObservableCollection[object]'
     $script:InstalledSoftwareGrid.Name = 'AMRInstalledSoftwareGrid'
     $script:InstalledSoftwareGrid.Uid = 'AMR_INSTALLED_SURFACE_V1'
-    Write-AMRLog 'Created independent catalog and Installed visual surfaces; each retains its own WPF card containers.' INFO Software
+
+    $softwareScrollHost = $script:Window.FindName('SoftwareScrollViewer')
+    if ($script:SoftwareVirtualPanelReady) {
+        # One immutable ItemsPanelTemplate is shared; each ItemsControl still owns
+        # its own generator, realized containers, ItemsSource, and scroll lifecycle.
+        $virtualPanelFactory = New-Object System.Windows.FrameworkElementFactory -ArgumentList ([AMR.SoftwareVirtualizingUniformGridPanel])
+        $virtualPanelTemplate = New-Object System.Windows.Controls.ItemsPanelTemplate
+        $virtualPanelTemplate.VisualTree = $virtualPanelFactory
+        foreach ($softwareItemsControl in @($script:SoftwareCatalogGrid,$script:InstalledSoftwareGrid)) {
+            $softwareItemsControl.ItemsPanel = $virtualPanelTemplate
+            [System.Windows.Controls.VirtualizingPanel]::SetIsVirtualizing($softwareItemsControl,$true)
+            [System.Windows.Controls.VirtualizingPanel]::SetVirtualizationMode($softwareItemsControl,[System.Windows.Controls.VirtualizationMode]::Recycling)
+            [System.Windows.Controls.ScrollViewer]::SetCanContentScroll($softwareItemsControl,$false)
+        }
+        if ($softwareScrollHost) { $softwareScrollHost.CanContentScroll = $false }
+        Write-AMRLog 'Initialized four-column Software virtualization: viewport-aware physical scrolling, recycled item containers, and independent Catalog/Installed generators.' INFO Software
+    } else {
+        if ($softwareScrollHost) { $softwareScrollHost.CanContentScroll = $false }
+        Write-AMRLog 'Software virtualization is unavailable on this runtime; preserved the original working UniformGrid and physical scrolling.' WARNING Software
+    }
 } catch {
+    try {
+        if ($script:SoftwareCatalogGrid -and $script:SoftwareOriginalItemsPanel) {
+            $script:SoftwareCatalogGrid.ItemsPanel = $script:SoftwareOriginalItemsPanel
+        }
+        if ($script:InstalledSoftwareGrid -and $script:SoftwareOriginalItemsPanel) {
+            $script:InstalledSoftwareGrid.ItemsPanel = $script:SoftwareOriginalItemsPanel
+        }
+        $fallbackSoftwareScroll = $script:Window.FindName('SoftwareScrollViewer')
+        if ($fallbackSoftwareScroll) { $fallbackSoftwareScroll.CanContentScroll = $false }
+    } catch {}
     $script:InstalledSoftwareGrid = $null
-    Write-AMRLog ('Independent Installed visual surface could not initialize; shared-grid fallback remains active: ' + $_.Exception.Message) WARNING Software
+    Write-AMRLog ('Independent Installed visual surface could not initialize; original card panel fallback remains active: ' + $_.Exception.Message) WARNING Software
 }
 
 # Software App Management Console: matching the primary-navigation hover glow/scale.
@@ -7545,6 +7825,385 @@ $script:SmartSearchBox = $null
 $script:SmartSearchRouting = $false
 $script:SmartCategoryRouting = $false
 $script:SmartCategoryFilter = $null
+$script:AMRFilesPopup = $null
+
+function Open-AMRProgramFilesFolder {
+    try {
+        $rootPath = [string]$script:AppRoot
+        if ([string]::IsNullOrWhiteSpace($rootPath)) { $rootPath = Join-Path $env:ProgramData 'AMR-Utility' }
+        if (-not (Test-Path -LiteralPath $rootPath -PathType Container)) {
+            New-Item -ItemType Directory -Path $rootPath -Force -ErrorAction Stop | Out-Null
+        }
+
+        if ($script:AMRFilesPopup -and $script:AMRFilesPopup.IsVisible) {
+            $script:AMRFilesPopup.Activate()
+            return
+        }
+
+        $win = New-Object System.Windows.Window
+        $win.Title = 'AMR | PROGRAM FILES'
+        $win.Width = 860
+        $win.Height = 560
+        $win.MinWidth = 650
+        $win.MinHeight = 420
+        $win.MaxWidth = 1180
+        $win.MaxHeight = 820
+        # AMR transparent popup frame. Keep it owned by the main window and
+        # modal so it behaves as an in-app dialog rather than a separate app.
+        $win.WindowStyle = [System.Windows.WindowStyle]::None
+        $win.ResizeMode = [System.Windows.ResizeMode]::CanResizeWithGrip
+        $win.AllowsTransparency = $true
+        $win.Background = [System.Windows.Media.Brushes]::Transparent
+        $win.WindowStartupLocation = [System.Windows.WindowStartupLocation]::CenterOwner
+        $win.ShowInTaskbar = $false
+        if ($script:Window) {
+            $win.Owner = $script:Window
+            $win.Width = [Math]::Max(650, [Math]::Min(1000, $script:Window.ActualWidth * 0.82))
+            $win.Height = [Math]::Max(420, [Math]::Min(700, $script:Window.ActualHeight * 0.84))
+        }
+
+        $root = New-Object System.Windows.Controls.Border
+        $root.CornerRadius = New-Object System.Windows.CornerRadius(13)
+        $root.BorderThickness = New-Object System.Windows.Thickness(1)
+        $root.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#55738FAE')
+        $root.Background = [System.Windows.Markup.XamlReader]::Parse(@'
+<LinearGradientBrush xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" StartPoint="0,0" EndPoint="1,1">
+  <GradientStop Color="#F51A2A3D" Offset="0"/>
+  <GradientStop Color="#F20D1826" Offset="0.52"/>
+  <GradientStop Color="#F51D344A" Offset="1"/>
+</LinearGradientBrush>
+'@)
+        $root.Padding = New-Object System.Windows.Thickness(1)
+        $root.Effect = New-Object System.Windows.Media.Effects.DropShadowEffect -Property @{ BlurRadius=24; ShadowDepth=5; Opacity=0.48; Color=[System.Windows.Media.Colors]::Black }
+
+        $layout = New-Object System.Windows.Controls.Grid
+        $layout.RowDefinitions.Add((New-Object System.Windows.Controls.RowDefinition -Property @{ Height='Auto' }))
+        $layout.RowDefinitions.Add((New-Object System.Windows.Controls.RowDefinition -Property @{ Height='Auto' }))
+        $layout.RowDefinitions.Add((New-Object System.Windows.Controls.RowDefinition -Property @{ Height='*' }))
+        $layout.RowDefinitions.Add((New-Object System.Windows.Controls.RowDefinition -Property @{ Height='Auto' }))
+
+        # Translucent glass-like custom title strip matching AMR's dark blue surfaces.
+        $header = New-Object System.Windows.Controls.Grid
+        $header.Height = 48
+        $header.Background = [System.Windows.Markup.XamlReader]::Parse(@'
+<LinearGradientBrush xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" StartPoint="0,0" EndPoint="0,1">
+  <GradientStop Color="#E62B4965" Offset="0"/>
+  <GradientStop Color="#B51B3046" Offset="1"/>
+</LinearGradientBrush>
+'@)
+        $header.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition -Property @{ Width='*' }))
+        $header.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition -Property @{ Width='Auto' }))
+        $caption = New-Object System.Windows.Controls.StackPanel
+        $caption.Orientation = 'Horizontal'
+        $caption.VerticalAlignment = 'Center'
+        $caption.Margin = New-Object System.Windows.Thickness(17,0,0,0)
+        $captionText = New-Object System.Windows.Controls.TextBlock
+        $captionText.Text = 'AMR  /  PROGRAM FILES'
+        $captionText.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#EAF3FF')
+        $captionText.FontSize = 13
+        $captionText.FontWeight = 'SemiBold'
+        [void]$caption.Children.Add($captionText)
+        [void]$header.Children.Add($caption)
+        $close = New-Object System.Windows.Controls.Button
+        $close.Content = '✕'
+        $close.Width = 44
+        $close.Height = 38
+        $close.Margin = New-Object System.Windows.Thickness(0,5,6,5)
+        $close.Foreground = [System.Windows.Media.Brushes]::White
+        $close.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#663B526B')
+        $close.BorderThickness = New-Object System.Windows.Thickness(1)
+        $close.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#557FA2C2')
+        $close.FontSize = 15
+        $close.Cursor = [System.Windows.Input.Cursors]::Hand
+        [System.Windows.Controls.Grid]::SetColumn($close,1)
+        [void]$header.Children.Add($close)
+        $close.Add_Click({ $win.Close() })
+        $header.Add_MouseLeftButtonDown({ if ($_.ButtonState -eq [System.Windows.Input.MouseButtonState]::Pressed) { $win.DragMove() } })
+
+        $toolbar = New-Object System.Windows.Controls.Grid
+        $toolbar.Margin = New-Object System.Windows.Thickness(14,12,14,9)
+        $toolbar.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition -Property @{ Width='Auto' }))
+        $toolbar.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition -Property @{ Width='Auto' }))
+        $toolbar.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition -Property @{ Width='*' }))
+        $toolbar.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition -Property @{ Width='Auto' }))
+        $up = New-Object System.Windows.Controls.Button
+        $up.Content = '↑  Up'
+        $up.Padding = New-Object System.Windows.Thickness(12,6,12,6)
+        $up.Margin = New-Object System.Windows.Thickness(0,0,7,0)
+        $up.Foreground = [System.Windows.Media.Brushes]::White
+        $up.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#294866')
+        $up.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#557DA4')
+        [void]$toolbar.Children.Add($up)
+        $refresh = New-Object System.Windows.Controls.Button
+        $refresh.Content = '↻  Refresh'
+        $refresh.Padding = New-Object System.Windows.Thickness(12,6,12,6)
+        $refresh.Margin = New-Object System.Windows.Thickness(0,0,10,0)
+        $refresh.Foreground = [System.Windows.Media.Brushes]::White
+        $refresh.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#26394D')
+        $refresh.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#526B84')
+        [System.Windows.Controls.Grid]::SetColumn($refresh,1)
+        [void]$toolbar.Children.Add($refresh)
+        $pathBox = New-Object System.Windows.Controls.TextBox
+        $pathBox.IsReadOnly = $true
+        $pathBox.VerticalContentAlignment = 'Center'
+        $pathBox.Padding = New-Object System.Windows.Thickness(9,5,9,5)
+        $pathBox.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#C9D9EA')
+        $pathBox.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#66111D2B')
+        $pathBox.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#3C5872')
+        [System.Windows.Controls.Grid]::SetColumn($pathBox,2)
+        [void]$toolbar.Children.Add($pathBox)
+        $openRoot = New-Object System.Windows.Controls.Button
+        $openRoot.Content = '⌂'
+        $openRoot.ToolTip = 'Return to AMR program root'
+        $openRoot.Width = 38
+        $openRoot.Margin = New-Object System.Windows.Thickness(8,0,0,0)
+        $openRoot.Foreground = [System.Windows.Media.Brushes]::White
+        $openRoot.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#26394D')
+        $openRoot.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#526B84')
+        [System.Windows.Controls.Grid]::SetColumn($openRoot,3)
+        [void]$toolbar.Children.Add($openRoot)
+
+        $list = New-Object System.Windows.Controls.ListView
+        $list.Margin = New-Object System.Windows.Thickness(14,0,14,10)
+        $list.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#D8111D2B')
+        $list.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#E5EDF7')
+        $list.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#405A73')
+        $list.BorderThickness = New-Object System.Windows.Thickness(1)
+        $list.SelectionMode = 'Single'
+        $list.SetValue([System.Windows.Controls.ScrollViewer]::VerticalScrollBarVisibilityProperty,[System.Windows.Controls.ScrollBarVisibility]::Auto)
+        $view = New-Object System.Windows.Controls.GridView
+        foreach ($col in @(
+            @{Name='Name'; Width=390; Display='Name'},
+            @{Name='Type'; Width=110; Display='Type'},
+            @{Name='Size'; Width=100; Display='Size'},
+            @{Name='Modified'; Width=145; Display='Modified'}
+        )) {
+            $gc = New-Object System.Windows.Controls.GridViewColumn
+            $gc.Header = $col.Name
+            $gc.Width = $col.Width
+            $gc.DisplayMemberBinding = New-Object System.Windows.Data.Binding($col.Display)
+            [void]$view.Columns.Add($gc)
+        }
+        $list.View = $view
+        $list.BorderThickness = New-Object System.Windows.Thickness(1)
+        $list.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#99111D2B')
+        $root.Resources = [System.Windows.Markup.XamlReader]::Parse(@'
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <Style TargetType="{x:Type GridViewColumnHeader}">
+    <Setter Property="Foreground" Value="#DCEBFA"/>
+    <Setter Property="Background" Value="#D9233B52"/>
+    <Setter Property="BorderBrush" Value="#664F7899"/>
+    <Setter Property="BorderThickness" Value="0,0,0,1"/>
+    <Setter Property="Padding" Value="12,9"/>
+    <Setter Property="FontWeight" Value="SemiBold"/>
+    <Setter Property="HorizontalContentAlignment" Value="Left"/>
+    <Setter Property="Template">
+      <Setter.Value>
+        <ControlTemplate TargetType="{x:Type GridViewColumnHeader}">
+          <Border x:Name="HeaderSurface" Background="{TemplateBinding Background}"
+                  BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}"
+                  Padding="{TemplateBinding Padding}">
+            <ContentPresenter VerticalAlignment="Center" HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"/>
+          </Border>
+          <ControlTemplate.Triggers>
+            <Trigger Property="IsMouseOver" Value="True">
+              <Setter TargetName="HeaderSurface" Property="Background" Value="#F02D4B67"/>
+            </Trigger>
+            <Trigger Property="IsPressed" Value="True">
+              <Setter TargetName="HeaderSurface" Property="Background" Value="#F038BDF8"/>
+            </Trigger>
+          </ControlTemplate.Triggers>
+        </ControlTemplate>
+      </Setter.Value>
+    </Setter>
+  </Style>
+  <Style TargetType="{x:Type ListViewItem}">
+    <Setter Property="Foreground" Value="#DCE8F5"/>
+    <Setter Property="Background" Value="#00111D2B"/>
+    <Setter Property="BorderBrush" Value="#223D5872"/>
+    <Setter Property="BorderThickness" Value="0,0,0,1"/>
+    <Setter Property="Padding" Value="8,7"/>
+    <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+    <Setter Property="Template">
+      <Setter.Value>
+        <ControlTemplate TargetType="{x:Type ListViewItem}">
+          <Border x:Name="RowSurface" Background="{TemplateBinding Background}"
+                  BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}"
+                  CornerRadius="4" Padding="{TemplateBinding Padding}">
+            <GridViewRowPresenter Content="{TemplateBinding Content}"
+                                  Columns="{Binding RelativeSource={RelativeSource AncestorType={x:Type ListView}}, Path=View.Columns}"/>
+          </Border>
+          <ControlTemplate.Triggers>
+            <Trigger Property="IsMouseOver" Value="True">
+              <Setter TargetName="RowSurface" Property="Background" Value="#5538BDF8"/>
+              <Setter TargetName="RowSurface" Property="BorderBrush" Value="#6655C8F5"/>
+            </Trigger>
+            <Trigger Property="IsSelected" Value="True">
+              <Setter TargetName="RowSurface" Property="Background" Value="#774078A5"/>
+              <Setter TargetName="RowSurface" Property="BorderBrush" Value="#AA38BDF8"/>
+            </Trigger>
+            <Trigger Property="IsEnabled" Value="False">
+              <Setter Property="Opacity" Value="0.45"/>
+            </Trigger>
+          </ControlTemplate.Triggers>
+        </ControlTemplate>
+      </Setter.Value>
+    </Setter>
+  </Style>
+  <Style TargetType="{x:Type Button}">
+    <Setter Property="Foreground" Value="#F1F7FF"/>
+    <Setter Property="FontWeight" Value="SemiBold"/>
+    <Setter Property="Cursor" Value="Hand"/>
+    <Setter Property="BorderThickness" Value="1"/>
+    <Setter Property="Padding" Value="12,6"/>
+    <Setter Property="RenderTransformOrigin" Value="0.5,0.5"/>
+    <Setter Property="Template">
+      <Setter.Value>
+        <ControlTemplate TargetType="{x:Type Button}">
+          <Border x:Name="ButtonSurface" Background="{TemplateBinding Background}"
+                  BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}"
+                  CornerRadius="8" Padding="{TemplateBinding Padding}">
+            <Border.RenderTransform>
+              <ScaleTransform x:Name="ButtonScale" ScaleX="1" ScaleY="1"/>
+            </Border.RenderTransform>
+            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+          </Border>
+          <ControlTemplate.Triggers>
+            <Trigger Property="IsMouseOver" Value="True">
+              <Setter TargetName="ButtonSurface" Property="Opacity" Value="1"/>
+              <Setter TargetName="ButtonSurface" Property="BorderBrush" Value="#CC38BDF8"/>
+              <Trigger.EnterActions>
+                <BeginStoryboard>
+                  <Storyboard>
+                    <DoubleAnimation Storyboard.TargetName="ButtonScale" Storyboard.TargetProperty="ScaleX" To="1.045" Duration="0:0:0.13"/>
+                    <DoubleAnimation Storyboard.TargetName="ButtonScale" Storyboard.TargetProperty="ScaleY" To="1.045" Duration="0:0:0.13"/>
+                  </Storyboard>
+                </BeginStoryboard>
+              </Trigger.EnterActions>
+              <Trigger.ExitActions>
+                <BeginStoryboard>
+                  <Storyboard>
+                    <DoubleAnimation Storyboard.TargetName="ButtonScale" Storyboard.TargetProperty="ScaleX" To="1" Duration="0:0:0.15"/>
+                    <DoubleAnimation Storyboard.TargetName="ButtonScale" Storyboard.TargetProperty="ScaleY" To="1" Duration="0:0:0.15"/>
+                  </Storyboard>
+                </BeginStoryboard>
+              </Trigger.ExitActions>
+            </Trigger>
+            <Trigger Property="IsPressed" Value="True">
+              <Setter TargetName="ButtonSurface" Property="Opacity" Value="0.82"/>
+            </Trigger>
+            <Trigger Property="IsEnabled" Value="False">
+              <Setter TargetName="ButtonSurface" Property="Opacity" Value="0.4"/>
+            </Trigger>
+          </ControlTemplate.Triggers>
+        </ControlTemplate>
+      </Setter.Value>
+    </Setter>
+  </Style>
+</ResourceDictionary>
+'@)
+
+        $footer = New-Object System.Windows.Controls.DockPanel
+        $footer.Margin = New-Object System.Windows.Thickness(16,0,16,12)
+        $footer.LastChildFill = $true
+        $countText = New-Object System.Windows.Controls.TextBlock
+        $countText.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#91A9C2')
+        $countText.VerticalAlignment = 'Center'
+        [void]$footer.Children.Add($countText)
+        $hint = New-Object System.Windows.Controls.TextBlock
+        $hint.Text = 'Double-click a folder to browse • Double-click a file to open'
+        $hint.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#7891AA')
+        $hint.FontSize = 10
+        $hint.HorizontalAlignment = 'Right'
+        $hint.VerticalAlignment = 'Center'
+        [System.Windows.Controls.DockPanel]::SetDock($hint, [System.Windows.Controls.Dock]::Right)
+        [void]$footer.Children.Add($hint)
+
+        [System.Windows.Controls.Grid]::SetRow($header,0)
+        [System.Windows.Controls.Grid]::SetRow($toolbar,1)
+        [System.Windows.Controls.Grid]::SetRow($list,2)
+        [System.Windows.Controls.Grid]::SetRow($footer,3)
+        [void]$layout.Children.Add($header)
+        [void]$layout.Children.Add($toolbar)
+        [void]$layout.Children.Add($list)
+        [void]$layout.Children.Add($footer)
+        $root.Child = $layout
+        $win.Content = $root
+        $root.Opacity = 0
+        $root.RenderTransformOrigin = [System.Windows.Point]::new(0.5,0.5)
+        $popupScale = New-Object System.Windows.Media.ScaleTransform(0.975,0.975)
+        $root.RenderTransform = $popupScale
+        $win.Add_ContentRendered({
+            $fadeIn = [System.Windows.Media.Animation.DoubleAnimation]::new(0.0,1.0,[System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(190)))
+            $scaleIn = [System.Windows.Media.Animation.DoubleAnimation]::new(0.975,1.0,[System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(210)))
+            $fadeIn.FillBehavior = [System.Windows.Media.Animation.FillBehavior]::HoldEnd
+            $scaleIn.FillBehavior = [System.Windows.Media.Animation.FillBehavior]::HoldEnd
+            $root.BeginAnimation([System.Windows.UIElement]::OpacityProperty,$fadeIn)
+            $popupScale.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleXProperty,$scaleIn)
+            $popupScale.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleYProperty,$scaleIn)
+        }.GetNewClosure())
+
+        $state = @{ Current=$rootPath; Root=$rootPath }
+        $loadFolder = {
+            param([string]$folder)
+            try {
+                $resolved = [System.IO.Path]::GetFullPath($folder)
+                if (-not (Test-Path -LiteralPath $resolved -PathType Container)) { return }
+                $state.Current = $resolved
+                $pathBox.Text = $resolved
+                $list.Items.Clear()
+                $entries = @(Get-ChildItem -LiteralPath $resolved -Force -ErrorAction Stop | Sort-Object @{Expression={ if ($_.PSIsContainer) { 0 } else { 1 } }}, Name)
+                foreach ($entry in $entries) {
+                    $type = if ($entry.PSIsContainer) { 'Folder' } else { [System.IO.Path]::GetExtension($entry.Name).TrimStart('.').ToUpperInvariant() }
+                    if ([string]::IsNullOrWhiteSpace($type)) { $type = 'File' }
+                    $size = if ($entry.PSIsContainer) { '—' } else { '{0:N1} KB' -f ($entry.Length / 1KB) }
+                    [void]$list.Items.Add([pscustomobject]@{
+                        Name = $(if ($entry.PSIsContainer) { '▰  ' + $entry.Name } else { '▤  ' + $entry.Name })
+                        Type = $type
+                        Size = $size
+                        Modified = $entry.LastWriteTime.ToString('yyyy-MM-dd HH:mm')
+                        FullName = $entry.FullName
+                        IsDirectory = [bool]$entry.PSIsContainer
+                    })
+                }
+                $countText.Text = ('{0} items' -f $entries.Count)
+                $up.IsEnabled = ($resolved.TrimEnd('\') -ine $state.Root.TrimEnd('\'))
+            } catch {
+                $countText.Text = 'Unable to read this folder'
+                try { Write-AMRLog ('AMR file browser read error: ' + $_.Exception.Message) WARNING System } catch {}
+            }
+        }
+        $up.Add_Click({
+            try {
+                if ($state.Current.TrimEnd('\') -ine $state.Root.TrimEnd('\')) {
+                    $parent = [System.IO.Directory]::GetParent($state.Current)
+                    if ($parent) { & $loadFolder $parent.FullName }
+                }
+            } catch {}
+        })
+        $refresh.Add_Click({ & $loadFolder $state.Current })
+        $openRoot.Add_Click({ & $loadFolder $state.Root })
+        $list.Add_MouseDoubleClick({
+            $selected = $list.SelectedItem
+            if (-not $selected) { return }
+            try {
+                if ($selected.IsDirectory) { & $loadFolder $selected.FullName }
+                else { Start-Process -FilePath $selected.FullName -ErrorAction Stop }
+            } catch {
+                try { Write-AMRLog ('AMR file browser open error: ' + $_.Exception.Message) WARNING System } catch {}
+            }
+        })
+        $win.Add_Closed({ $script:AMRFilesPopup = $null })
+        $script:AMRFilesPopup = $win
+        & $loadFolder $rootPath
+        [void]$win.ShowDialog()
+    } catch {
+        try { Write-AMRLog ('Could not open AMR program files popup: ' + $_.Exception.Message) ERROR System } catch {}
+        try { Show-AMRMessage ('Could not open the AMR program files window: ' + $_.Exception.Message) 'AMR Program Files' OK Error | Out-Null } catch {}
+    }
+}
+
 function Get-AMRSmartSearchTarget {
     $main = C 'MainNavigationTabs'
     if (-not $main -or -not $main.SelectedItem) { return $null }
@@ -7781,6 +8440,12 @@ try {
                 $searchText = [string]$script:SmartSearchBox.Text
                 if ($activePage -eq 'About' -and $searchText.Trim() -match '^(?i:TELE)$') {
                     Invoke-AMRHiddenTelegramExperience
+                    return
+                }
+                # About shortcut: FIL / FILE / FILES opens the AMR-managed
+                # program files browser (Downloads, Drivers, Icons, Logs, Backups, etc.).
+                if ($activePage -eq 'About' -and $searchText.Trim() -match '^(?i:fil(?:e?s)?)$') {
+                    Open-AMRProgramFilesFolder
                     return
                 }
                 $targetName = Get-AMRSmartSearchTarget
@@ -19268,6 +19933,43 @@ function Find-AMRVisualChildByType {
 # Re-apply icon state to realized cards. The catalog uses PSCustomObject models,
 # which do not raise PropertyChanged when Icon is assigned by the background worker.
 # WPF can therefore recycle a card while retaining a stale/empty visual state.
+function Write-AMRSoftwareVirtualizationRuntimeAudit {
+    param([System.Windows.Controls.ItemsControl]$Grid)
+    if (-not $script:SoftwareVirtualPanelReady -or $null -eq $Grid) { return }
+    try {
+        $panel = Find-AMRVisualChildByType -Parent $Grid -ChildType ([AMR.SoftwareVirtualizingUniformGridPanel])
+        if ($null -eq $panel) {
+            Write-AMRLog ('VIRTUALIZATION_RUNTIME surface=' + [string]$Grid.Uid + ' panel=not-found') WARNING Software
+            return
+        }
+        $scrollHost = $script:Window.FindName('SoftwareScrollViewer')
+        $hostConnected = ($null -ne $scrollHost -and [bool]$panel.ScrollHostConnected)
+        Write-AMRLog (
+            'VIRTUALIZATION_RUNTIME surface={0} realized={1} total={2} first={3} last={4} scrollHostConnected={5} viewportHeight={6:N0} extentHeight={7:N0} columns=4 recyclingGenerator={8} mode=viewport-physical' -f
+            [string]$Grid.Uid,[int]$panel.RealizedItemCount,[int]$panel.TotalItemCount,
+            [int]$panel.FirstRealizedIndex,[int]$panel.LastRealizedIndex,[bool]$hostConnected,
+            [double]$panel.LogicalViewportHeight,[double]$panel.LogicalExtentHeight,[bool]$panel.RecyclingGeneratorAvailable
+        ) INFO Software
+    } catch {
+        Write-AMRLog ('VIRTUALIZATION_RUNTIME audit failed: ' + $_.Exception.Message) WARNING Software
+    }
+}
+
+$script:SoftwareVirtualizationAuditHandler = {
+    param($sender,$eventArgs)
+    try {
+        $auditGrid = $sender
+        $auditAction = {
+            Write-AMRSoftwareVirtualizationRuntimeAudit -Grid $auditGrid
+        }.GetNewClosure()
+        $null = $auditGrid.Dispatcher.BeginInvoke([Action]$auditAction, [System.Windows.Threading.DispatcherPriority]::ContextIdle)
+    } catch {}
+}
+if ($script:SoftwareVirtualPanelReady) {
+    try { $script:SoftwareCatalogGrid.Add_Loaded($script:SoftwareVirtualizationAuditHandler) } catch {}
+    try { $script:InstalledSoftwareGrid.Add_Loaded($script:SoftwareVirtualizationAuditHandler) } catch {}
+}
+
 function Find-AMRNamedVisualChild {
     param([System.Windows.DependencyObject]$Parent,[string]$Name)
     if ($null -eq $Parent) { return $null }
