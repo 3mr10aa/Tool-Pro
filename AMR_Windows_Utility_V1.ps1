@@ -2654,6 +2654,10 @@ $RawApps = @(
 $script:IconArchiveUrl = 'https://raw.githubusercontent.com/3mr10aa/Tool-Pro/main/Icons.zip'
 # Keep the source ZIP and extracted images together in ProgramData\AMR-Utility\Icons.
 $script:IconMinFileCount = 100
+# Supported raster containers. WPF/WIC decodes formats for which a Windows Imaging
+# Component codec is installed; optional formats (WEBP/HEIF/AVIF/JPEG2000, etc.)
+# are accepted by the cache and decoded when their codec is available.
+$script:AMRIconImageExtensions = @('.png','.jpg','.jpeg','.jpe','.jfif','.bmp','.dib','.gif','.tif','.tiff','.ico','.webp','.wdp','.jxr','.hdp','.heic','.heif','.avif','.jp2','.j2k','.dds','.tga','.pcx','.ppm','.pgm','.pbm')
 $script:IconDownloadTimeoutSec = 45 # retained for worker compatibility; individual requests now use explicit bounded timeouts
 
 function Test-AMRIconCacheUsable {
@@ -2661,7 +2665,7 @@ function Test-AMRIconCacheUsable {
     try {
         if (-not (Test-Path -LiteralPath $script:IconDir -PathType Container)) { return $false }
         $count = @(Get-ChildItem -LiteralPath $script:IconDir -File -ErrorAction SilentlyContinue |
-            Where-Object { $_.Extension -match '^\.(png|jpe?g)$' -and $_.Length -gt 128 }).Count
+            Where-Object { ($script:AMRIconImageExtensions -contains $_.Extension.ToLowerInvariant()) -and $_.Length -gt 32 }).Count
         return ($count -ge $Minimum)
     } catch { return $false }
 }
@@ -2683,18 +2687,20 @@ function Get-AMRIconImageSource {
 
     try {
         $fullPath = [System.IO.Path]::GetFullPath($Path)
-        $bitmap = New-Object System.Windows.Media.Imaging.BitmapImage
-        $bitmap.BeginInit()
-        $bitmap.CacheOption = [System.Windows.Media.Imaging.BitmapCacheOption]::OnLoad
-        $bitmap.CreateOptions = [System.Windows.Media.Imaging.BitmapCreateOptions]::IgnoreImageCache
-        $bitmap.UriSource = New-Object System.Uri($fullPath, [System.UriKind]::Absolute)
-        $bitmap.EndInit()
-
-        if ($bitmap.CanFreeze) {
-            $bitmap.Freeze()
-        }
-
-        return $bitmap
+        # WIC selects a decoder from the file signature/content, not only its suffix.
+        # Optional formats work when the corresponding Windows WIC codec is installed.
+        $fileStream = [System.IO.File]::Open($fullPath,[System.IO.FileMode]::Open,[System.IO.FileAccess]::Read,[System.IO.FileShare]::ReadWrite)
+        try {
+            $decoder = [System.Windows.Media.Imaging.BitmapDecoder]::Create(
+                $fileStream,
+                [System.Windows.Media.Imaging.BitmapCreateOptions]::IgnoreImageCache,
+                [System.Windows.Media.Imaging.BitmapCacheOption]::OnLoad
+            )
+            if ($null -eq $decoder -or $decoder.Frames.Count -lt 1) { return $null }
+            $bitmap = $decoder.Frames[0]
+            if ($bitmap.CanFreeze) { $bitmap.Freeze() }
+            return $bitmap
+        } finally { $fileStream.Dispose() }
     }
     catch {
         Write-AMRLog "Could not load app icon '$Path': $($_.Exception.Message)" WARNING Software
@@ -2718,7 +2724,7 @@ $RawApps | ForEach-Object {
             $localIconIds += @($_.IconAliases | ForEach-Object { [string]$_ })
         }
         foreach ($localIconId in $localIconIds) {
-            foreach ($localIconExtension in @('.png','.jpg','.jpeg')) {
+            foreach ($localIconExtension in $script:AMRIconImageExtensions) {
                 $localIconPath = Join-Path $script:IconDir ($localIconId + $localIconExtension)
                 if (Test-Path -LiteralPath $localIconPath -PathType Leaf) {
                     $iconSource = Get-AMRIconImageSource -Path $localIconPath
@@ -28140,7 +28146,7 @@ function Get-AMRStartupIconSource {
             if($v){$safe=($v -replace '[\\/:*?"<>|]','_').Trim();if($safe){$candidateIds.Add($safe)}}
         }
         foreach($id in @($candidateIds | Select-Object -Unique)){
-            foreach($ext in @('.png','.jpg','.jpeg','.ico')){
+            foreach($ext in $script:AMRIconImageExtensions){
                 $iconPath=Join-Path $script:IconDir ($id+$ext)
                 if(Test-Path -LiteralPath $iconPath -PathType Leaf){
                     $source=Get-AMRIconImageSource -Path $iconPath
@@ -29170,7 +29176,7 @@ function Get-AMRCatalogIconFromDisk {
         $ids += @($RawApp.IconAliases | ForEach-Object { [string]$_ })
     }
     foreach ($id in $ids) {
-        foreach ($ext in @('.png','.jpg','.jpeg')) {
+        foreach ($ext in $script:AMRIconImageExtensions) {
             $path = Join-Path $script:IconDir ($id + $ext)
             if (Test-Path -LiteralPath $path -PathType Leaf) {
                 $source = Get-AMRIconImageSource -Path $path
@@ -29224,6 +29230,12 @@ function Start-AMRBackgroundIconRefresh {
             # Keep background icon work below the UI thread's scheduling priority.
             try { [System.Threading.Thread]::CurrentThread.Priority = [System.Threading.ThreadPriority]::BelowNormal } catch {}
 
+            # Keep this list synchronized with $script:AMRIconImageExtensions.
+            # WIC codecs are discovered at runtime by BitmapDecoder; formats requiring
+            # optional Windows codecs are skipped gracefully when no decoder is installed.
+            $supportedImageExtensions = @('.png','.jpg','.jpeg','.jpe','.jfif','.bmp','.dib','.gif','.tif','.tiff','.ico','.webp','.wdp','.jxr','.hdp','.heic','.heif','.avif','.jp2','.j2k','.dds','.tga','.pcx','.ppm','.pgm','.pbm')
+            $supportedImagePattern = '(?i)\.(png|jpe?g|jpe|jfif|bmp|dib|gif|tif|tiff|ico|webp|wdp|jxr|hdp|heic|heif|avif|jp2|j2k|dds|tga|pcx|ppm|pgm|pbm)$'
+
             function Test-AMRIconCacheUsable {
                 param([string]$IconDir,[int]$Minimum)
                 try {
@@ -29235,7 +29247,7 @@ function Start-AMRBackgroundIconRefresh {
                         [string]$identity.branch -ne 'main' -or
                         [string]$identity.file -ne 'Icons.zip') { return $false }
                     $count = @(Get-ChildItem -LiteralPath $IconDir -File -ErrorAction SilentlyContinue |
-                        Where-Object { $_.Extension -match '^\.(png|jpe?g)$' -and $_.Length -gt 128 }).Count
+                        Where-Object { ($supportedImageExtensions -contains $_.Extension.ToLowerInvariant()) -and $_.Length -gt 32 }).Count
                     return ($count -ge $Minimum)
                 } catch { return $false }
             }
@@ -29246,13 +29258,20 @@ function Start-AMRBackgroundIconRefresh {
                 param([int]$Index,[string]$Path,[object]$ReadyIconQueue)
                 if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $false }
                 try {
-                    $bitmap = New-Object System.Windows.Media.Imaging.BitmapImage
-                    $bitmap.BeginInit()
-                    $bitmap.CacheOption = [System.Windows.Media.Imaging.BitmapCacheOption]::OnLoad
-                    $bitmap.CreateOptions = [System.Windows.Media.Imaging.BitmapCreateOptions]::IgnoreImageCache
-                    $bitmap.UriSource = New-Object System.Uri([System.IO.Path]::GetFullPath($Path),[System.UriKind]::Absolute)
-                    $bitmap.EndInit()
-                    if ($bitmap.CanFreeze) { $bitmap.Freeze() }
+                    # Decode by content through WIC, not by filename extension. This
+                    # allows WEBP/HEIF/AVIF and future raster formats when a WIC codec
+                    # is installed on the host. OnLoad detaches the frame from the stream.
+                    $fileStream = [System.IO.File]::Open($Path,[System.IO.FileMode]::Open,[System.IO.FileAccess]::Read,[System.IO.FileShare]::ReadWrite)
+                    try {
+                        $decoder = [System.Windows.Media.Imaging.BitmapDecoder]::Create(
+                            $fileStream,
+                            [System.Windows.Media.Imaging.BitmapCreateOptions]::IgnoreImageCache,
+                            [System.Windows.Media.Imaging.BitmapCacheOption]::OnLoad
+                        )
+                        if ($null -eq $decoder -or $decoder.Frames.Count -lt 1) { return $false }
+                        $bitmap = $decoder.Frames[0]
+                        if ($bitmap.CanFreeze) { $bitmap.Freeze() }
+                    } finally { $fileStream.Dispose() }
                     # Do not throttle archive extraction/image preparation on UI delivery speed.
                     # The DispatcherTimer drains this queue independently in small UI-safe batches.
                     $ReadyIconQueue.Enqueue([pscustomobject]@{ Index=$Index; Source=$bitmap })
@@ -29266,7 +29285,7 @@ function Start-AMRBackgroundIconRefresh {
                 foreach ($request in $CatalogIconRequests) {
                     $found = $false
                     foreach ($candidateId in @($request.Ids)) {
-                        foreach ($extension in @('.png','.jpg','.jpeg')) {
+                        foreach ($extension in $supportedImageExtensions) {
                             $imagePath = Join-Path $IconDir ([string]$candidateId + $extension)
                             if (Publish-AMRIconFile -Index ([int]$request.Index) -Path $imagePath -ReadyIconQueue $ReadyIconQueue) {
                                 $prepared++; $found = $true; break
@@ -29302,12 +29321,13 @@ function Start-AMRBackgroundIconRefresh {
                         try { $oldMeta = Get-Content -LiteralPath $metaFile -Raw | ConvertFrom-Json } catch {}
                     }
                     $cacheBelongsToTarget = $oldMeta -and
+                        [int]$oldMeta.schemaVersion -ge 2 -and
                         [string]$oldMeta.repository -eq '3mr10aa/Tool-Pro' -and
                         [string]$oldMeta.branch -eq 'main' -and
                         [string]$oldMeta.file -eq 'Icons.zip'
                     if (-not $cacheBelongsToTarget) {
                         Get-ChildItem -LiteralPath $IconDir -File -ErrorAction SilentlyContinue |
-                            Where-Object { $_.Extension -match '(?i)^\.(png|jpe?g)$' -or $_.Name -match '(?i)^icons\.zip(\.previous)?$' -or $_.Name -eq 'icons.cache.json' } |
+                            Where-Object { $supportedImageExtensions -contains $_.Extension.ToLowerInvariant() -or $_.Name -match '(?i)^icons\.zip(\.previous)?$' -or $_.Name -eq 'icons.cache.json' } |
                             Remove-Item -Force -ErrorAction SilentlyContinue
                         $oldMeta = $null
                     }
@@ -29332,7 +29352,7 @@ function Start-AMRBackgroundIconRefresh {
                             if ($localLength -ge 262144 -and ($remoteSize -lt 0 -or $localLength -eq $remoteSize)) {
                                 Add-Type -AssemblyName System.IO.Compression -ErrorAction SilentlyContinue
                                 $testZip = [IO.Compression.ZipFile]::OpenRead($localArchive)
-                                $imageEntries = @($testZip.Entries | Where-Object { $_.FullName -match '(?i)\.(png|jpe?g)$' })
+                                $imageEntries = @($testZip.Entries | Where-Object { $_.FullName -match $supportedImagePattern })
                                 $testZip.Dispose()
                                 $localValid = ($imageEntries.Count -ge $MinFileCount)
                             }
@@ -29342,7 +29362,7 @@ function Start-AMRBackgroundIconRefresh {
                         $remoteSize -gt 0 -and [long]$oldMeta.size -eq $remoteSize
 
                     if ($sameVersion) {
-                        $cachedImages = @(Get-ChildItem -LiteralPath $IconDir -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -match '^\.(png|jpe?g)$' -and $_.Length -gt 128 }).Count
+                        $cachedImages = @(Get-ChildItem -LiteralPath $IconDir -File -ErrorAction SilentlyContinue | Where-Object { ($supportedImageExtensions -contains $_.Extension.ToLowerInvariant()) -and $_.Length -gt 32 }).Count
                         $expectedImages = 0
                         try { $expectedImages = [int]$oldMeta.imageCount } catch {}
                         if ($expectedImages -gt 0 -and $cachedImages -ge $expectedImages) {
@@ -29375,7 +29395,7 @@ function Start-AMRBackgroundIconRefresh {
                                     if ($got -lt 262144) { throw "Downloaded ZIP is too small ($got bytes)" }
                                     if ($remoteSize -gt 0 -and $got -ne $remoteSize) { throw "Downloaded size mismatch: expected $remoteSize, received $got" }
                                     $verify = [IO.Compression.ZipFile]::OpenRead($partArchive)
-                                    try { $validEntries = @($verify.Entries | Where-Object { $_.FullName -match '(?i)\.(png|jpe?g)$' }) } finally { $verify.Dispose() }
+                                    try { $validEntries = @($verify.Entries | Where-Object { $_.FullName -match $supportedImagePattern }) } finally { $verify.Dispose() }
                                     if ($validEntries.Count -lt $MinFileCount) { throw "ZIP contains only $($validEntries.Count) image files" }
                                     $downloaded = $true
                                 } catch {
@@ -29413,7 +29433,7 @@ function Start-AMRBackgroundIconRefresh {
                     # Keep icons.zip and metadata alongside the extracted image files.
                     $zip = [IO.Compression.ZipFile]::OpenRead($localArchive)
                     $entries = @($zip.Entries | Where-Object {
-                        $_.FullName -match '(?i)\.(png|jpe?g)$' -and
+                        $_.FullName -match $supportedImagePattern -and
                         $_.FullName -notmatch '(^/|^[a-zA-Z]:|(^|[\\/])\.\.([\\/]|$))'
                     })
                     $extracted = 0; $seen = @{}
@@ -29444,8 +29464,8 @@ function Start-AMRBackgroundIconRefresh {
                         }
                     } finally { $zip.Dispose() }
                     if ($extracted -lt $MinFileCount) { return "ExtractFailed:Only $extracted images extracted" }
-                    $finalCount = @(Get-ChildItem -LiteralPath $IconDir -File | Where-Object { $_.Extension -match '^\.(png|jpe?g)$' -and $_.Length -gt 128 }).Count
-                    $metaOut = [pscustomobject]@{ repository='3mr10aa/Tool-Pro'; branch='main'; file='Icons.zip'; source=$ArchiveUrl; size=[long](Get-Item -LiteralPath $localArchive).Length; sha=$remoteSha; imageCount=$finalCount; updatedUtc=[DateTime]::UtcNow.ToString('o') }
+                    $finalCount = @(Get-ChildItem -LiteralPath $IconDir -File | Where-Object { ($supportedImageExtensions -contains $_.Extension.ToLowerInvariant()) -and $_.Length -gt 32 }).Count
+                    $metaOut = [pscustomobject]@{ schemaVersion=2; repository='3mr10aa/Tool-Pro'; branch='main'; file='Icons.zip'; source=$ArchiveUrl; size=[long](Get-Item -LiteralPath $localArchive).Length; sha=$remoteSha; imageCount=$finalCount; updatedUtc=[DateTime]::UtcNow.ToString('o') }
                     $metaOut | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $metaFile -Encoding UTF8
                     return "ArchiveReady:DownloadedOrReused;Extracted=$extracted;CacheImages=$finalCount;Zip=$localArchive"
                 } catch {
