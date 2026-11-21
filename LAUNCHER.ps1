@@ -1,4 +1,4 @@
-﻿#requires -Version 5.1
+#requires -Version 5.1
 # AMR Tool-Pro | Premium animated bootstrap launcher | Parallel runtime + icon handoff
 # Windows PowerShell 5.1 | Public command: irm <raw-launcher-url> | iex
 
@@ -17,6 +17,8 @@ $currentStatePath = Join-Path $runtimeRoot 'current.json'
 $currentState = $null
 $stageRoot = $null
 $launchBootstrapPath = $null
+$appPidMarkerPath = Join-Path $env:TEMP ('AMR-ToolPro-AppPid-' + [guid]::NewGuid().ToString('N') + '.txt')
+$bootstrapProcess = $null
 $appProcess = $null
 $pendingVersionCommit = $false
 $pendingVersionId = $null
@@ -1359,7 +1361,16 @@ try {
     Write-AMRLaunchBootstrapLog ('Non-fatal icon cache handoff warning; app fallback remains enabled: ' + $_.Exception.Message)
 }
 try {
-    & $appPath
+    # Run the app in a fresh Windows PowerShell process using -File, matching the
+    # previously working direct-launch path. Do not invoke it with '&' inside this
+    # bootstrap: the app has its own STA/admin self-bootstrap and an 'exit' there
+    # would terminate this wrapper before the launcher can observe the app window.
+    $appPowerShell = Join-Path $PSHOME 'powershell.exe'
+    $quotedAppPath = '"' + $appPath.Replace('"','""') + '"'
+    $appArguments = '-NoLogo -NoProfile -ExecutionPolicy Bypass -STA -File ' + $quotedAppPath
+    $child = Start-Process -FilePath $appPowerShell -ArgumentList $appArguments -WorkingDirectory (Split-Path -Parent $appPath) -WindowStyle Hidden -PassThru -ErrorAction Stop
+    [System.IO.File]::WriteAllText(__APP_PID_FILE__,[string]$child.Id,(New-Object System.Text.UTF8Encoding($false)))
+    $child.WaitForExit()
 } finally {
     try { Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue } catch {}
 }
@@ -1367,6 +1378,7 @@ try {
     $launchBootstrap = $launchBootstrap.Replace('__ICON_SOURCE__', (ConvertTo-AMRPSSingleQuoted ([string]$iconsPath)))
     $launchBootstrap = $launchBootstrap.Replace('__APP_PATH__', (ConvertTo-AMRPSSingleQuoted $appPath))
     $launchBootstrap = $launchBootstrap.Replace('__LOG_PATH__', (ConvertTo-AMRPSSingleQuoted $logPath))
+    $launchBootstrap = $launchBootstrap.Replace('__APP_PID_FILE__', (ConvertTo-AMRPSSingleQuoted $appPidMarkerPath))
     $launchBootstrap = $launchBootstrap.Replace('__ICON_BLOB__', ([string]$remoteIconBlob).ToLowerInvariant())
     [System.IO.File]::WriteAllText($launchBootstrapPath,$launchBootstrap,(New-Object System.Text.UTF8Encoding($false)))
     $quotedBootstrap = '"' + $launchBootstrapPath.Replace('"','""') + '"'
@@ -1378,7 +1390,23 @@ try {
     # PowerShell process. Launch elevated here so the launcher tracks the real
     # application process instead of mistaking that intentional self-relaunch
     # for an application crash. Windows will show the standard UAC consent prompt.
-    $appProcess = Start-Process -FilePath $powershellExe -ArgumentList $arguments -WorkingDirectory $installRoot -WindowStyle Hidden -Verb RunAs -PassThru -ErrorAction Stop
+    $bootstrapProcess = Start-Process -FilePath $powershellExe -ArgumentList $arguments -WorkingDirectory $installRoot -WindowStyle Hidden -Verb RunAs -PassThru -ErrorAction Stop
+
+    # The elevated bootstrap writes the PID of the separate -STA -File app process
+    # only after the icon-cache handoff is complete. Track that real app process,
+    # not the short-lived wrapper process.
+    $pidDeadline = [DateTime]::UtcNow.AddSeconds(45)
+    while ([DateTime]::UtcNow -lt $pidDeadline -and -not (Test-Path -LiteralPath $appPidMarkerPath -PathType Leaf)) {
+        Pump-AMRLauncherUI
+        $bootstrapProcess.Refresh()
+        if ($bootstrapProcess.HasExited) { throw 'The elevated launch bootstrap exited before starting the AMR application.' }
+        Start-Sleep -Milliseconds 60
+    }
+    if (-not (Test-Path -LiteralPath $appPidMarkerPath -PathType Leaf)) { throw 'The elevated launch bootstrap did not report the AMR application process ID.' }
+    $appPidText = (Get-Content -LiteralPath $appPidMarkerPath -Raw -ErrorAction Stop).Trim()
+    $appPid = 0
+    if (-not [int]::TryParse($appPidText,[ref]$appPid) -or $appPid -le 0) { throw 'The elevated launch bootstrap reported an invalid application process ID.' }
+    $appProcess = Get-Process -Id $appPid -ErrorAction Stop
 
     # Detect the actual visible WPF window; do not fake a 100% download indicator.
     $appHandle = [IntPtr]::Zero
@@ -1515,6 +1543,7 @@ finally {
     if ($stageRoot -and (Test-Path -LiteralPath $stageRoot)) {
         Remove-Item -LiteralPath $stageRoot -Recurse -Force -ErrorAction SilentlyContinue
     }
+    if ($appPidMarkerPath -and (Test-Path -LiteralPath $appPidMarkerPath -PathType Leaf)) { Remove-Item -LiteralPath $appPidMarkerPath -Force -ErrorAction SilentlyContinue }
     if ($launchBootstrapPath -and -not $appProcess -and (Test-Path -LiteralPath $launchBootstrapPath -PathType Leaf)) {
         Remove-Item -LiteralPath $launchBootstrapPath -Force -ErrorAction SilentlyContinue
     }
