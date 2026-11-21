@@ -26,7 +26,7 @@ $pendingIconRelativePath = $null
 $logPath = Join-Path $env:TEMP 'AMR_ToolPro_Launcher.log'
 $telemetryRoot = Join-Path $env:LOCALAPPDATA 'AMR-ToolPro\Telemetry'
 $telemetryEndpointFileUrl = $repoRaw + '/telemetry-endpoint.txt'
-$launcherVersion = '2.5.1'
+$launcherVersion = '2.5.2'
 $script:LauncherForm = $null
 $script:ProgressTrack = $null
 $script:ProgressFill = $null
@@ -666,6 +666,7 @@ namespace AMR {
         [DllImport("user32.dll")] public static extern IntPtr SendMessage(IntPtr hwnd, int msg, int wParam, int lParam);
         [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hwnd, out RECT rect);
         [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hwnd, int command);
+        [DllImport("kernel32.dll")] public static extern IntPtr GetConsoleWindow();
         [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hwnd);
         [DllImport("user32.dll")] public static extern bool AllowSetForegroundWindow(int processId);
         [DllImport("user32.dll")] private static extern bool EnumWindows(EnumWindowsProc callback, IntPtr extraData);
@@ -850,11 +851,29 @@ namespace AMR {
 
     $form.Show()
     $form.Refresh()
+    # Hide the invoking console only under the real Windows ConsoleHost.
+    try {
+        if ($Host.Name -eq 'ConsoleHost') {
+            $consoleHandle = [AMR.ToolProLauncherNative]::GetConsoleWindow()
+            if ($consoleHandle -ne [IntPtr]::Zero) {
+                [void][AMR.ToolProLauncherNative]::ShowWindow($consoleHandle, 0)
+                Write-AMRLauncherLog 'Hidden the invoking PowerShell console behind the launcher.'
+            }
+        }
+    } catch { Write-AMRLauncherLog ('Could not hide the invoking console window: ' + $_.Exception.Message) }
+    # Smooth cubic ease-out entrance.
+    $fadeInStarted = [DateTime]::UtcNow
     $fadeInTimer = New-Object System.Windows.Forms.Timer
     $fadeInTimer.Interval = 15
     $fadeInTimer.Add_Tick({
-        if ($script:LauncherForm.Opacity -lt 0.97) { $script:LauncherForm.Opacity = [Math]::Min(1.0, $script:LauncherForm.Opacity + 0.12) }
-        else { $script:LauncherForm.Opacity = 1; $fadeInTimer.Stop(); $fadeInTimer.Dispose() }
+        $fadeT = [Math]::Min(1.0,([DateTime]::UtcNow - $fadeInStarted).TotalMilliseconds / 420.0)
+        $fadeEase = 1.0 - [Math]::Pow(1.0 - $fadeT,3.0)
+        $script:LauncherForm.Opacity = [Math]::Max(0.0,[Math]::Min(1.0,$fadeEase))
+        if ($fadeT -ge 1.0) {
+            $script:LauncherForm.Opacity = 1
+            $fadeInTimer.Stop()
+            $fadeInTimer.Dispose()
+        }
     }.GetNewClosure())
     $fadeInTimer.Start()
     Pump-AMRLauncherUI
@@ -1259,6 +1278,58 @@ namespace AMR {
     }
 
     $appPath = Join-Path $installRoot 'AMR_Windows_Utility_V1.ps1'
+    # Load branding from the verified application source on EVERY launch,
+    # including cache-hit launches where no runtime staging occurs.
+    try {
+        if (Test-Path -LiteralPath $appPath -PathType Leaf) {
+            $iconReader = New-Object System.IO.StreamReader($appPath,(New-Object System.Text.UTF8Encoding($false,$true)),$true)
+            try { $appTextForLauncherIcon = $iconReader.ReadToEnd() } finally { $iconReader.Dispose() }
+            $iconMatchForLauncher = [regex]::Match($appTextForLauncherIcon, '\$amrIconBytes\s*=\s*\[Convert\]::FromBase64String\(''([^'']+)''\)')
+            if ($iconMatchForLauncher.Success) {
+                $launcherIconBytes = [Convert]::FromBase64String($iconMatchForLauncher.Groups[1].Value)
+                if ($launcherIconBytes.Length -ge 22 -and $launcherIconBytes[0] -eq 0 -and $launcherIconBytes[1] -eq 0 -and $launcherIconBytes[2] -eq 1) {
+                    $launcherFrameCount = [BitConverter]::ToUInt16($launcherIconBytes,4)
+                    $launcherChosenFrame = $null
+                    for ($frameIndex = 0; $frameIndex -lt $launcherFrameCount; $frameIndex++) {
+                        $frameEntry = 6 + (16 * $frameIndex)
+                        if (($frameEntry + 16) -gt $launcherIconBytes.Length) { break }
+                        $frameW = [int]$launcherIconBytes[$frameEntry]; if ($frameW -eq 0) { $frameW = 256 }
+                        $frameH = [int]$launcherIconBytes[$frameEntry + 1]; if ($frameH -eq 0) { $frameH = 256 }
+                        $frameLength = [BitConverter]::ToUInt32($launcherIconBytes,$frameEntry + 8)
+                        $frameOffset = [BitConverter]::ToUInt32($launcherIconBytes,$frameEntry + 12)
+                        if ($frameW -ge 32 -and $frameH -ge 32 -and $frameLength -gt 0 -and ($frameOffset + $frameLength) -le $launcherIconBytes.Length) {
+                            if ($null -eq $launcherChosenFrame -or ($frameW * $frameH) -gt ($launcherChosenFrame.Width * $launcherChosenFrame.Height)) {
+                                $launcherChosenFrame = @{ Width=$frameW; Height=$frameH; Length=[int]$frameLength; Offset=[int]$frameOffset }
+                            }
+                        }
+                    }
+                    if ($null -ne $launcherChosenFrame) {
+                        $launcherPngBytes = New-Object byte[] $launcherChosenFrame.Length
+                        [Buffer]::BlockCopy($launcherIconBytes,$launcherChosenFrame.Offset,$launcherPngBytes,0,$launcherPngBytes.Length)
+                        $launcherPngStream = New-Object System.IO.MemoryStream(,$launcherPngBytes)
+                        try {
+                            $launcherSourceImage = [System.Drawing.Image]::FromStream($launcherPngStream)
+                            try {
+                                $captionIcon.Image = New-Object System.Drawing.Bitmap($launcherSourceImage)
+                                $launcherIcoBytes = New-Object byte[] (22 + $launcherPngBytes.Length)
+                                $launcherIcoBytes[2]=1; $launcherIcoBytes[4]=1
+                                $launcherIcoBytes[6]=[byte]($launcherChosenFrame.Width -band 255)
+                                $launcherIcoBytes[7]=[byte]($launcherChosenFrame.Height -band 255)
+                                $launcherIcoBytes[10]=1; $launcherIcoBytes[12]=32
+                                [Buffer]::BlockCopy([BitConverter]::GetBytes([uint32]$launcherPngBytes.Length),0,$launcherIcoBytes,14,4)
+                                [Buffer]::BlockCopy([BitConverter]::GetBytes([uint32]22),0,$launcherIcoBytes,18,4)
+                                [Buffer]::BlockCopy($launcherPngBytes,0,$launcherIcoBytes,22,$launcherPngBytes.Length)
+                                $launcherIcoStream = New-Object System.IO.MemoryStream(,$launcherIcoBytes)
+                                try { $form.Icon = New-Object System.Drawing.Icon($launcherIcoStream) } finally { $launcherIcoStream.Dispose() }
+                            } finally { $launcherSourceImage.Dispose() }
+                        } finally { $launcherPngStream.Dispose() }
+                        Write-AMRLauncherLog ('Loaded launcher branding icon from verified application source ({0}x{1}).' -f $launcherChosenFrame.Width,$launcherChosenFrame.Height)
+                    } else { Write-AMRLauncherLog 'Application icon data was found, but no suitable ICO frame was available.' }
+                } else { Write-AMRLauncherLog 'Application icon data was not a valid ICO stream.' }
+            } else { Write-AMRLauncherLog 'Application source did not contain the expected embedded AMR icon declaration.' }
+        }
+    } catch { Write-AMRLauncherLog ('Launcher branding icon load failed: ' + $_.Exception.Message) }
+
     $powershellExe = Join-Path $PSHOME 'powershell.exe'
     if (-not (Test-Path -LiteralPath $powershellExe -PathType Leaf)) { $powershellExe = 'powershell.exe' }
 
@@ -1479,7 +1550,7 @@ try {
     $steps = 34
     for ($step = 1; $step -le $steps; $step++) {
         $t = $step / [double]$steps
-        $ease = 1.0 - [Math]::Pow(1.0 - $t, 3.0)
+        $ease = 1.0 - [Math]::Pow(1.0 - $t, 4.0)
         $x = [int][Math]::Round($startBounds.X + (($targetX - $startBounds.X) * $ease))
         $y = [int][Math]::Round($startBounds.Y + (($targetY - $startBounds.Y) * $ease))
         $w = [int][Math]::Round($startBounds.Width + (($targetW - $startBounds.Width) * $ease))
@@ -1488,7 +1559,7 @@ try {
         # Fade begins late, after the window has visibly expanded into the app footprint.
         if ($t -gt 0.70) {
             $fadeT = ($t - 0.70) / 0.30
-            $form.Opacity = [Math]::Max(0.0, 1.0 - ($fadeT * $fadeT))
+            $form.Opacity = [Math]::Max(0.0, 1.0 - [Math]::Pow($fadeT, 1.65))
         }
         Pump-AMRLauncherUI
         Start-Sleep -Milliseconds 12
