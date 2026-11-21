@@ -7,11 +7,12 @@ $ProgressPreference = 'SilentlyContinue'
 
 $repoRaw = 'https://raw.githubusercontent.com/3mr10aa/Tool-Pro/main'
 $installRoot = Join-Path $env:LOCALAPPDATA 'AMR-ToolPro\Runtime'
-$stageRoot = Join-Path $env:TEMP ('AMR-ToolPro-' + [guid]::NewGuid().ToString('N'))
+$installParent = Split-Path -Parent $installRoot
+$stageRoot = Join-Path $installParent ('.AMR-ToolPro-stage-' + [guid]::NewGuid().ToString('N'))
 $logPath = Join-Path $env:TEMP 'AMR_ToolPro_Launcher.log'
 $telemetryRoot = Join-Path $env:LOCALAPPDATA 'AMR-ToolPro\Telemetry'
 $telemetryEndpointFileUrl = $repoRaw + '/telemetry-endpoint.txt'
-$launcherVersion = '2.4.1'
+$launcherVersion = '2.4.2'
 $script:LauncherForm = $null
 $script:ProgressTrack = $null
 $script:ProgressFill = $null
@@ -33,6 +34,25 @@ $expected = [ordered]@{
 function Write-AMRLauncherLog {
     param([string]$Message)
     try { Add-Content -LiteralPath $logPath -Value ('[{0}] {1}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'), $Message) -Encoding UTF8 } catch {}
+}
+
+function Move-AMRDirectoryWithRetry {
+    param([Parameter(Mandatory=$true)][string]$Source,[Parameter(Mandatory=$true)][string]$Destination,[int]$Attempts=10)
+    $lastError = $null
+    for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
+        try {
+            if (-not [System.IO.Directory]::Exists($Source)) { throw "Source directory does not exist: $Source" }
+            if ([System.IO.Directory]::Exists($Destination) -or [System.IO.File]::Exists($Destination)) { throw "Destination already exists: $Destination" }
+            [System.IO.Directory]::Move($Source, $Destination)
+            Write-AMRLauncherLog ("Directory publish move succeeded: $Source -> $Destination (attempt $attempt).")
+            return
+        } catch {
+            $lastError = $_
+            Write-AMRLauncherLog ("Directory publish move attempt $attempt/$Attempts failed: $Source -> $Destination | $($_.Exception.Message)")
+            if ($attempt -lt $Attempts) { Start-Sleep -Milliseconds ([Math]::Min(1500, 250 * $attempt)) }
+        }
+    }
+    throw "Could not safely move directory after $Attempts attempts. Source='$Source'; Destination='$Destination'. Last error: $($lastError.Exception.Message)"
 }
 
 
@@ -886,6 +906,7 @@ namespace AMR {
         $stageRoot = $null
     } else {
         Set-AMRLauncherProgress -Percent 8 -Status 'A newer or different runtime was found...' -Detail 'Downloading only files that do not match the current GitHub source...'
+        New-Item -ItemType Directory -Path $installParent -Force | Out-Null
         New-Item -ItemType Directory -Path $stageRoot -Force | Out-Null
 
         $changed = @()
@@ -988,22 +1009,35 @@ namespace AMR {
             }
         } catch { Write-AMRLauncherLog ('Optional launcher icon extraction failed: ' + $_.Exception.Message) }
 
-        # Atomically replace the complete runtime; restore the previous runtime if publish fails.
-        $installParent = Split-Path -Parent $installRoot
+        # Publish from a same-volume staging directory. Never delete an existing
+        # backup in the critical path: security scanners or stale handles may hold it.
+        # A unique backup name preserves rollback data and avoids collisions with old backups.
         New-Item -ItemType Directory -Path $installParent -Force | Out-Null
-        $backupRoot = $installRoot + '.previous'
-        if (Test-Path -LiteralPath $backupRoot) { Remove-Item -LiteralPath $backupRoot -Recurse -Force }
-        $hadPrevious = Test-Path -LiteralPath $installRoot
-        if ($hadPrevious) { Move-Item -LiteralPath $installRoot -Destination $backupRoot -Force }
+        $backupRoot = $installRoot + '.previous-' + (Get-Date -Format 'yyyyMMddHHmmss') + '-' + ([guid]::NewGuid().ToString('N').Substring(0,8))
+        $hadPrevious = [System.IO.Directory]::Exists($installRoot)
+        $oldRuntimeMoved = $false
+        if ($hadPrevious) {
+            Move-AMRDirectoryWithRetry -Source $installRoot -Destination $backupRoot -Attempts 10
+            $oldRuntimeMoved = $true
+        }
         try {
-            Move-Item -LiteralPath $stageRoot -Destination $installRoot -Force
+            Move-AMRDirectoryWithRetry -Source $stageRoot -Destination $installRoot -Attempts 10
             $stageRoot = $null
-            if (Test-Path -LiteralPath $backupRoot) { Remove-Item -LiteralPath $backupRoot -Recurse -Force }
-        } catch {
-            if ((Test-Path -LiteralPath $backupRoot) -and -not (Test-Path -LiteralPath $installRoot)) {
-                Move-Item -LiteralPath $backupRoot -Destination $installRoot -Force
+            if ($oldRuntimeMoved) {
+                Write-AMRLauncherLog ("Previous verified runtime retained for safe rollback at: $backupRoot")
             }
-            throw
+        } catch {
+            $publishError = $_
+            if ($oldRuntimeMoved -and -not [System.IO.Directory]::Exists($installRoot) -and [System.IO.Directory]::Exists($backupRoot)) {
+                try {
+                    Move-AMRDirectoryWithRetry -Source $backupRoot -Destination $installRoot -Attempts 10
+                    Write-AMRLauncherLog 'Previous runtime restored successfully after publish failure.'
+                } catch {
+                    Write-AMRLauncherLog ('CRITICAL: automatic runtime rollback failed: ' + $_.Exception.Message)
+                    throw ('New runtime publish failed and automatic rollback also failed. Previous runtime remains preserved at: ' + $backupRoot + '. Publish error: ' + $publishError.Exception.Message)
+                }
+            }
+            throw $publishError
         }
 
         }
