@@ -11,7 +11,7 @@ $stageRoot = Join-Path $env:TEMP ('AMR-ToolPro-' + [guid]::NewGuid().ToString('N
 $logPath = Join-Path $env:TEMP 'AMR_ToolPro_Launcher.log'
 $telemetryRoot = Join-Path $env:LOCALAPPDATA 'AMR-ToolPro\Telemetry'
 $telemetryEndpointFileUrl = $repoRaw + '/telemetry-endpoint.txt'
-$launcherVersion = '2.2.0'
+$launcherVersion = '2.3.0'
 $script:LauncherForm = $null
 $script:ProgressTrack = $null
 $script:ProgressFill = $null
@@ -27,6 +27,7 @@ $expected = [ordered]@{
     'AMR_WebView2/Microsoft.Web.WebView2.Wpf.dll' = $true
     'AMR_WebView2/x64/WebView2Loader.dll' = $true
     'AMR_WebView2/x86/WebView2Loader.dll' = $true
+    'Icons.zip' = $true
 }
 
 function Write-AMRLauncherLog {
@@ -201,6 +202,133 @@ function Get-AMRGitBlobSha1 {
     }
 }
 
+function Get-AMRIconImageExtensions {
+    return @(
+        '.png','.apng','.jpg','.jpeg','.jpe','.jfif','.jif','.bmp','.dib','.rle',
+        '.gif','.tif','.tiff','.ico','.emf','.wmf','.wdp','.jxr',
+        '.webp','.avif','.heic','.heif','.svg','.svgz','.jxl','.jp2','.j2k','.jpf','.jpx','.jpm','.mj2',
+        '.dds','.tga','.psd','.psb','.raw','.cr2','.nef','.arw','.dng','.exr','.hdr'
+    )
+}
+
+function Test-AMRIconCacheUsable {
+    param([string]$IconDirectory,[int]$Minimum = 100)
+    try {
+        if (-not (Test-Path -LiteralPath $IconDirectory -PathType Container)) { return $false }
+        $extensions = @(Get-AMRIconImageExtensions)
+        $count = @(Get-ChildItem -LiteralPath $IconDirectory -File -ErrorAction SilentlyContinue |
+            Where-Object { $extensions -contains $_.Extension.ToLowerInvariant() -and $_.Length -gt 128 }).Count
+        return ($count -ge $Minimum)
+    } catch { return $false }
+}
+
+function Expand-AMRIconArchive {
+    param([string]$ArchivePath,[string]$Destination,[int]$Minimum = 100)
+    Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction Stop
+    $extensions = @(Get-AMRIconImageExtensions)
+    $zip = [System.IO.Compression.ZipFile]::OpenRead($ArchivePath)
+    try {
+        $entries = @($zip.Entries | Where-Object {
+            $name = [string]$_.FullName
+            $extension = [System.IO.Path]::GetExtension($name).ToLowerInvariant()
+            $name -and $name -notmatch '(^/|^[a-zA-Z]:|(^|[\\/])\.\.([\\/]|$))' -and
+            -not $name.EndsWith('/') -and $extensions -contains $extension -and $_.Length -gt 128
+        })
+        if ($entries.Count -lt $Minimum) { throw "Icons.zip contains only $($entries.Count) supported image entries; at least $Minimum are required." }
+        New-Item -ItemType Directory -Path $Destination -Force | Out-Null
+        # Replace only top-level archive images. Preserve app-owned subfolders such as LocalInstalled.
+        Get-ChildItem -LiteralPath $Destination -File -ErrorAction SilentlyContinue |
+            Where-Object { $extensions -contains $_.Extension.ToLowerInvariant() } |
+            Remove-Item -Force -ErrorAction Stop
+        $seen = @{}
+        $extracted = 0
+        foreach ($entry in $entries) {
+            $leaf = [System.IO.Path]::GetFileName([string]$entry.FullName)
+            if ([string]::IsNullOrWhiteSpace($leaf) -or $leaf -match '[\\/:*?"<>|]') { continue }
+            $key = $leaf.ToLowerInvariant()
+            if ($seen.ContainsKey($key)) { continue }
+            $seen[$key] = $true
+            $destinationPath = Join-Path $Destination $leaf
+            $temporaryPath = $destinationPath + '.amr-new'
+            $inputStream = $null; $outputStream = $null
+            try {
+                $inputStream = $entry.Open()
+                $outputStream = [System.IO.File]::Open($temporaryPath,[System.IO.FileMode]::Create,[System.IO.FileAccess]::Write,[System.IO.FileShare]::None)
+                $inputStream.CopyTo($outputStream)
+                $outputStream.Flush()
+            } finally {
+                if ($outputStream) { $outputStream.Dispose() }
+                if ($inputStream) { $inputStream.Dispose() }
+            }
+            Move-Item -LiteralPath $temporaryPath -Destination $destinationPath -Force -ErrorAction Stop
+            $extracted++
+        }
+        if ($extracted -lt $Minimum) { throw "Only $extracted image files were extracted from Icons.zip." }
+        return $extracted
+    } finally { $zip.Dispose() }
+}
+
+function Register-AMRAppLaunchForIconMaintenance {
+    param([string]$StatePath,[int]$Threshold = 5)
+    $state = $null
+    if (Test-Path -LiteralPath $StatePath -PathType Leaf) {
+        try { $state = Get-Content -LiteralPath $StatePath -Raw -Encoding UTF8 | ConvertFrom-Json } catch {}
+    }
+    $count = 0; $pending = $false
+    if ($state) {
+        try { $count = [Math]::Max(0,[int]$state.launchCount) } catch {}
+        try { $pending = [bool]$state.cleanupPending } catch {}
+    }
+    $count++
+    $due = ($count -ge $Threshold -and -not $pending)
+    if ($due) { $pending = $true }
+    $parent = Split-Path -Parent $StatePath
+    if (-not (Test-Path -LiteralPath $parent -PathType Container)) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
+    $payload = [ordered]@{ schemaVersion=1; launchCount=$count; cleanupPending=$pending; updatedAtUtc=[DateTime]::UtcNow.ToString('o') }
+    [System.IO.File]::WriteAllText($StatePath,($payload | ConvertTo-Json -Depth 3),(New-Object System.Text.UTF8Encoding($false)))
+    return $due
+}
+
+function Start-AMRIconCacheCleanupAfterAppExit {
+    param([int]$ProcessId,[string]$IconDirectory,[string]$StatePath)
+    $extensions = (Get-AMRIconImageExtensions) -join ','
+    $bootstrap = @'
+$ErrorActionPreference = 'Stop'
+$pidToWait = __PID__
+$iconDirectory = __ICONS__
+$statePath = __STATE__
+$extensions = (__EXTENSIONS__ -split ',')
+try {
+    try { Wait-Process -Id $pidToWait -ErrorAction SilentlyContinue } catch {}
+    if (Test-Path -LiteralPath $iconDirectory -PathType Container) {
+        Get-ChildItem -LiteralPath $iconDirectory -File -ErrorAction SilentlyContinue |
+            Where-Object { $extensions -contains $_.Extension.ToLowerInvariant() } |
+            Remove-Item -Force -ErrorAction SilentlyContinue
+    }
+    $state = [ordered]@{ schemaVersion=1; launchCount=0; cleanupPending=$false; updatedAtUtc=[DateTime]::UtcNow.ToString('o') }
+    [System.IO.File]::WriteAllText($statePath,($state | ConvertTo-Json -Depth 3),(New-Object System.Text.UTF8Encoding($false)))
+} catch {
+    try { Add-Content -LiteralPath ([IO.Path]::ChangeExtension($statePath,'.log')) -Encoding UTF8 -Value ('['+[DateTime]::UtcNow.ToString('o')+'] Icon cache cleanup failed: '+$_.Exception.Message) } catch {}
+}
+'@
+    $bootstrap = $bootstrap.Replace('__PID__',[string]$ProcessId)
+    $bootstrap = $bootstrap.Replace('__ICONS__',(ConvertTo-AMRPSSingleQuoted $IconDirectory))
+    $bootstrap = $bootstrap.Replace('__STATE__',(ConvertTo-AMRPSSingleQuoted $StatePath))
+    $bootstrap = $bootstrap.Replace('__EXTENSIONS__',(ConvertTo-AMRPSSingleQuoted $extensions))
+    $encoded = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($bootstrap))
+    $powerShellExe = Join-Path $PSHOME 'powershell.exe'
+    if (-not (Test-Path -LiteralPath $powerShellExe -PathType Leaf)) { $powerShellExe = 'powershell.exe' }
+    $arguments = '-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -EncodedCommand ' + $encoded
+    $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $startInfo.FileName = $powerShellExe
+    $startInfo.Arguments = $arguments
+    $startInfo.CreateNoWindow = $true
+    $startInfo.UseShellExecute = $false
+    $process = [System.Diagnostics.Process]::Start($startInfo)
+    if ($process) { $process.Dispose() }
+    Write-AMRLauncherLog ('Scheduled icon cache cleanup after application exit; app PID=' + $ProcessId)
+}
+
 function Invoke-AMRLauncherJsonRequest {
     param([Parameter(Mandatory=$true)][string]$Uri)
     $request = [System.Net.HttpWebRequest]::Create($Uri)
@@ -305,6 +433,8 @@ function Get-AMRFile {
     $request.Method = 'GET'
     $request.UserAgent = 'AMR-ToolPro-Premium-Launcher/2.0'
     $request.AllowAutoRedirect = $true
+    $request.KeepAlive = $true
+    try { $request.ServicePoint.ConnectionLimit = 8 } catch {}
     $request.Timeout = 45000
     $request.ReadWriteTimeout = 45000
     $response = $null
@@ -315,7 +445,7 @@ function Get-AMRFile {
         $totalBytes = [int64]$response.ContentLength
         $inputStream = $response.GetResponseStream()
         $outputStream = New-Object System.IO.FileStream($Destination, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
-        $buffer = New-Object byte[] 65536
+        $buffer = New-Object byte[] 262144
         [int64]$received = 0
         $lastPaint = [DateTime]::MinValue
         while (($read = $inputStream.Read($buffer, 0, $buffer.Length)) -gt 0) {
@@ -611,12 +741,30 @@ namespace AMR {
                 $savedMap = @{}
                 foreach ($property in $savedState.files.PSObject.Properties) { $savedMap[$property.Name] = [string]$property.Value }
                 $localMatchesSource = Test-AMRRuntimeAgainstManifest -Root $installRoot -Manifest $savedMap
-                if ($localMatchesSource) { Write-AMRLauncherLog 'Offline mode: local runtime matches the last GitHub-verified manifest.' }
+                if ($localMatchesSource) {
+                    $remoteTree = [pscustomobject]@{ Commit=[string]$savedState.commit; Files=$savedMap }
+                    Write-AMRLauncherLog 'Offline mode: local runtime matches the last GitHub-verified manifest.'
+                }
             } catch { $localMatchesSource = $false }
         }
         if (-not $localMatchesSource) {
             throw ('Cannot verify the installed runtime against GitHub, and no intact previously verified offline runtime is available. ' + $sourceComparisonError)
         }
+    }
+
+    $iconsPath = Join-Path $installRoot 'Icons'
+    # Preserve user-specific installed-app icons created by the previous ProgramData cache layout.
+    $legacyInstalledIcons = Join-Path $env:ProgramData 'AMR-Utility\Icons\LocalInstalled'
+    $runtimeInstalledIcons = Join-Path $iconsPath 'LocalInstalled'
+    if ((Test-Path -LiteralPath $legacyInstalledIcons -PathType Container) -and -not (Test-Path -LiteralPath $runtimeInstalledIcons -PathType Container)) {
+        New-Item -ItemType Directory -Path $iconsPath -Force | Out-Null
+        Copy-Item -LiteralPath $legacyInstalledIcons -Destination $runtimeInstalledIcons -Recurse -Force -ErrorAction Stop
+        Write-AMRLauncherLog 'Migrated the previous ProgramData LocalInstalled icon subcache into the launcher-managed runtime.'
+    }
+    $needsIconExtraction = -not (Test-AMRIconCacheUsable -IconDirectory $iconsPath -Minimum 100)
+    if ($localMatchesSource -and $needsIconExtraction) {
+        Write-AMRLauncherLog 'Verified Icons.zip exists but the extracted image cache is incomplete; scheduling local re-extraction.'
+        $localMatchesSource = $false
     }
 
     if ($localMatchesSource) {
@@ -638,22 +786,30 @@ namespace AMR {
         foreach ($relative in $expected.Keys) {
             $localPath = Join-Path $installRoot ($relative -replace '/', '\')
             $matches = $false
-            if ($sourceComparisonAvailable -and (Test-Path -LiteralPath $localPath -PathType Leaf)) {
+            if ($remoteTree -and (Test-Path -LiteralPath $localPath -PathType Leaf)) {
                 try { $matches = ((Get-AMRGitBlobSha1 -Path $localPath) -eq [string]$remoteTree.Files[$relative]) } catch {}
             }
             if (-not $matches) { $changed += $relative }
         }
-        if (-not $sourceComparisonAvailable) {
-            throw 'A GitHub source comparison is required before downloading or replacing runtime files.'
+        if (-not $sourceComparisonAvailable -and $changed.Count -gt 0) {
+            throw 'A live GitHub source comparison is required before downloading or replacing runtime files.'
         }
         $fileCount = $changed.Count
         Write-AMRLauncherLog ('Runtime files requiring download: ' + ($changed -join ', '))
-        if ($fileCount -lt 1) { throw 'Runtime comparison returned an inconsistent update decision.' }
+        if ($fileCount -lt 1 -and -not $needsIconExtraction) { throw 'Runtime comparison returned an inconsistent update decision.' }
         $index = 0
         foreach ($relative in $changed) {
             $destination = Join-Path $stageRoot ($relative -replace '/', '\')
             Get-AMRFile -RelativePath $relative -Destination $destination -FileIndex $index -FileCount $fileCount -ExpectedBlobs $remoteTree.Files
             $index++
+        }
+
+        $archiveChanged = ($changed -contains 'Icons.zip')
+        if ($needsIconExtraction -or $archiveChanged) {
+            $stagedIconArchive = Join-Path $stageRoot 'Icons.zip'
+            if (-not (Test-Path -LiteralPath $stagedIconArchive -PathType Leaf)) { throw 'The verified Icons.zip archive is missing from the staged runtime.' }
+            $iconCount = Expand-AMRIconArchive -ArchivePath $stagedIconArchive -Destination (Join-Path $stageRoot 'Icons') -Minimum 100
+            Write-AMRLauncherLog ("Launcher extracted $iconCount verified icon image(s) into the staged runtime.")
         }
 
         # Persist the exact source identities only after every changed download has
@@ -845,6 +1001,23 @@ namespace AMR {
         Start-AMRTelemetryWorker -TelemetryRoot $telemetryRoot -LauncherVersion $launcherVersion
     } catch {
         Write-AMRLauncherLog ('Could not schedule background telemetry; continuing application session: ' + $_.Exception.Message)
+    }
+
+    # Count successful application sessions. Every fifth launch schedules a
+    # separate hidden cleanup process that waits for the app to close first.
+    try {
+        $iconStatePath = Join-Path (Split-Path -Parent $installRoot) 'icon-launch-state.json'
+        $cleanupIcons = Register-AMRAppLaunchForIconMaintenance -StatePath $iconStatePath -Threshold 5
+        if ($cleanupIcons) {
+            Start-AMRIconCacheCleanupAfterAppExit -ProcessId $appProcess.Id -IconDirectory (Join-Path $installRoot 'Icons') -StatePath $iconStatePath
+        }
+    } catch {
+        Write-AMRLauncherLog ('Icon maintenance scheduling warning: ' + $_.Exception.Message)
+        try {
+            $retryState = Get-Content -LiteralPath $iconStatePath -Raw -Encoding UTF8 | ConvertFrom-Json
+            $retryState.cleanupPending = $false
+            [System.IO.File]::WriteAllText($iconStatePath,($retryState | ConvertTo-Json -Depth 3),(New-Object System.Text.UTF8Encoding($false)))
+        } catch {}
     }
 }
 catch {
