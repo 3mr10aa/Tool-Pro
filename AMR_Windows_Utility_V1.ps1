@@ -1,4 +1,4 @@
-#
+﻿#
 # Amr | AMR Windows Utility - Cleanup Workspace & Isolated Root Scanner V16
 # Windows 10/11 | Windows PowerShell 5.1 | WPF | Administrator
 # Developer: عمرو أحمد عبد الفتاح | Phone: 01014716301 | Email: 3mr10aa@gmail.com
