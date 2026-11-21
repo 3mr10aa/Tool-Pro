@@ -182,7 +182,40 @@ $script:DriverCurrentScanId = $null
 $script:DriverCurrentOperationId = $null
 $script:DriverDiagnosticLastRefresh = [datetime]::MinValue
 $script:DriverDiagnosticLastFilter = ''
-$script:DriverRestorePointStateFile = Join-Path $script:LogDir 'DriverCenterRestorePoint.json'
+# Driver Backup owns its restore-point metadata under the application's isolated
+# backup workspace. Windows itself stores native System Restore snapshots in its
+# protected System Volume Information area; Windows does not support choosing an
+# application folder as the physical storage location for a native restore point.
+$script:DriverBackupRestoreRoot = Join-Path $script:BackupDir 'DriverBackup\SystemRestore'
+$script:DriverRestorePointStateFile = Join-Path $script:DriverBackupRestoreRoot 'DriverRestorePoint.json'
+try {
+    if (-not (Test-Path -LiteralPath $script:DriverBackupRestoreRoot -PathType Container)) {
+        New-Item -ItemType Directory -Path $script:DriverBackupRestoreRoot -Force -ErrorAction Stop | Out-Null
+    }
+    # One-time migration preserves an existing exact checkpoint receipt from older
+    # AMR builds. The old file is left untouched; the new copy is staged atomically.
+    $legacyDriverRestoreReceipt = Join-Path $script:LogDir 'DriverCenterRestorePoint.json'
+    if (-not (Test-Path -LiteralPath $script:DriverRestorePointStateFile -PathType Leaf) -and
+        (Test-Path -LiteralPath $legacyDriverRestoreReceipt -PathType Leaf)) {
+        $migrationTemp = $null
+        try {
+            $legacyState = Get-Content -LiteralPath $legacyDriverRestoreReceipt -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+            $legacySequence = 0L
+            if ([long]::TryParse([string]$legacyState.SequenceNumber,[ref]$legacySequence) -and
+                $legacySequence -gt 0 -and [string]$legacyState.Description -match '^(AMR )?Driver Safety - ') {
+                $migrationTemp = $script:DriverRestorePointStateFile + '.' + [guid]::NewGuid().ToString('N') + '.tmp'
+                $legacyState | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $migrationTemp -Encoding UTF8 -ErrorAction Stop
+                Move-Item -LiteralPath $migrationTemp -Destination $script:DriverRestorePointStateFile -Force -ErrorAction Stop
+            }
+        } catch {
+            try { if ($migrationTemp) { Remove-Item -LiteralPath $migrationTemp -Force -ErrorAction SilentlyContinue } } catch {}
+            # A malformed legacy receipt is not trusted or silently repaired.
+        }
+    }
+} catch {
+    # Keep startup resilient; creation will report a precise path/permission error.
+}
+$script:DriverRestorePointLastFailure = $null
 $script:AMRSessionId = [guid]::NewGuid().ToString()
 # AMR_PHASE1_DEFINITIONS_BEGIN# AMR Driver Center Phase 1 stabilization state.
 $script:AMRDriverOpLockState = [pscustomobject]@{ Mutex=$null; Name=''; Held=$false; OwnerThread=0; Operation=''; AcquiredAt=$null }
@@ -2760,6 +2793,54 @@ Write-AMRLog ("Startup catalog ready: {0} preloaded icons from local cache. Cach
   </LinearGradientBrush>
   <SolidColorBrush x:Key="OverviewOuterGlassBorder" Color="#9A80B8D8"/>
   <SolidColorBrush x:Key="OverviewInnerGlassBorder" Color="#805F83A8"/>
+
+  <!-- Windows Update Center controls: scoped premium glass template with hover/press motion. -->
+  <Style x:Key="AMRUpdateGlassButtonStyle" TargetType="Button">
+   <Setter Property="Background" Value="{DynamicResource ActivationInnerGlassBrush}"/>
+   <Setter Property="Foreground" Value="#F4EAD5"/>
+   <Setter Property="BorderBrush" Value="{DynamicResource ActivationGlassEdgeBrush}"/>
+   <Setter Property="BorderThickness" Value="1"/>
+   <Setter Property="FontWeight" Value="SemiBold"/>
+   <Setter Property="FontSize" Value="11"/>
+   <Setter Property="Padding" Value="13,7"/>
+   <Setter Property="Cursor" Value="Hand"/>
+   <Setter Property="RenderTransformOrigin" Value="0.5,0.5"/>
+   <Setter Property="Template">
+    <Setter.Value>
+     <ControlTemplate TargetType="Button">
+      <Border x:Name="UpdateButtonSurface" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="9" RenderTransformOrigin="0.5,0.5">
+       <Border.RenderTransform><ScaleTransform ScaleX="1" ScaleY="1"/></Border.RenderTransform>
+       <Border.Effect><DropShadowEffect Color="#000000" BlurRadius="8" ShadowDepth="2" Opacity="0.20"/></Border.Effect>
+       <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" Margin="{TemplateBinding Padding}" RecognizesAccessKey="True"/>
+      </Border>
+      <ControlTemplate.Triggers>
+       <Trigger Property="IsMouseOver" Value="True">
+        <Setter TargetName="UpdateButtonSurface" Property="BorderBrush" Value="#B49A70"/>
+        <Setter TargetName="UpdateButtonSurface" Property="Effect">
+         <Setter.Value><DropShadowEffect Color="#B49A70" BlurRadius="15" ShadowDepth="0" Opacity="0.30"/></Setter.Value>
+        </Setter>
+        <Trigger.EnterActions><BeginStoryboard><Storyboard>
+         <DoubleAnimation Storyboard.TargetName="UpdateButtonSurface" Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleX)" To="1.025" Duration="0:0:0.13"/>
+         <DoubleAnimation Storyboard.TargetName="UpdateButtonSurface" Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleY)" To="1.025" Duration="0:0:0.13"/>
+        </Storyboard></BeginStoryboard></Trigger.EnterActions>
+        <Trigger.ExitActions><BeginStoryboard><Storyboard>
+         <DoubleAnimation Storyboard.TargetName="UpdateButtonSurface" Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleX)" To="1" Duration="0:0:0.16"/>
+         <DoubleAnimation Storyboard.TargetName="UpdateButtonSurface" Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleY)" To="1" Duration="0:0:0.16"/>
+        </Storyboard></BeginStoryboard></Trigger.ExitActions>
+       </Trigger>
+       <Trigger Property="IsPressed" Value="True">
+        <Setter TargetName="UpdateButtonSurface" Property="Opacity" Value="0.88"/>
+        <Trigger.EnterActions><BeginStoryboard><Storyboard>
+         <DoubleAnimation Storyboard.TargetName="UpdateButtonSurface" Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleX)" To="0.985" Duration="0:0:0.06"/>
+         <DoubleAnimation Storyboard.TargetName="UpdateButtonSurface" Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleY)" To="0.985" Duration="0:0:0.06"/>
+        </Storyboard></BeginStoryboard></Trigger.EnterActions>
+       </Trigger>
+       <Trigger Property="IsEnabled" Value="False"><Setter TargetName="UpdateButtonSurface" Property="Opacity" Value="0.48"/></Trigger>
+      </ControlTemplate.Triggers>
+     </ControlTemplate>
+    </Setter.Value>
+   </Setter>
+  </Style>
   <Style TargetType="Button">
    <Setter Property="Background" Value="#27272A"/>
    <Setter Property="Foreground" Value="#F4F4F5"/>
@@ -3334,6 +3415,61 @@ Write-AMRLog ("Startup catalog ready: {0} preloaded icons from local cache. Cach
           </Setter.Value>
          </Setter>
         </Style>
+  <!-- System Center: signature refresh control with a living blue-glass hover response. -->
+  <Style x:Key="AMRSystemRefreshButtonStyle" TargetType="Button">
+   <Setter Property="Background" Value="#1E4264"/>
+   <Setter Property="Foreground" Value="#F7FBFF"/>
+   <Setter Property="BorderBrush" Value="#5B9BD0"/>
+   <Setter Property="BorderThickness" Value="1"/>
+   <Setter Property="FontWeight" Value="SemiBold"/>
+   <Setter Property="Cursor" Value="Hand"/>
+   <Setter Property="Padding" Value="16,8"/>
+   <Setter Property="RenderTransformOrigin" Value="0.5,0.5"/>
+   <Setter Property="SnapsToDevicePixels" Value="True"/>
+   <Setter Property="Template">
+    <Setter.Value>
+     <ControlTemplate TargetType="Button">
+      <Border x:Name="SystemRefreshSurface" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="10" RenderTransformOrigin="0.5,0.5" SnapsToDevicePixels="True">
+       <Border.RenderTransform><TransformGroup><ScaleTransform ScaleX="1" ScaleY="1"/><TranslateTransform Y="0"/></TransformGroup></Border.RenderTransform>
+       <Border.Effect><DropShadowEffect Color="#071827" BlurRadius="9" ShadowDepth="2" Opacity="0.28"/></Border.Effect>
+       <Grid ClipToBounds="False">
+        <Border x:Name="RefreshSheen" CornerRadius="9" Opacity="0" HorizontalAlignment="Left" Width="34" Background="#5AADEB"/>
+        <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" Margin="{TemplateBinding Padding}" RecognizesAccessKey="True"/>
+       </Grid>
+      </Border>
+      <ControlTemplate.Triggers>
+       <Trigger Property="IsMouseOver" Value="True">
+        <Setter TargetName="SystemRefreshSurface" Property="Background" Value="#285B83"/>
+        <Setter TargetName="SystemRefreshSurface" Property="BorderBrush" Value="#9BD5FF"/>
+        <Setter TargetName="SystemRefreshSurface" Property="Effect"><Setter.Value><DropShadowEffect Color="#55B9FF" BlurRadius="22" ShadowDepth="0" Opacity="0.62"/></Setter.Value></Setter>
+        <Setter TargetName="RefreshSheen" Property="Opacity" Value="0.12"/>
+        <Trigger.EnterActions><BeginStoryboard><Storyboard>
+         <DoubleAnimation Storyboard.TargetName="SystemRefreshSurface" Storyboard.TargetProperty="(UIElement.RenderTransform).(TransformGroup.Children)[0].(ScaleTransform.ScaleX)" To="1.045" Duration="0:0:0.16"/>
+         <DoubleAnimation Storyboard.TargetName="SystemRefreshSurface" Storyboard.TargetProperty="(UIElement.RenderTransform).(TransformGroup.Children)[0].(ScaleTransform.ScaleY)" To="1.045" Duration="0:0:0.16"/>
+         <DoubleAnimation Storyboard.TargetName="SystemRefreshSurface" Storyboard.TargetProperty="(UIElement.RenderTransform).(TransformGroup.Children)[1].(TranslateTransform.Y)" To="-2" Duration="0:0:0.16"/>
+         <DoubleAnimation Storyboard.TargetName="RefreshSheen" Storyboard.TargetProperty="Width" From="10" To="58" Duration="0:0:0.28"/>
+        </Storyboard></BeginStoryboard></Trigger.EnterActions>
+        <Trigger.ExitActions><BeginStoryboard><Storyboard>
+         <DoubleAnimation Storyboard.TargetName="SystemRefreshSurface" Storyboard.TargetProperty="(UIElement.RenderTransform).(TransformGroup.Children)[0].(ScaleTransform.ScaleX)" To="1" Duration="0:0:0.19"/>
+         <DoubleAnimation Storyboard.TargetName="SystemRefreshSurface" Storyboard.TargetProperty="(UIElement.RenderTransform).(TransformGroup.Children)[0].(ScaleTransform.ScaleY)" To="1" Duration="0:0:0.19"/>
+         <DoubleAnimation Storyboard.TargetName="SystemRefreshSurface" Storyboard.TargetProperty="(UIElement.RenderTransform).(TransformGroup.Children)[1].(TranslateTransform.Y)" To="0" Duration="0:0:0.19"/>
+         <DoubleAnimation Storyboard.TargetName="RefreshSheen" Storyboard.TargetProperty="Opacity" To="0" Duration="0:0:0.16"/>
+        </Storyboard></BeginStoryboard></Trigger.ExitActions>
+       </Trigger>
+       <Trigger Property="IsPressed" Value="True">
+        <Setter TargetName="SystemRefreshSurface" Property="Background" Value="#173653"/>
+        <Setter TargetName="SystemRefreshSurface" Property="BorderBrush" Value="#C4E7FF"/>
+        <Trigger.EnterActions><BeginStoryboard><Storyboard>
+         <DoubleAnimation Storyboard.TargetName="SystemRefreshSurface" Storyboard.TargetProperty="(UIElement.RenderTransform).(TransformGroup.Children)[0].(ScaleTransform.ScaleX)" To="0.975" Duration="0:0:0.06"/>
+         <DoubleAnimation Storyboard.TargetName="SystemRefreshSurface" Storyboard.TargetProperty="(UIElement.RenderTransform).(TransformGroup.Children)[0].(ScaleTransform.ScaleY)" To="0.975" Duration="0:0:0.06"/>
+        </Storyboard></BeginStoryboard></Trigger.EnterActions>
+       </Trigger>
+       <Trigger Property="IsEnabled" Value="False"><Setter TargetName="SystemRefreshSurface" Property="Opacity" Value="0.48"/></Trigger>
+      </ControlTemplate.Triggers>
+     </ControlTemplate>
+    </Setter.Value>
+   </Setter>
+  </Style>
  </Window.Resources>
  
  <Grid>
@@ -3358,7 +3494,7 @@ Write-AMRLog ("Startup catalog ready: {0} preloaded icons from local cache. Cach
           <TextBlock Text="Device identity and hardware  •  Live performance telemetry" Foreground="#94A3B8" FontSize="12" Margin="0,5,8,0"/>
          </StackPanel>
          <StackPanel Grid.Column="1" VerticalAlignment="Center" HorizontalAlignment="Right">
-          <Button Name="RefreshOverviewBtn" Content="↻ Refresh" Background="#1E4264" Foreground="#FFFFFF" BorderBrush="#4B83B8" BorderThickness="1" Padding="18,9" FontSize="13" FontWeight="SemiBold" Cursor="Hand"/>
+          <Button Name="RefreshOverviewBtn" Content="↻ Refresh" Style="{StaticResource AMRSystemRefreshButtonStyle}" Margin="0,0,7,0" Padding="18,9" FontSize="13"/>
           <TextBlock Name="ovLastRefresh" Text="" Visibility="Collapsed" Foreground="#94A3B8" FontSize="10" HorizontalAlignment="Right" Margin="0,5,2,0"/>
          </StackPanel>
         </Grid>
@@ -3415,7 +3551,7 @@ Write-AMRLog ("Startup catalog ready: {0} preloaded icons from local cache. Cach
      <TabItem Header="Performance">
       <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="12,8,12,18">
        <StackPanel>
-        <Grid Margin="4,4,0,4"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><TextBlock Text="PERFORMANCE" FontSize="25" FontWeight="Bold" Foreground="#F8FAFC" VerticalAlignment="Center"/><Button Name="RefreshLivePerformanceBtn" Grid.Column="1" Content="↻ Refresh" Background="#1E4264" Foreground="#FFFFFF" BorderBrush="#4B83B8" BorderThickness="1" Padding="13,7" FontSize="11" FontWeight="SemiBold" Cursor="Hand"/></Grid>
+        <Grid Margin="4,4,8,4" ClipToBounds="False"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><TextBlock Text="PERFORMANCE" FontSize="25" FontWeight="Bold" Foreground="#F8FAFC" VerticalAlignment="Center"/><Button Name="RefreshLivePerformanceBtn" Grid.Column="1" Content="↻ Refresh" Style="{StaticResource AMRSystemRefreshButtonStyle}" Margin="0,0,2,0" Padding="15,8" FontSize="11"/></Grid>
         <Grid Margin="4,0,0,14"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><TextBlock Text="Live Windows telemetry · real CPU, RAM, GPU and network samples · rolling 60-second history" Foreground="#94A3B8" FontSize="12"/><TextBlock Name="ovLiveRefreshStatus" Grid.Column="1" Text="" Visibility="Collapsed" Foreground="#8EA6BD" FontSize="9" HorizontalAlignment="Right"/></Grid>
         <UniformGrid Columns="3" Margin="0,0,0,8">
          <Border Background="{StaticResource OverviewInnerGlassBrush}" BorderBrush="{StaticResource OverviewInnerGlassBorder}" BorderThickness="1" CornerRadius="12" Padding="13" Margin="4"><StackPanel><TextBlock Text="CPU LOAD" Foreground="#7DD3FC" FontSize="11" FontWeight="Bold"/><Grid Width="104" Height="104" Margin="0,8,0,5"><Ellipse Stroke="#344B63" StrokeThickness="8"/><Path Name="ovCpuGaugeArc" Stroke="#56A6E8" StrokeThickness="8" StrokeStartLineCap="Round" StrokeEndLineCap="Round" Data="M 52,4 A 48,48 0 0 1 52,100"/><TextBlock Name="ovLiveCPUValue" Text="N/A" Foreground="#F8FAFC" FontSize="20" FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center"/></Grid><TextBlock Name="ovLiveCPUDetail" Text="Waiting for valid CPU sample" Foreground="#AFC4DA" FontSize="10" TextWrapping="Wrap"/></StackPanel></Border>
@@ -3449,8 +3585,56 @@ Write-AMRLog ("Startup catalog ready: {0} preloaded icons from local cache. Cach
                     Padding="10,8,10,16">
        
        <!-- Keep the content's normal left-to-right layout while RTL places the scrollbar on the left. -->
-       <StackPanel Name="DriverCenterMainPanel" FlowDirection="LeftToRight">
-        <Border Name="DriverCenterHeader" Background="#101D2D" BorderBrush="#344B68" BorderThickness="1" CornerRadius="14" Padding="15,12" Margin="0,2,0,14">
+       <StackPanel Name="DriverCenterMainPanel" FlowDirection="LeftToRight" Opacity="0" RenderTransformOrigin="0.5,0.5">
+        <StackPanel.Resources>
+         <!-- Driver Center scoped glass button style; preserves all existing button identities and handlers. -->
+         <Style TargetType="{x:Type Button}">
+          <Setter Property="BorderThickness" Value="1"/>
+          <Setter Property="Padding" Value="12,8"/>
+          <Setter Property="Cursor" Value="Hand"/>
+          <Setter Property="Template">
+           <Setter.Value>
+            <ControlTemplate TargetType="{x:Type Button}">
+             <Border x:Name="DriverGlassButtonSurface" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="10" Padding="{TemplateBinding Padding}" RenderTransformOrigin="0.5,0.5">
+              <Border.RenderTransform><ScaleTransform ScaleX="1" ScaleY="1"/></Border.RenderTransform>
+              <Border.Effect><DropShadowEffect Color="#000000" BlurRadius="8" ShadowDepth="2" Opacity="0.16"/></Border.Effect>
+              <ContentPresenter HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}" VerticalAlignment="{TemplateBinding VerticalContentAlignment}" RecognizesAccessKey="True"/>
+             </Border>
+             <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True">
+               <Setter TargetName="DriverGlassButtonSurface" Property="BorderBrush" Value="#D0B985"/>
+               <Setter TargetName="DriverGlassButtonSurface" Property="Effect"><Setter.Value><DropShadowEffect Color="#B89A62" BlurRadius="16" ShadowDepth="0" Opacity="0.30"/></Setter.Value></Setter>
+               <Trigger.EnterActions><BeginStoryboard><Storyboard>
+                <DoubleAnimation Storyboard.TargetName="DriverGlassButtonSurface" Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleX)" To="1.025" Duration="0:0:0.13"/>
+                <DoubleAnimation Storyboard.TargetName="DriverGlassButtonSurface" Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleY)" To="1.025" Duration="0:0:0.13"/>
+               </Storyboard></BeginStoryboard></Trigger.EnterActions>
+               <Trigger.ExitActions><BeginStoryboard><Storyboard>
+                <DoubleAnimation Storyboard.TargetName="DriverGlassButtonSurface" Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleX)" To="1" Duration="0:0:0.16"/>
+                <DoubleAnimation Storyboard.TargetName="DriverGlassButtonSurface" Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleY)" To="1" Duration="0:0:0.16"/>
+               </Storyboard></BeginStoryboard></Trigger.ExitActions>
+              </Trigger>
+              <Trigger Property="IsPressed" Value="True">
+               <Setter TargetName="DriverGlassButtonSurface" Property="Opacity" Value="0.88"/>
+               <Trigger.EnterActions><BeginStoryboard><Storyboard>
+                <DoubleAnimation Storyboard.TargetName="DriverGlassButtonSurface" Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleX)" To="0.985" Duration="0:0:0.06"/>
+                <DoubleAnimation Storyboard.TargetName="DriverGlassButtonSurface" Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleY)" To="0.985" Duration="0:0:0.06"/>
+               </Storyboard></BeginStoryboard></Trigger.EnterActions>
+              </Trigger>
+              <Trigger Property="IsEnabled" Value="False"><Setter TargetName="DriverGlassButtonSurface" Property="Opacity" Value="0.48"/></Trigger>
+             </ControlTemplate.Triggers>
+            </ControlTemplate>
+           </Setter.Value>
+          </Setter>
+         </Style>
+        </StackPanel.Resources>
+        <StackPanel.RenderTransform><TranslateTransform Y="10"/></StackPanel.RenderTransform>
+        <StackPanel.Triggers>
+         <EventTrigger RoutedEvent="FrameworkElement.Loaded"><BeginStoryboard><Storyboard>
+          <DoubleAnimation Storyboard.TargetProperty="Opacity" From="0" To="1" Duration="0:0:0.30"/>
+          <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.Y)" From="10" To="0" Duration="0:0:0.34" DecelerationRatio="0.82"/>
+         </Storyboard></BeginStoryboard></EventTrigger>
+        </StackPanel.Triggers>
+        <Border Name="DriverCenterHeader" Background="{DynamicResource ActivationOuterGlassBrush}" BorderBrush="{DynamicResource ActivationGlassEdgeBrush}" BorderThickness="1" CornerRadius="14" Padding="15,12" Margin="0,2,0,14"><Border.Effect><DropShadowEffect Color="#000000" BlurRadius="17" ShadowDepth="4" Opacity="0.24"/></Border.Effect>
          <Grid>
          <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
          <StackPanel Grid.Column="0" VerticalAlignment="Center" Margin="0,0,12,0">
@@ -3459,14 +3643,14 @@ Write-AMRLog ("Startup catalog ready: {0} preloaded icons from local cache. Cach
          </StackPanel>
          <Border Grid.Column="1" Background="#0C1726" BorderBrush="#B89A62" BorderThickness="1" CornerRadius="10" Padding="4" Margin="0,0,12,0" VerticalAlignment="Center">
           <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-           <Button Name="DriverSmartModeBtn" Content="✦ Smart" Background="#263646" Foreground="#F4D99B" BorderBrush="#B89A62" BorderThickness="1" Padding="15,9" FontSize="11" FontWeight="Bold" Margin="0,0,5,0" Cursor="Hand"/>
-           <Button Name="DriverAdvancedModeBtn" Content="Professional" Background="#182638" Foreground="#CBD5E1" BorderBrush="#344B68" BorderThickness="1" Padding="15,9" FontSize="11" Cursor="Hand"/>
+           <Button Name="DriverSmartModeBtn" Content="✦ Smart" Background="#344A43" Foreground="#F4D99B" BorderBrush="#D6B77E" BorderThickness="1" Padding="15,9" FontSize="11" FontWeight="Bold" Margin="0,0,5,0" Cursor="Hand"/>
+           <Button Name="DriverAdvancedModeBtn" Content="Professional" Background="#1C293B" Foreground="#B9C9DC" BorderBrush="#456A91" BorderThickness="1" Padding="15,9" FontSize="11" Cursor="Hand"/>
           </StackPanel>
          </Border>
          <Button Name="ScanDriversBtn" Grid.Column="2" Content="⌕  Scan Device" Background="#244A70" Foreground="#F8FAFC" BorderBrush="#B89A62" BorderThickness="1" Padding="17,11" FontSize="12" FontWeight="SemiBold" VerticalAlignment="Center" Cursor="Hand"/>
          </Grid>
         </Border>
-        <Border Name="DriverComputerSummaryCard" Background="#A817293D" BorderBrush="#557A9BB8" BorderThickness="1" CornerRadius="12" Padding="9,7" Margin="0,0,0,8">
+        <Border Name="DriverComputerSummaryCard" Background="{DynamicResource ActivationInnerGlassBrush}" BorderBrush="{DynamicResource ActivationGlassEdgeBrush}" BorderThickness="1" CornerRadius="12" Padding="9,7" Margin="0,0,0,8"><Border.Effect><DropShadowEffect Color="#000000" BlurRadius="17" ShadowDepth="4" Opacity="0.24"/></Border.Effect>
          <Grid>
           <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
           <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
@@ -3485,7 +3669,7 @@ Write-AMRLog ("Startup catalog ready: {0} preloaded icons from local cache. Cach
          </Grid>
         </Border>
         <StackPanel Margin="0,0,0,10">
-         <Border Name="DriverSmartActionsPanel" Background="#B5101D2D" BorderBrush="#526A83" BorderThickness="1" CornerRadius="10" Padding="7,6" Margin="0,0,0,7">
+         <Border Name="DriverSmartActionsPanel" Background="{DynamicResource ActivationOuterGlassBrush}" BorderBrush="{DynamicResource ActivationGlassEdgeBrush}" BorderThickness="1" CornerRadius="10" Padding="7,6" Margin="0,0,0,7"><Border.Effect><DropShadowEffect Color="#000000" BlurRadius="17" ShadowDepth="4" Opacity="0.24"/></Border.Effect>
           <Grid>
            <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
            <TextBlock Name="DriverModeEyebrow" Grid.Column="0" Text="SMART ASSISTANT" Foreground="#D8B56D" FontSize="12" FontWeight="Bold" VerticalAlignment="Center" Margin="2,0,8,0"/>
@@ -3494,7 +3678,7 @@ Write-AMRLog ("Startup catalog ready: {0} preloaded icons from local cache. Cach
           </Grid>
          </Border>
          <StackPanel Name="DriverProfessionalActionsPanel" Visibility="Collapsed">
-          <Border Background="#101D2D" BorderBrush="#B89A62" BorderThickness="1" CornerRadius="10" Padding="10" Margin="0,0,0,8">
+          <Border Background="{DynamicResource ActivationInnerGlassBrush}" BorderBrush="{DynamicResource ActivationGlassEdgeBrush}" BorderThickness="1" CornerRadius="10" Padding="10" Margin="0,0,0,8">
            <StackPanel>
             <TextBlock Text="DRIVER PACKAGE" Foreground="#D8B56D" FontSize="10" FontWeight="Bold" Margin="2,0,0,7"/>
             <Grid>
@@ -3504,7 +3688,7 @@ Write-AMRLog ("Startup catalog ready: {0} preloaded icons from local cache. Cach
             </Grid>
            </StackPanel>
           </Border>
-          <Border Background="#142236" BorderBrush="#344B68" BorderThickness="1" CornerRadius="10" Padding="10" Margin="0,0,0,8">
+          <Border Background="{DynamicResource ActivationInnerGlassBrush}" BorderBrush="{DynamicResource ActivationGlassEdgeBrush}" BorderThickness="1" CornerRadius="10" Padding="10" Margin="0,0,0,8">
            <StackPanel>
             <StackPanel Margin="2,0,2,10">
              <TextBlock Text="SELECTION &amp; INSTALL PLAN" Foreground="#D8B56D" FontSize="11" FontWeight="Bold" VerticalAlignment="Center" Margin="0,0,0,3"/>
@@ -3518,7 +3702,7 @@ Write-AMRLog ("Startup catalog ready: {0} preloaded icons from local cache. Cach
             </WrapPanel>
            </StackPanel>
           </Border>
-          <Border Background="#142236" BorderBrush="#344B68" BorderThickness="1" CornerRadius="10" Padding="10" Margin="0,0,0,8">
+          <Border Background="{DynamicResource ActivationInnerGlassBrush}" BorderBrush="{DynamicResource ActivationGlassEdgeBrush}" BorderThickness="1" CornerRadius="10" Padding="10" Margin="0,0,0,8">
            <StackPanel>
             <TextBlock Text="TOOLS &amp; OFFICIAL SOURCES" Foreground="#A7D8CE" FontSize="10" FontWeight="Bold" Margin="2,0,0,7"/>
             <WrapPanel Orientation="Horizontal">
@@ -3535,13 +3719,13 @@ Write-AMRLog ("Startup catalog ready: {0} preloaded icons from local cache. Cach
         </StackPanel>
         <Grid Name="DriverSummaryMetrics" Margin="0,0,0,12">
          <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-         <Border Grid.Column="0" Background="#142236" BorderBrush="#344B68" BorderThickness="1" CornerRadius="10" Padding="13" Margin="0,0,6,0">
+         <Border Grid.Column="0" Background="{DynamicResource ActivationInnerGlassBrush}" BorderBrush="{DynamicResource ActivationGlassEdgeBrush}" BorderThickness="1" CornerRadius="10" Padding="13" Margin="0,0,6,0">
           <StackPanel><TextBlock Text="WINDOWS" Foreground="#D8B56D" FontSize="11" FontWeight="Bold"/><TextBlock Name="DriverWindowsInfo" Text="Not scanned" Foreground="#F1F5F9" FontSize="12" Margin="0,6,0,0" TextWrapping="Wrap"/></StackPanel>
          </Border>
-         <Border Grid.Column="1" Background="#142236" BorderBrush="#344B68" BorderThickness="1" CornerRadius="10" Padding="13" Margin="3,0">
+         <Border Grid.Column="1" Background="{DynamicResource ActivationInnerGlassBrush}" BorderBrush="{DynamicResource ActivationGlassEdgeBrush}" BorderThickness="1" CornerRadius="10" Padding="13" Margin="3,0">
           <StackPanel><TextBlock Text="DETECTED DEVICES" Foreground="#D8B56D" FontSize="11" FontWeight="Bold"/><TextBlock Name="DriverDeviceCount" Text="--" Foreground="#F1F5F9" FontSize="20" FontWeight="Bold" Margin="0,4,0,0"/></StackPanel>
          </Border>
-         <Border Grid.Column="2" Background="#142236" BorderBrush="#344B68" BorderThickness="1" CornerRadius="10" Padding="13" Margin="6,0,0,0">
+         <Border Grid.Column="2" Background="{DynamicResource ActivationInnerGlassBrush}" BorderBrush="{DynamicResource ActivationGlassEdgeBrush}" BorderThickness="1" CornerRadius="10" Padding="13" Margin="6,0,0,0">
           <StackPanel><TextBlock Text="DEVICE ISSUES" Foreground="#FCA5A5" FontSize="11" FontWeight="Bold"/><TextBlock Name="DriverProblemCount" Text="--" Foreground="#F1F5F9" FontSize="20" FontWeight="Bold" Margin="0,4,0,0"/></StackPanel>
          </Border>
         </Grid>
@@ -3564,43 +3748,116 @@ Write-AMRLog ("Startup catalog ready: {0} preloaded icons from local cache. Cach
           <Button Name="DriverOpenDownloadsBtn" Content="Open Driver Downloads" Background="#263B52" Foreground="#DBEAFE" BorderBrush="#456B8A" Padding="10,5" FontSize="10" VerticalAlignment="Center"/>
          </StackPanel>
         </Grid>
-        <Border Background="#A8101D2D" BorderBrush="#526A83" BorderThickness="1" CornerRadius="10" Padding="4">
+        <Border Background="{DynamicResource ActivationOuterGlassBrush}" BorderBrush="{DynamicResource ActivationGlassEdgeBrush}" BorderThickness="1" CornerRadius="10" Padding="4">
          <ListView Name="DriverDeviceList" SelectionMode="Extended" Background="Transparent" Foreground="#E4E4E7" BorderThickness="0" MinHeight="260" MaxHeight="100000" ScrollViewer.HorizontalScrollBarVisibility="Auto" ScrollViewer.VerticalScrollBarVisibility="Auto" ScrollViewer.CanContentScroll="True" ScrollViewer.PanningMode="Both" VirtualizingPanel.IsVirtualizing="True" VirtualizingPanel.VirtualizationMode="Recycling">
           <ListView.Resources>
-           <!-- Explicit dark row states prevent the default white hover/selection background from hiding text. -->
+           <!-- Premium glass row and selection visuals; all original row bindings and selection behavior remain intact. -->
+           <Style TargetType="GridViewColumnHeader">
+            <Setter Property="Foreground" Value="#E9D8B5"/>
+            <Setter Property="FontSize" Value="10"/>
+            <Setter Property="FontWeight" Value="Bold"/>
+            <Setter Property="Padding" Value="9,9"/>
+            <Setter Property="Margin" Value="2,0,2,7"/>
+            <Setter Property="HorizontalContentAlignment" Value="Center"/>
+            <Setter Property="VerticalContentAlignment" Value="Center"/>
+            <Setter Property="Template">
+             <Setter.Value>
+              <ControlTemplate TargetType="GridViewColumnHeader">
+               <Border x:Name="DriverHeaderSurface" CornerRadius="8" Padding="{TemplateBinding Padding}"
+                       Background="#B52A3039" BorderBrush="#9A9B8769" BorderThickness="1"
+                       RenderTransformOrigin="0.5,0.5">
+                <Border.RenderTransform><ScaleTransform ScaleX="1" ScaleY="1"/></Border.RenderTransform>
+                <Border.Effect><DropShadowEffect Color="#000000" BlurRadius="7" ShadowDepth="2" Opacity="0.18"/></Border.Effect>
+                <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" RecognizesAccessKey="True"/>
+               </Border>
+               <ControlTemplate.Triggers>
+                <Trigger Property="IsMouseOver" Value="True">
+                 <Setter TargetName="DriverHeaderSurface" Property="Background" Value="#D0444A53"/>
+                 <Setter TargetName="DriverHeaderSurface" Property="BorderBrush" Value="#D8BD8B"/>
+                 <Setter TargetName="DriverHeaderSurface" Property="Effect"><Setter.Value><DropShadowEffect Color="#B89A62" BlurRadius="13" ShadowDepth="0" Opacity="0.28"/></Setter.Value></Setter>
+                 <Trigger.EnterActions><BeginStoryboard><Storyboard>
+                  <DoubleAnimation Storyboard.TargetName="DriverHeaderSurface" Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleX)" To="1.018" Duration="0:0:0.12"/>
+                  <DoubleAnimation Storyboard.TargetName="DriverHeaderSurface" Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleY)" To="1.018" Duration="0:0:0.12"/>
+                 </Storyboard></BeginStoryboard></Trigger.EnterActions>
+                </Trigger>
+                <Trigger Property="IsPressed" Value="True"><Setter TargetName="DriverHeaderSurface" Property="Opacity" Value="0.82"/></Trigger>
+               </ControlTemplate.Triggers>
+              </ControlTemplate>
+             </Setter.Value>
+            </Setter>
+           </Style>
+           <Style TargetType="CheckBox">
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="HorizontalAlignment" Value="Center"/>
+            <Setter Property="VerticalAlignment" Value="Center"/>
+            <Setter Property="Width" Value="18"/>
+            <Setter Property="Height" Value="18"/>
+            <Setter Property="Template">
+             <Setter.Value>
+              <ControlTemplate TargetType="CheckBox">
+               <Grid Width="18" Height="18" RenderTransformOrigin="0.5,0.5">
+                <Grid.RenderTransform><ScaleTransform ScaleX="1" ScaleY="1"/></Grid.RenderTransform>
+                <Border x:Name="SelectionTile" CornerRadius="5" Background="#92252B34" BorderBrush="#9B9FA8B4" BorderThickness="1.2" RenderTransformOrigin="0.5,0.5"><Border.RenderTransform><ScaleTransform ScaleX="1" ScaleY="1"/></Border.RenderTransform>
+                 <Grid>
+                  <Path x:Name="SelectionTick" Data="M 3,8 L 6.5,11.5 L 14,4" Stroke="#171B20" StrokeThickness="2.1" StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round" Opacity="0"/>
+                 </Grid>
+                </Border>
+               </Grid>
+               <ControlTemplate.Triggers>
+                <Trigger Property="IsMouseOver" Value="True">
+                 <Setter TargetName="SelectionTile" Property="BorderBrush" Value="#E2C58E"/>
+                 <Setter TargetName="SelectionTile" Property="Background" Value="#C23C4652"/>
+                 <Trigger.EnterActions><BeginStoryboard><Storyboard>
+                  <DoubleAnimation Storyboard.TargetName="SelectionTile" Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleX)" To="1.10" Duration="0:0:0.10"/>
+                  <DoubleAnimation Storyboard.TargetName="SelectionTile" Storyboard.TargetProperty="(UIElement.RenderTransform).(ScaleTransform.ScaleY)" To="1.10" Duration="0:0:0.10"/>
+                 </Storyboard></BeginStoryboard></Trigger.EnterActions>
+                </Trigger>
+                <Trigger Property="IsChecked" Value="True">
+                 <Setter TargetName="SelectionTile" Property="Background" Value="#D9D0AE7C"/>
+                 <Setter TargetName="SelectionTile" Property="BorderBrush" Value="#F0D8A4"/>
+                 <Setter TargetName="SelectionTick" Property="Opacity" Value="1"/>
+                </Trigger>
+                <Trigger Property="IsEnabled" Value="False"><Setter TargetName="SelectionTile" Property="Opacity" Value="0.42"/></Trigger>
+               </ControlTemplate.Triggers>
+              </ControlTemplate>
+             </Setter.Value>
+            </Setter>
+           </Style>
            <Style TargetType="ListViewItem">
-            <Setter Property="Foreground" Value="#E4E4E7"/>
+            <Setter Property="Foreground" Value="#E9E6DF"/>
             <Setter Property="Background" Value="Transparent"/>
             <Setter Property="BorderThickness" Value="0"/>
-            <Setter Property="Padding" Value="5,7"/>
+            <Setter Property="Padding" Value="5,5"/>
+            <Setter Property="Margin" Value="0,1,0,2"/>
             <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
             <Setter Property="Template">
              <Setter.Value>
               <ControlTemplate TargetType="ListViewItem">
-               <Border Name="DriverRowBorder" Background="{TemplateBinding Background}"
-                       BorderBrush="#35506D" BorderThickness="0,0,0,1"
-                       Padding="{TemplateBinding Padding}">
+               <Border x:Name="DriverRowBorder" Background="#4D252A32" BorderBrush="#4D8C8068"
+                       BorderThickness="0,0,0,1" CornerRadius="9" Padding="{TemplateBinding Padding}"
+                       RenderTransformOrigin="0.5,0.5">
+                <Border.RenderTransform><ScaleTransform ScaleX="1" ScaleY="1"/></Border.RenderTransform>
                 <GridViewRowPresenter Content="{TemplateBinding Content}"
                  Columns="{Binding View.Columns, RelativeSource={RelativeSource AncestorType={x:Type ListView}}}"
                  VerticalAlignment="Center"/>
                </Border>
                <ControlTemplate.Triggers>
                 <Trigger Property="IsMouseOver" Value="True">
-                 <Setter TargetName="DriverRowBorder" Property="Background" Value="#263B52"/>
-                 <Setter Property="Foreground" Value="#F1F5F9"/>
+                 <Setter TargetName="DriverRowBorder" Property="Background" Value="#A13D4652"/>
+                 <Setter TargetName="DriverRowBorder" Property="BorderBrush" Value="#B99D70"/>
+                 <Setter Property="Foreground" Value="#FFF9ED"/>
+                 <Setter TargetName="DriverRowBorder" Property="Effect"><Setter.Value><DropShadowEffect Color="#B89A62" BlurRadius="12" ShadowDepth="0" Opacity="0.20"/></Setter.Value></Setter>
                 </Trigger>
                 <Trigger Property="IsSelected" Value="True">
-                 <Setter TargetName="DriverRowBorder" Property="Background" Value="#1E4975"/>
-                 <Setter TargetName="DriverRowBorder" Property="BorderBrush" Value="#4B83B8"/>
-                 <Setter Property="Foreground" Value="#FFFFFF"/>
+                 <Setter TargetName="DriverRowBorder" Property="Background" Value="#B347514E"/>
+                 <Setter TargetName="DriverRowBorder" Property="BorderBrush" Value="#E0C28C"/>
+                 <Setter TargetName="DriverRowBorder" Property="BorderThickness" Value="1"/>
+                 <Setter Property="Foreground" Value="#FFF9EA"/>
                 </Trigger>
                 <MultiTrigger>
-                 <MultiTrigger.Conditions>
-                  <Condition Property="IsSelected" Value="True"/>
-                  <Condition Property="IsMouseOver" Value="True"/>
-                 </MultiTrigger.Conditions>
-                 <Setter TargetName="DriverRowBorder" Property="Background" Value="#285B8E"/>
-                 <Setter Property="Foreground" Value="#FFFFFF"/>
+                 <MultiTrigger.Conditions><Condition Property="IsSelected" Value="True"/><Condition Property="IsMouseOver" Value="True"/></MultiTrigger.Conditions>
+                 <Setter TargetName="DriverRowBorder" Property="Background" Value="#D0525C57"/>
+                 <Setter TargetName="DriverRowBorder" Property="BorderBrush" Value="#F0D6A1"/>
                 </MultiTrigger>
                </ControlTemplate.Triggers>
               </ControlTemplate>
@@ -3619,11 +3876,11 @@ Write-AMRLog ("Startup catalog ready: {0} preloaded icons from local cache. Cach
               </DataTemplate>
              </GridViewColumn.CellTemplate>
             </GridViewColumn>
-            <GridViewColumn Header="Device" Width="245" DisplayMemberBinding="{Binding DeviceName}"/>
-            <GridViewColumn Header="Class" Width="105" DisplayMemberBinding="{Binding DeviceClass}"/>
-            <GridViewColumn Header="Manufacturer" Width="145" DisplayMemberBinding="{Binding Manufacturer}"/>
-            <GridViewColumn Header="Status" Width="115" DisplayMemberBinding="{Binding StatusText}"/>
-            <GridViewColumn Header="Driver Provider" Width="150" DisplayMemberBinding="{Binding DriverProvider}"/>
+            <GridViewColumn Header="Device" Width="245"><GridViewColumn.CellTemplate><DataTemplate><Border Background="#512D333C" BorderBrush="#565E6874" BorderThickness="1" CornerRadius="7" Padding="8,5" Margin="2,1"><TextBlock Text="{Binding DeviceName}" Foreground="#F3EEE4" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/></Border></DataTemplate></GridViewColumn.CellTemplate></GridViewColumn>
+            <GridViewColumn Header="Class" Width="105"><GridViewColumn.CellTemplate><DataTemplate><Border Background="#452B3945" BorderBrush="#555E788A" BorderThickness="1" CornerRadius="7" Padding="6,5" Margin="2,1"><TextBlock Text="{Binding DeviceClass}" Foreground="#DCE8F2" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/></Border></DataTemplate></GridViewColumn.CellTemplate></GridViewColumn>
+            <GridViewColumn Header="Manufacturer" Width="145"><GridViewColumn.CellTemplate><DataTemplate><Border Background="#512D333C" BorderBrush="#565E6874" BorderThickness="1" CornerRadius="7" Padding="7,5" Margin="2,1"><TextBlock Text="{Binding Manufacturer}" Foreground="#E7E2D8" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/></Border></DataTemplate></GridViewColumn.CellTemplate></GridViewColumn>
+            <GridViewColumn Header="Status" Width="115"><GridViewColumn.CellTemplate><DataTemplate><Border Background="#583A463F" BorderBrush="#657B8B70" BorderThickness="1" CornerRadius="7" Padding="7,5" Margin="2,1"><TextBlock Text="{Binding StatusText}" Foreground="#DCEBDD" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/></Border></DataTemplate></GridViewColumn.CellTemplate></GridViewColumn>
+            <GridViewColumn Header="Driver Provider" Width="150"><GridViewColumn.CellTemplate><DataTemplate><Border Background="#512D333C" BorderBrush="#565E6874" BorderThickness="1" CornerRadius="7" Padding="7,5" Margin="2,1"><TextBlock Text="{Binding DriverProvider}" Foreground="#E5E8ED" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/></Border></DataTemplate></GridViewColumn.CellTemplate></GridViewColumn>
             <GridViewColumn Header="Installed Version" Width="135" DisplayMemberBinding="{Binding DriverVersion}"/>
             <GridViewColumn Header="Driver Date" Width="95" DisplayMemberBinding="{Binding DriverDate}"/>
             <GridViewColumn Header="Update Check" Width="190" DisplayMemberBinding="{Binding UpdateStatus}"/>
@@ -3642,25 +3899,27 @@ Write-AMRLog ("Startup catalog ready: {0} preloaded icons from local cache. Cach
      <TabItem Header="Startups">
       <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Padding="14,10,14,18">
        <StackPanel>
-        <Border Background="#80182638" BorderBrush="#503A526C" BorderThickness="1" CornerRadius="16" Padding="18" Margin="2,2,2,12">
+        <Border Background="{DynamicResource ActivationOuterGlassBrush}" BorderBrush="{DynamicResource ActivationGlassEdgeBrush}" BorderThickness="1" CornerRadius="19" Padding="20" Margin="2,2,2,14">
+         <Border.Effect><DropShadowEffect Color="#000000" BlurRadius="22" ShadowDepth="6" Opacity="0.34"/></Border.Effect>
          <Grid>
           <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-          <StackPanel Grid.Column="0">
-           <TextBlock Text="STARTUP MANAGER" Foreground="#D9BD8B" FontSize="10" FontWeight="Bold"/>
-           <TextBlock Text="Startup apps" Foreground="#F4F7FB" FontSize="23" FontWeight="Bold" Margin="0,5,0,3"/>
-           <TextBlock Text="" Foreground="#AFC4DA" FontSize="1" Visibility="Collapsed" TextWrapping="Wrap"/>
+          <StackPanel Grid.Column="0" VerticalAlignment="Center">
+           <TextBlock Text="STARTUP MANAGER  ·  SYSTEM CONTROL" Foreground="#D9BD8B" FontSize="9" FontWeight="Bold" />
+           <TextBlock Text="Startup apps" Foreground="#F8F2E7" FontSize="25" FontWeight="Bold" Margin="0,5,0,3"/>
+           <TextBlock Text="Manage what launches with Windows" Foreground="#B8C3D0" FontSize="11" Margin="1,1,0,0"/>
           </StackPanel>
-          <Button Name="AMRStartupRefreshBtn" Grid.Column="1" Content="↻  Refresh" Width="112" Height="36" VerticalAlignment="Center" Background="#263F59" Foreground="#F4F7FB" BorderBrush="#6685A4" BorderThickness="1" FontSize="11" FontWeight="SemiBold" Cursor="Hand"/>
+          <Button Name="AMRStartupRefreshBtn" Grid.Column="1" Content="↻  Refresh" Width="124" Height="40" VerticalAlignment="Center" Background="{DynamicResource ActivationInnerGlassBrush}" Foreground="#F4EAD5" BorderBrush="{DynamicResource ActivationGlassEdgeBrush}" BorderThickness="1" FontSize="11" FontWeight="SemiBold" Cursor="Hand" Padding="14,0"/>
          </Grid>
         </Border>
-        <Grid Margin="3,0,3,10">
+        <Grid Margin="3,0,3,12">
          <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
          <StackPanel>
           <TextBlock Name="AMRStartupSummary" Text="Discovering startup applications…" Foreground="#E5EDF6" FontSize="12" FontWeight="SemiBold"/>
           <TextBlock Name="AMRStartupHint" Text="" Foreground="#829BB3" FontSize="1" Visibility="Collapsed" Margin="0" TextWrapping="Wrap"/>
          </StackPanel>
-         <Border Grid.Column="1" Background="#203B4A" BorderBrush="#3C6B78" BorderThickness="1" CornerRadius="10" Padding="10,5" VerticalAlignment="Center">
-          <TextBlock Text="LIVE INVENTORY" Foreground="#8ED8C7" FontSize="9" FontWeight="Bold"/>
+         <Border Grid.Column="1" Background="#402D665A" BorderBrush="#806CC7A9" BorderThickness="1" CornerRadius="12" Padding="11,6" VerticalAlignment="Center">
+          <Border.Effect><DropShadowEffect Color="#36B99A" BlurRadius="10" ShadowDepth="0" Opacity="0.18"/></Border.Effect>
+          <TextBlock Text="●  LIVE INVENTORY" Foreground="#9BE2C9" FontSize="9" FontWeight="Bold"/>
          </Border>
         </Grid>
         <StackPanel Name="AMRStartupAppsHost"/>
@@ -3675,15 +3934,119 @@ Write-AMRLog ("Startup catalog ready: {0} preloaded icons from local cache. Cach
       </ScrollViewer>
      </TabItem>
      <TabItem Header="Update">
-      <Grid Background="#18181B" Margin="10">
-       <StackPanel VerticalAlignment="Top" Margin="12">
-        <TextBlock Text="UPDATE CENTER" FontSize="24" FontWeight="Bold" Foreground="#F8FAFC"/>
-        <TextBlock Text="Windows and driver update management will be added here." Foreground="#94A3B8" FontSize="12" TextWrapping="Wrap" Margin="0,6,0,0"/>
-        <Border Background="#1B2432" BorderBrush="#334155" BorderThickness="1" CornerRadius="10" Padding="14" Margin="0,18,0,0" MaxWidth="620" HorizontalAlignment="Left">
-         <TextBlock Text="Update Center is reserved for the upcoming update features." Foreground="#CBD5E1" FontSize="12" TextWrapping="Wrap"/>
+      <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Background="#17191D">
+       <Grid Margin="16,14,16,20" Opacity="0" RenderTransformOrigin="0.5,0.5">
+        <Grid.RenderTransform><TranslateTransform Y="9"/></Grid.RenderTransform>
+        <Grid.Triggers>
+         <EventTrigger RoutedEvent="FrameworkElement.Loaded"><BeginStoryboard><Storyboard>
+          <DoubleAnimation Storyboard.TargetProperty="Opacity" From="0" To="1" Duration="0:0:0.28"/>
+          <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.Y)" From="9" To="0" Duration="0:0:0.30" DecelerationRatio="0.82"/>
+         </Storyboard></BeginStoryboard></EventTrigger>
+        </Grid.Triggers>
+        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+        <!-- Hero header -->
+        <Border Grid.Row="0" Background="{DynamicResource ActivationOuterGlassBrush}" BorderBrush="{DynamicResource ActivationGlassEdgeBrush}" BorderThickness="1" CornerRadius="16" Padding="20" Margin="0,0,0,13">
+         <Border.Effect><DropShadowEffect Color="#000000" BlurRadius="18" ShadowDepth="5" Opacity="0.30"/></Border.Effect>
+         <Grid>
+          <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+          <StackPanel VerticalAlignment="Center">
+           <TextBlock Text="WINDOWS UPDATE CENTER" FontSize="10" FontWeight="Bold" Foreground="#D9BD8B"/>
+           <TextBlock Text="Windows Update Center" FontSize="25" FontWeight="Bold" Foreground="#F1EEE7" Margin="0,5,0,3"/>
+           <TextBlock Text="A clearer control room for update status, profiles, downloads, installation and recovery." Foreground="#B7B5AE" FontSize="11" TextWrapping="Wrap" MaxWidth="690"/>
+           <ProgressBar Name="AMRUpdateProgress" Height="3" Margin="0,12,0,0" IsIndeterminate="True" Visibility="Collapsed" Background="#35383D" Foreground="#B89A62" BorderThickness="0"/>
+          </StackPanel>
+          <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center" Margin="14,0,0,0">
+           <Button Name="AMRUpdateRefreshBtn" Content="↻  Refresh Status" MinWidth="128" Height="38" Margin="0,0,8,0" Style="{StaticResource AMRUpdateGlassButtonStyle}"/>
+           <Button Name="AMRUpdateSettingsBtn" Content="Windows Settings  ↗" MinWidth="146" Height="38" Style="{StaticResource AMRUpdateGlassButtonStyle}"/>
+          </StackPanel>
+         </Grid>
         </Border>
-       </StackPanel>
-      </Grid>
+
+        <!-- Live system status tiles -->
+        <Grid Grid.Row="1" Margin="-3,0,-3,10">
+         <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+         <Border Grid.Column="0" Background="{DynamicResource ActivationInnerGlassBrush}" BorderBrush="{DynamicResource ActivationGlassEdgeBrush}" BorderThickness="1" CornerRadius="13" Padding="14" Margin="3">
+          <StackPanel><TextBlock Text="UPDATE SERVICES" Foreground="#D9BD8B" FontSize="9" FontWeight="Bold"/><TextBlock Name="AMRUpdateServiceValue" Text="Checking…" Foreground="#F1EEE7" FontSize="17" FontWeight="Bold" Margin="0,6,0,2"/><TextBlock Name="AMRUpdateServiceDetail" Text="Windows Update / BITS" Foreground="#B7B5AE" FontSize="10"/></StackPanel>
+         </Border>
+         <Border Grid.Column="1" Background="{DynamicResource ActivationInnerGlassBrush}" BorderBrush="{DynamicResource ActivationGlassEdgeBrush}" BorderThickness="1" CornerRadius="13" Padding="14" Margin="3">
+          <StackPanel><TextBlock Text="LAST SUCCESSFUL UPDATE" Foreground="#D9BD8B" FontSize="9" FontWeight="Bold"/><TextBlock Name="AMRUpdateLastValue" Text="Not available" Foreground="#F1EEE7" FontSize="15" FontWeight="Bold" Margin="0,6,0,2"/><TextBlock Text="Local Windows update history" Foreground="#B7B5AE" FontSize="10"/></StackPanel>
+         </Border>
+         <Border Grid.Column="2" Background="{DynamicResource ActivationInnerGlassBrush}" BorderBrush="{DynamicResource ActivationGlassEdgeBrush}" BorderThickness="1" CornerRadius="13" Padding="14" Margin="3">
+          <StackPanel><TextBlock Text="RESTART STATUS" Foreground="#D9BD8B" FontSize="9" FontWeight="Bold"/><TextBlock Name="AMRUpdateRebootValue" Text="Checking…" Foreground="#F1EEE7" FontSize="17" FontWeight="Bold" Margin="0,6,0,2"/><TextBlock Text="Pending servicing / update reboot" Foreground="#B7B5AE" FontSize="10"/></StackPanel>
+         </Border>
+         <Border Grid.Column="3" Background="{DynamicResource ActivationInnerGlassBrush}" BorderBrush="{DynamicResource ActivationGlassEdgeBrush}" BorderThickness="1" CornerRadius="13" Padding="14" Margin="3">
+          <StackPanel><TextBlock Text="ACTIVE PROFILE" Foreground="#D9BD8B" FontSize="9" FontWeight="Bold"/><TextBlock Name="AMRUpdateProfileValue" Text="Windows default / unknown" Foreground="#F1EEE7" FontSize="14" FontWeight="Bold" Margin="0,6,0,2"/><TextBlock Name="AMRUpdateEditionValue" Text="Detecting Windows edition…" Foreground="#B7B5AE" FontSize="10" TextWrapping="Wrap"/></StackPanel>
+         </Border>
+        </Grid>
+
+        <!-- Profile cards -->
+        <Grid Grid.Row="2" Margin="-3,0,-3,12">
+         <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+         <Border Grid.Column="0" Background="{DynamicResource ActivationOuterGlassBrush}" BorderBrush="#65A997" BorderThickness="1.3" CornerRadius="15" Padding="17" Margin="3">
+          <Border.Effect><DropShadowEffect Color="#000000" BlurRadius="13" ShadowDepth="3" Opacity="0.22"/></Border.Effect>
+          <StackPanel><TextBlock Text="✦  RECOMMENDED" Foreground="#91E0C9" FontSize="12" FontWeight="Bold"/><TextBlock Text="Balanced protection" Foreground="#F1EEE7" FontSize="17" FontWeight="Bold" Margin="0,7,0,3"/><TextBlock Text="Feature updates deferred for 365 days, quality updates for 4 days, notify before install and exclude drivers from quality updates." Foreground="#C9C5BA" FontSize="10" TextWrapping="Wrap" MinHeight="54" Margin="0,0,0,13"/><Button Name="AMRUpdateRecommendedBtn" Content="Apply Recommended" Height="37" Background="#3D665D" Foreground="#F4F1E8" BorderBrush="#8BC9B6" Style="{StaticResource AMRUpdateGlassButtonStyle}"/></StackPanel>
+         </Border>
+         <Border Grid.Column="1" Background="{DynamicResource ActivationOuterGlassBrush}" BorderBrush="{DynamicResource ActivationGlassEdgeBrush}" BorderThickness="1" CornerRadius="15" Padding="17" Margin="3">
+          <StackPanel><TextBlock Text="WINDOWS DEFAULT" Foreground="#D9BD8B" FontSize="12" FontWeight="Bold"/><TextBlock Text="Return control to Windows" Foreground="#F1EEE7" FontSize="17" FontWeight="Bold" Margin="0,7,0,3"/><TextBlock Text="Remove only policy values managed by AMR profiles. Existing settings are backed up first; Windows Update services are not forcibly changed." Foreground="#C9C5BA" FontSize="10" TextWrapping="Wrap" MinHeight="54" Margin="0,0,0,13"/><Button Name="AMRUpdateDefaultBtn" Content="Restore Windows Defaults" Height="37" Background="#45464A" Foreground="#F4F1E8" BorderBrush="#A39B89" Style="{StaticResource AMRUpdateGlassButtonStyle}"/></StackPanel>
+         </Border>
+         <Border Grid.Column="2" Background="{DynamicResource ActivationOuterGlassBrush}" BorderBrush="#A8795D" BorderThickness="1.2" CornerRadius="15" Padding="17" Margin="3">
+          <StackPanel><TextBlock Text="ADVANCED PROFILE" Foreground="#E7B18E" FontSize="12" FontWeight="Bold"/><TextBlock Text="Restrict automatic updates" Foreground="#F1EEE7" FontSize="17" FontWeight="Bold" Margin="0,7,0,3"/><TextBlock Text="Restricts automatic update behavior without disabling servicing components. Manual checks remain possible. Security risk applies while restrictions are active." Foreground="#C9C5BA" FontSize="10" TextWrapping="Wrap" MinHeight="54" Margin="0,0,0,13"/><Button Name="AMRUpdateRestrictBtn" Content="Restrict Automatic Updates" Height="37" Background="#684A3B" Foreground="#FFF0E5" BorderBrush="#C08B6C" Style="{StaticResource AMRUpdateGlassButtonStyle}"/></StackPanel>
+         </Border>
+        </Grid>
+
+        <!-- Update inventory and actions -->
+        <Border Grid.Row="3" Background="{DynamicResource ActivationOuterGlassBrush}" BorderBrush="{DynamicResource ActivationGlassEdgeBrush}" BorderThickness="1" CornerRadius="15" Padding="15" Margin="0,0,0,12">
+         <Border.Effect><DropShadowEffect Color="#000000" BlurRadius="16" ShadowDepth="4" Opacity="0.25"/></Border.Effect>
+         <Grid>
+          <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="190"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+          <Grid Grid.Row="0" Margin="1,0,1,10">
+           <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+           <StackPanel><TextBlock Text="UPDATE LIBRARY" Foreground="#D9BD8B" FontSize="9" FontWeight="Bold"/><TextBlock Text="Available Windows updates" Foreground="#F1EEE7" FontSize="19" FontWeight="Bold" Margin="0,3,0,2"/><TextBlock Name="AMRUpdateListSummary" Text="Check Microsoft Update to discover available updates." Foreground="#B7B5AE" FontSize="10" TextWrapping="Wrap"/></StackPanel>
+           <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+            <Button Name="AMRUpdateCheckBtn" Content="⌕  Check for Updates" MinWidth="148" Height="37" Background="#365D67" Foreground="#EAF7F7" BorderBrush="#83BFC7" Margin="0,0,8,0" Style="{StaticResource AMRUpdateGlassButtonStyle}"/>
+            <Button Name="AMRUpdateHistoryBtn" Content="◷  History" MinWidth="96" Height="37" Style="{StaticResource AMRUpdateGlassButtonStyle}"/>
+           </StackPanel>
+          </Grid>
+          <Border Grid.Row="1" Background="{DynamicResource ActivationInsetGlassBrush}" BorderBrush="#756C5D" BorderThickness="1" CornerRadius="9" Padding="8" Margin="0,0,0,8">
+           <TextBlock Text="Select one or more updates below. Download and installation are always explicit actions; AMR will not silently install updates." Foreground="#C9C5BA" FontSize="10" TextWrapping="Wrap"/>
+          </Border>
+          <Border Grid.Row="2" Background="#B51B1D21" BorderBrush="#766D5D" BorderThickness="1" CornerRadius="12" Padding="3" ClipToBounds="True">
+           <ListView Name="AMRUpdateResultsList" Background="Transparent" Foreground="#E5E0D6" BorderThickness="0" SelectionMode="Extended" MinHeight="150" ScrollViewer.VerticalScrollBarVisibility="Auto" ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+            <ListView.Resources>
+             <Style TargetType="GridViewColumnHeader"><Setter Property="Background" Value="#403D37"/><Setter Property="Foreground" Value="#E8DCC3"/><Setter Property="BorderBrush" Value="#756C5D"/><Setter Property="BorderThickness" Value="0,0,0,1"/><Setter Property="Padding" Value="8,7"/><Setter Property="FontWeight" Value="Bold"/><Setter Property="FontSize" Value="10"/><Setter Property="Template"><Setter.Value><ControlTemplate TargetType="GridViewColumnHeader"><Border x:Name="HeaderSurface" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="5" Padding="2"><ContentPresenter HorizontalAlignment="Left" VerticalAlignment="Center" Margin="6,1"/></Border><ControlTemplate.Triggers><Trigger Property="IsMouseOver" Value="True"><Setter TargetName="HeaderSurface" Property="Background" Value="#484238"/><Setter TargetName="HeaderSurface" Property="BorderBrush" Value="#A58F68"/><Setter Property="Foreground" Value="#F3E8D2"/></Trigger><Trigger Property="IsPressed" Value="True"><Setter TargetName="HeaderSurface" Property="Background" Value="#51483B"/></Trigger></ControlTemplate.Triggers></ControlTemplate></Setter.Value></Setter></Style>
+             <Style TargetType="ListViewItem"><Setter Property="Foreground" Value="#E5E0D6"/><Setter Property="Background" Value="#25272B"/><Setter Property="BorderBrush" Value="#393B3F"/><Setter Property="BorderThickness" Value="1"/><Setter Property="Padding" Value="6,5"/><Setter Property="Margin" Value="1,2"/><Setter Property="HorizontalContentAlignment" Value="Stretch"/><Setter Property="Template"><Setter.Value><ControlTemplate TargetType="ListViewItem"><Border x:Name="RowSurface" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="7" Padding="{TemplateBinding Padding}"><GridViewRowPresenter/></Border><ControlTemplate.Triggers><Trigger Property="IsMouseOver" Value="True"><Setter TargetName="RowSurface" Property="Background" Value="#393832"/><Setter TargetName="RowSurface" Property="BorderBrush" Value="#8F8064"/></Trigger><Trigger Property="IsSelected" Value="True"><Setter TargetName="RowSurface" Property="Background" Value="#51483B"/><Setter TargetName="RowSurface" Property="BorderBrush" Value="#B49A70"/><Setter Property="Foreground" Value="#F7F0E5"/></Trigger></ControlTemplate.Triggers></ControlTemplate></Setter.Value></Setter></Style>
+            </ListView.Resources>
+           <ListView.View><GridView>
+            <GridViewColumn Header="Update" Width="430" DisplayMemberBinding="{Binding Title}"/>
+            <GridViewColumn Header="KB" Width="100" DisplayMemberBinding="{Binding KB}"/>
+            <GridViewColumn Header="Size" Width="85" DisplayMemberBinding="{Binding SizeText}"/>
+            <GridViewColumn Header="Downloaded" Width="95" DisplayMemberBinding="{Binding DownloadedText}"/>
+           </GridView></ListView.View>
+           </ListView>
+          </Border>
+          <Grid Grid.Row="3" Margin="0,11,0,0">
+           <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+           <TextBlock Name="AMRUpdateActionStatus" Text="Ready. Background update operations are available; nothing installs without your selection." Foreground="#C9C5BA" FontSize="10" VerticalAlignment="Center" TextWrapping="Wrap" Margin="0,0,12,0"/>
+           <StackPanel Grid.Column="1" Orientation="Horizontal">
+            <Button Name="AMRUpdateDownloadBtn" Content="⇩  Download Selected" MinWidth="145" Height="37" Background="#365B68" Foreground="#EAF7F7" BorderBrush="#83BFC7" Margin="0,0,8,0" Style="{StaticResource AMRUpdateGlassButtonStyle}"/>
+            <Button Name="AMRUpdateInstallBtn" Content="✓  Install Selected" MinWidth="135" Height="37" Background="#3D665D" Foreground="#F1F7F0" BorderBrush="#8BC9A8" Style="{StaticResource AMRUpdateGlassButtonStyle}"/>
+           </StackPanel>
+          </Grid>
+         </Grid>
+        </Border>
+
+        <!-- Recovery footer -->
+        <Border Grid.Row="4" Background="{DynamicResource ActivationInnerGlassBrush}" BorderBrush="{DynamicResource ActivationGlassEdgeBrush}" BorderThickness="1" CornerRadius="13" Padding="13,11" Margin="0,0,0,2">
+         <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+          <StackPanel VerticalAlignment="Center"><TextBlock Text="RECOVERY &amp; DIAGNOSTICS" Foreground="#D9BD8B" FontSize="10" FontWeight="Bold"/><TextBlock Text="Profile backups are saved locally before policy changes. Repair actions are explicit and logged." Foreground="#B7B5AE" FontSize="10" TextWrapping="Wrap" Margin="0,3,10,0"/></StackPanel>
+          <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+           <Button Name="AMRUpdateRestoreBackupBtn" Content="↶  Undo Last Profile" MinWidth="142" Height="36" Margin="0,0,8,0" Style="{StaticResource AMRUpdateGlassButtonStyle}"/>
+           <Button Name="AMRUpdateRepairBtn" Content="⚙  Repair Update Services" MinWidth="166" Height="36" Background="#604C3B" Foreground="#FFF2E4" BorderBrush="#B99A62" Style="{StaticResource AMRUpdateGlassButtonStyle}"/>
+          </StackPanel>
+         </Grid>
+        </Border>
+       </Grid>
+      </ScrollViewer>
      </TabItem>
      <TabItem Header="Backups">
       <Border BorderThickness="1" CornerRadius="14" Padding="10" Margin="6,4,6,6">
@@ -3738,7 +4101,7 @@ Write-AMRLog ("Startup catalog ready: {0} preloaded icons from local cache. Cach
            </EventTrigger>
           </StackPanel.Triggers>
           <Button Name="BackupCenterChoiceBtn" Content="💾  Backup Center" Width="142" Height="29" Margin="0,0,8,0" Padding="9,3" FontSize="11" FontWeight="SemiBold" Background="#263646" Foreground="#E7EAF0" BorderBrush="#B89A62" BorderThickness="1" Cursor="Hand"/>
-          <Button Name="DriverBackupChoiceBtn" Content="🛡  Driver Backup" Width="142" Height="29" Padding="9,3" FontSize="11" FontWeight="SemiBold" Background="#263646" Foreground="#E7EAF0" BorderBrush="#34465B" BorderThickness="1" Cursor="Hand"/>
+          <Button Name="DriverBackupChoiceBtn" Content="🛡  Driver Backup" Width="142" Height="29" Padding="9,3" FontSize="11" FontWeight="SemiBold" Background="#303D35" Foreground="#E7EFE8" BorderBrush="#40564A" BorderThickness="1" Cursor="Hand"/>
          </StackPanel>
          </Grid>
         </Border>
@@ -3860,22 +4223,86 @@ Write-AMRLog ("Startup catalog ready: {0} preloaded icons from local cache. Cach
       </Grid>
      </ScrollViewer>
        </TabItem>
-       <TabItem Header="Driver Backup" MinWidth="184" Height="34" Padding="14,4" FontSize="12" FontWeight="SemiBold" Background="#202A35" Foreground="#E7EAF0" BorderBrush="#B89A62">
-        <ScrollViewer VerticalScrollBarVisibility="Auto" Padding="16,12,16,18">
-         <StackPanel>
-          <TextBlock Text="🛡 DRIVER BACKUP" FontSize="29" FontWeight="Bold" Foreground="#E7EAF0" Margin="2,2,0,5"/>
-          <TextBlock Text="A dedicated recovery point for driver changes. Create and verify a restore point manually, then use Smart Restore to target that exact AMR checkpoint." Foreground="#94A3B8" FontSize="12" TextWrapping="Wrap" Margin="2,0,0,14"/>
-          <Border Background="#202A35" BorderBrush="#B89A62" BorderThickness="1" CornerRadius="12" Padding="18" MaxWidth="900" HorizontalAlignment="Left">
+       <TabItem Header="Driver Backup" MinWidth="184" Height="34" Padding="14,4" FontSize="12" FontWeight="SemiBold" Background="#252B28" Foreground="#E9EEE9" BorderBrush="#789987">
+        <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" VerticalContentAlignment="Top" HorizontalContentAlignment="Stretch" Background="#171B21" Padding="18,8,18,20">
+         <StackPanel Name="DriverBackupRoot" VerticalAlignment="Top" Margin="0" Opacity="0">
+          <StackPanel.RenderTransform><TranslateTransform Y="8"/></StackPanel.RenderTransform>
+          <StackPanel.Triggers>
+           <EventTrigger RoutedEvent="FrameworkElement.Loaded">
+            <BeginStoryboard>
+             <Storyboard>
+              <DoubleAnimation Storyboard.TargetProperty="Opacity" From="0" To="1" Duration="0:0:0.24"/>
+              <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.Y)" From="8" To="0" Duration="0:0:0.24" DecelerationRatio="0.86"/>
+             </Storyboard>
+            </BeginStoryboard>
+           </EventTrigger>
+          </StackPanel.Triggers>
+          <Border Background="#252B33" BorderBrush="#46515F" BorderThickness="1" CornerRadius="16" Padding="22,17" Margin="0,0,0,12">
+           <Grid>
+            <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+            <StackPanel Grid.Column="0" VerticalAlignment="Center">
+             <TextBlock Text="DRIVER BACKUP" FontSize="26" FontWeight="Bold" Foreground="#A8C5AE" Margin="0,0,0,4"/>
+             <TextBlock Text="Create a Windows recovery checkpoint before driver changes, then return to that exact checkpoint when needed." Foreground="#C1CAD4" FontSize="12" TextWrapping="Wrap" MaxWidth="760"/>
+            </StackPanel>
+            <Border Grid.Column="1" Background="#303945" BorderBrush="#566272" BorderThickness="1" CornerRadius="18" Padding="12,7" VerticalAlignment="Center" Margin="18,0,0,0">
+             <TextBlock Text="RECOVERY CENTER" Foreground="#D4DCE5" FontSize="10" FontWeight="Bold"/>
+            </Border>
+           </Grid>
+          </Border>
+          <Grid Margin="0,0,0,12">
+           <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+           <Border Grid.Column="0" Background="#222831" BorderBrush="#46515F" BorderThickness="1" CornerRadius="15" Padding="20" Margin="0,0,7,0">
+            <StackPanel>
+             <TextBlock Text="01  ·  CREATE A CHECKPOINT" FontSize="10" FontWeight="Bold" Foreground="#D0B98B" Margin="0,0,0,9"/>
+             <TextBlock Text="Create Restore Point" FontSize="19" FontWeight="SemiBold" Foreground="#F0F3F6" Margin="0,0,0,6"/>
+             <TextBlock Text="Save the current Windows system state before changing drivers. AMR enables System Protection on the Windows drive and verifies the exact checkpoint." Foreground="#B9C3CE" FontSize="11" TextWrapping="Wrap" MinHeight="48" Margin="0,0,0,15"/>
+             <Button Name="DriverCreateRestorePointBtn" Content="＋  Create Restore Point" Height="42" MinWidth="205" HorizontalAlignment="Left" Background="#805E6B78" Foreground="#F4F7FA" BorderBrush="#D0DAE4" BorderThickness="1" Padding="17,8" FontSize="12" FontWeight="Bold" Cursor="Hand" ToolTip="Enable System Protection, request a Windows restore point, and verify a new or explicitly reused checkpoint"/>
+            </StackPanel>
+           </Border>
+           <Border Grid.Column="1" Background="#222831" BorderBrush="#46515F" BorderThickness="1" CornerRadius="15" Padding="20" Margin="7,0,0,0">
+            <StackPanel>
+             <TextBlock Text="02  ·  RECOVER YOUR SYSTEM" FontSize="10" FontWeight="Bold" Foreground="#AFC0D1" Margin="0,0,0,9"/>
+             <TextBlock Text="Smart Restore" FontSize="19" FontWeight="SemiBold" Foreground="#F0F3F6" Margin="0,0,0,6"/>
+             <TextBlock Text="Return Windows to the exact verified checkpoint saved here. If Windows blocks a new point due to its frequency limit, AMR may clearly label and reuse a recent existing checkpoint. It never silently substitutes another point." Foreground="#B9C3CE" FontSize="11" TextWrapping="Wrap" MinHeight="48" Margin="0,0,0,15"/>
+             <Button Name="DriverSmartRestoreBtn" IsEnabled="True" Content="↶  Smart Restore" Height="42" MinWidth="185" HorizontalAlignment="Left" Background="#805E6B78" Foreground="#F4F7FA" BorderBrush="#D0DAE4" BorderThickness="1" Padding="17,8" FontSize="12" FontWeight="Bold" Cursor="Hand" ToolTip="Restore Windows using the exact verified Windows checkpoint recorded by Driver Backup"/>
+            </StackPanel>
+           </Border>
+          </Grid>
+          <Border Name="DriverRestoreProgressPanel" Background="#222831" BorderBrush="#657487" BorderThickness="1" CornerRadius="12" Padding="16,13" Margin="0,0,0,12" Visibility="Collapsed">
            <StackPanel>
-            <TextBlock Text="AMR DRIVER SAFETY POINT" FontSize="14" FontWeight="Bold" Foreground="#B89A62" Margin="0,0,0,8"/>
-            <TextBlock Text="AMR does not create restore points automatically during driver installation. Create one when you choose. Smart Restore verifies and targets the exact AMR restore point saved by this utility; it will not silently choose another restore point. AMR also attempts to export the current OEM driver package before replacing it." Foreground="#CBD5E1" FontSize="12" TextWrapping="Wrap" Margin="0,0,0,14"/>
-            <WrapPanel>
-             <Button Name="DriverCreateRestorePointBtn" Content="Create Restore Point" Background="#B89A62" Foreground="#17212B" BorderBrush="#B89A62" Padding="15,9" FontSize="12" Margin="0,0,9,8"/>
-             <Button Name="DriverSmartRestoreBtn" Content="Smart Restore" IsEnabled="False" Background="#263646" Foreground="#E7EDF3" BorderBrush="#B89A62" Padding="15,9" FontSize="12" Margin="0,0,9,8"/>
-            </WrapPanel>
-            <TextBlock Name="DriverRestorePointStatus" Text="Restore point status: checking Windows System Protection…" Foreground="#94A3B8" FontSize="11" TextWrapping="Wrap" Margin="0,6,0,0"/>
+            <Grid Margin="0,0,0,8">
+             <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+             <TextBlock Text="RESTORE POINT ACTIVITY" Foreground="#D0B98B" FontSize="10" FontWeight="Bold"/>
+             <TextBlock Grid.Column="1" Text="LIVE STATUS" Foreground="#AFC0D1" FontSize="9" FontWeight="Bold"/>
+            </Grid>
+            <Grid Margin="0,0,0,5">
+             <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+             <TextBlock Text="LIVE OPERATION STAGE · WINDOWS DOES NOT REPORT A PERCENTAGE" Foreground="#AFC0D1" FontSize="9" FontWeight="SemiBold"/>
+             <TextBlock Name="DriverRestorePointPercent" Grid.Column="1" Text="Ready" Foreground="#D5DEE7" FontSize="10" FontWeight="Bold"/>
+            </Grid>
+            <ProgressBar Name="DriverRestorePointProgressBar" Height="6" IsIndeterminate="True" Minimum="0" Maximum="100" Value="0" Background="#3A4451" Foreground="#B8C7D6" BorderThickness="0"/>
+            <Grid Margin="0,9,0,0">
+             <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+             <TextBlock Name="DriverRestorePointProgressText" Text="Preparing Windows System Restore…" Foreground="#E1E7ED" FontSize="11" TextWrapping="Wrap"/>
+             <TextBlock Name="DriverRestorePointElapsed" Grid.Column="1" Text="Elapsed 00:00" Foreground="#B8C5D3" FontSize="10" FontWeight="SemiBold" Margin="12,0,0,0" VerticalAlignment="Center"/>
+             <TextBlock Name="DriverRestorePointEstimate" Grid.Column="2" Text="Waiting for Windows" Foreground="#AFC0D1" FontSize="9" Margin="10,0,10,0" VerticalAlignment="Center"/>
+             <Button Name="DriverRestorePointCancelBtn" Grid.Column="3" Content="Cancel" Visibility="Collapsed" IsEnabled="False" Height="28" MinWidth="72" Padding="12,3" FontSize="10" FontWeight="SemiBold" Background="#3B3032" Foreground="#F0DADB" BorderBrush="#805B60" BorderThickness="1" Cursor="Hand" ToolTip="Stop the AMR worker. Windows may still finish a native System Restore request already accepted."/>
+            </Grid>
            </StackPanel>
           </Border>
+          <Border Background="#252C35" BorderBrush="#46515F" BorderThickness="1" CornerRadius="12" Padding="16,14" Margin="0,0,0,10">
+           <StackPanel>
+            <TextBlock Text="DRIVER SAFETY POINT" FontSize="12" FontWeight="Bold" Foreground="#D0B98B" Margin="0,0,0,6"/>
+            <TextBlock Text="Restore points are not created automatically during driver installation. Create one whenever you choose. Smart Restore verifies and targets the exact checkpoint saved here; it will not silently choose another restore point. Before replacing a driver, this utility also attempts to export the current OEM driver package." Foreground="#C1CAD4" FontSize="11" TextWrapping="Wrap"/>
+           </StackPanel>
+          </Border>
+          <Border Background="#222831" BorderBrush="#46515F" BorderThickness="1" CornerRadius="11" Padding="14,12">
+           <StackPanel>
+            <TextBlock Text="RESTORE POINT STATUS" Foreground="#D0B98B" FontSize="10" FontWeight="Bold" Margin="0,0,0,5"/>
+            <TextBlock Name="DriverRestorePointStatus" Text="Checking Windows System Protection and saved recovery point…" Foreground="#DCE3EA" FontSize="11" TextWrapping="Wrap"/>
+           </StackPanel>
+          </Border>
+          <TextBlock Text="Windows does not expose a reliable percentage or a safe cancel operation once it begins creating a restore point. AMR displays the actual worker stage, waits for Windows to return, then verifies the exact checkpoint before Smart Restore can use it." Foreground="#929EAC" FontSize="10" TextWrapping="Wrap" Margin="2,9,2,0"/>
          </StackPanel>
         </ScrollViewer>
        </TabItem>
@@ -4136,17 +4563,85 @@ Write-AMRLog ("Startup catalog ready: {0} preloaded icons from local cache. Cach
             <Border Width="12" Height="2" CornerRadius="1" Background="#3B82F6" VerticalAlignment="Center" Margin="0,0,5,0"/>
             <TextBlock Text="{Binding CategoryNumber}" Foreground="#8DBBFA" FontSize="9.5" FontWeight="SemiBold" VerticalAlignment="Center" Margin="0,0,0,0"/>
            </StackPanel>
-          <Border Grid.Row="1" Background="#27272A" BorderBrush="#3F3F46" BorderThickness="1" CornerRadius="9" HorizontalAlignment="Stretch" VerticalAlignment="Bottom">
+          <Border x:Name="SoftwareCardSurface" Grid.Row="1" Background="#FF27272A" BorderBrush="#FF3F3F46" BorderThickness="1" CornerRadius="9" HorizontalAlignment="Stretch" VerticalAlignment="Bottom" RenderTransformOrigin="0.5,0.5">
            <Border.Style>
             <Style TargetType="Border">
              <Setter Property="Height" Value="60"/>
              <Setter Property="Padding" Value="5,3"/>
              <Setter Property="Margin" Value="4,2"/>
+             <Setter Property="RenderTransform">
+              <Setter.Value><TranslateTransform X="0" Y="0"/></Setter.Value>
+             </Setter>
+             <Setter Property="Effect">
+              <Setter.Value><DropShadowEffect Color="#000000" BlurRadius="19" ShadowDepth="0" Opacity="0.20"/></Setter.Value>
+             </Setter>
              <Style.Triggers>
               <DataTrigger Binding="{Binding IsUniversalInventory}" Value="True">
                <Setter Property="Padding" Value="5,3"/>
                <Setter Property="Margin" Value="4,2"/>
                <Setter Property="Height" Value="60"/>
+              </DataTrigger>
+              <Trigger Property="IsMouseOver" Value="True">
+               <Trigger.EnterActions>
+                <BeginStoryboard>
+                 <Storyboard>
+                  <ColorAnimation Storyboard.TargetProperty="(Border.Background).(SolidColorBrush.Color)" To="#FF3B4652" Duration="0:0:0.16">
+                   <ColorAnimation.EasingFunction><CubicEase EasingMode="EaseOut"/></ColorAnimation.EasingFunction>
+                  </ColorAnimation>
+                  <ColorAnimation Storyboard.TargetProperty="(Border.BorderBrush).(SolidColorBrush.Color)" To="#FFFFE0AD" Duration="0:0:0.18">
+                   <ColorAnimation.EasingFunction><CubicEase EasingMode="EaseOut"/></ColorAnimation.EasingFunction>
+                  </ColorAnimation>
+                  <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.Y)" To="-2.5" Duration="0:0:0.16">
+                   <DoubleAnimation.EasingFunction><CubicEase EasingMode="EaseOut"/></DoubleAnimation.EasingFunction>
+                  </DoubleAnimation>
+                  <DoubleAnimation Storyboard.TargetProperty="(Border.Effect).(DropShadowEffect.Opacity)" To="0.48" Duration="0:0:0.16"/>
+                  <DoubleAnimation Storyboard.TargetProperty="(Border.Effect).(DropShadowEffect.BlurRadius)" To="24" Duration="0:0:0.16"/>
+                 </Storyboard>
+                </BeginStoryboard>
+               </Trigger.EnterActions>
+               <Trigger.ExitActions>
+                <BeginStoryboard>
+                 <Storyboard>
+                  <ColorAnimation Storyboard.TargetProperty="(Border.Background).(SolidColorBrush.Color)" To="#FF27272A" Duration="0:0:0.21">
+                   <ColorAnimation.EasingFunction><CubicEase EasingMode="EaseOut"/></ColorAnimation.EasingFunction>
+                  </ColorAnimation>
+                  <ColorAnimation Storyboard.TargetProperty="(Border.BorderBrush).(SolidColorBrush.Color)" To="#FF3F3F46" Duration="0:0:0.21">
+                   <ColorAnimation.EasingFunction><CubicEase EasingMode="EaseOut"/></ColorAnimation.EasingFunction>
+                  </ColorAnimation>
+                  <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.Y)" To="0" Duration="0:0:0.21">
+                   <DoubleAnimation.EasingFunction><CubicEase EasingMode="EaseOut"/></DoubleAnimation.EasingFunction>
+                  </DoubleAnimation>
+                  <DoubleAnimation Storyboard.TargetProperty="(Border.Effect).(DropShadowEffect.Opacity)" To="0.20" Duration="0:0:0.21"/>
+                  <DoubleAnimation Storyboard.TargetProperty="(Border.Effect).(DropShadowEffect.BlurRadius)" To="19" Duration="0:0:0.21"/>
+                 </Storyboard>
+                </BeginStoryboard>
+               </Trigger.ExitActions>
+              </Trigger>
+              <DataTrigger Binding="{Binding IsSelected}" Value="True">
+               <Setter Property="Background" Value="#FF2C4054"/>
+               <Setter Property="BorderBrush" Value="#FFD7B77C"/>
+               <Setter Property="BorderThickness" Value="1.4"/>
+               <Setter Property="Effect">
+                <Setter.Value><DropShadowEffect Color="#C9B58A" BlurRadius="17" ShadowDepth="0" Opacity="0.34"/></Setter.Value>
+               </Setter>
+               <DataTrigger.EnterActions>
+                <BeginStoryboard>
+                 <Storyboard>
+                  <ColorAnimation Storyboard.TargetProperty="(Border.Background).(SolidColorBrush.Color)" To="#FF31475B" Duration="0:0:0.18"/>
+                  <ColorAnimation Storyboard.TargetProperty="(Border.BorderBrush).(SolidColorBrush.Color)" To="#FFFFDFA8" Duration="0:0:0.20"/>
+                  <DoubleAnimation Storyboard.TargetProperty="(Border.Effect).(DropShadowEffect.Opacity)" To="0.52" Duration="0:0:0.20"/>
+                 </Storyboard>
+                </BeginStoryboard>
+               </DataTrigger.EnterActions>
+               <DataTrigger.ExitActions>
+                <BeginStoryboard>
+                 <Storyboard>
+                  <ColorAnimation Storyboard.TargetProperty="(Border.Background).(SolidColorBrush.Color)" To="#FF27272A" Duration="0:0:0.16"/>
+                  <ColorAnimation Storyboard.TargetProperty="(Border.BorderBrush).(SolidColorBrush.Color)" To="#FF3F3F46" Duration="0:0:0.16"/>
+                  <DoubleAnimation Storyboard.TargetProperty="(Border.Effect).(DropShadowEffect.Opacity)" To="0.20" Duration="0:0:0.16"/>
+                 </Storyboard>
+                </BeginStoryboard>
+               </DataTrigger.ExitActions>
               </DataTrigger>
              </Style.Triggers>
             </Style>
@@ -4160,40 +4655,38 @@ Write-AMRLog ("Startup catalog ready: {0} preloaded icons from local cache. Cach
               <ColumnDefinition Width="*"/>
               <ColumnDefinition Width="Auto"/>
              </Grid.ColumnDefinitions>
-             <CheckBox IsChecked="{Binding IsSelected, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" VerticalAlignment="Center" HorizontalAlignment="Center" Margin="0,0,12,0" ToolTip="Select this application for uninstall or other available actions." RenderTransformOrigin="0.5,0.5">
-              <CheckBox.LayoutTransform><ScaleTransform ScaleX="1.2" ScaleY="1.2"/></CheckBox.LayoutTransform>
-              <!-- Premium checkmark feedback: same compact spring motion used by Tweaks and Clean Up. -->
-              <CheckBox.RenderTransform><ScaleTransform ScaleX="1" ScaleY="1"/></CheckBox.RenderTransform>
-              <CheckBox.Style>
-               <Style TargetType="CheckBox">
-                <Style.Triggers>
-                 <EventTrigger RoutedEvent="ToggleButton.Checked">
-                  <BeginStoryboard>
-                   <Storyboard>
-                    <DoubleAnimation Storyboard.TargetProperty="RenderTransform.(ScaleTransform.ScaleX)" From="0.91" To="1.0" Duration="0:0:0.16">
-                     <DoubleAnimation.EasingFunction><BackEase EasingMode="EaseOut" Amplitude="1.25"/></DoubleAnimation.EasingFunction>
-                    </DoubleAnimation>
-                    <DoubleAnimation Storyboard.TargetProperty="RenderTransform.(ScaleTransform.ScaleY)" From="0.91" To="1.0" Duration="0:0:0.16">
-                     <DoubleAnimation.EasingFunction><BackEase EasingMode="EaseOut" Amplitude="1.25"/></DoubleAnimation.EasingFunction>
-                    </DoubleAnimation>
-                   </Storyboard>
-                  </BeginStoryboard>
-                 </EventTrigger>
-                 <EventTrigger RoutedEvent="ToggleButton.Unchecked">
-                  <BeginStoryboard>
-                   <Storyboard>
-                    <DoubleAnimation Storyboard.TargetProperty="RenderTransform.(ScaleTransform.ScaleX)" From="1.03" To="1.0" Duration="0:0:0.13">
-                     <DoubleAnimation.EasingFunction><QuadraticEase EasingMode="EaseOut"/></DoubleAnimation.EasingFunction>
-                    </DoubleAnimation>
-                    <DoubleAnimation Storyboard.TargetProperty="RenderTransform.(ScaleTransform.ScaleY)" From="1.03" To="1.0" Duration="0:0:0.13">
-                     <DoubleAnimation.EasingFunction><QuadraticEase EasingMode="EaseOut"/></DoubleAnimation.EasingFunction>
-                    </DoubleAnimation>
-                   </Storyboard>
-                  </BeginStoryboard>
-                 </EventTrigger>
-                </Style.Triggers>
-               </Style>
-              </CheckBox.Style>
+             <CheckBox IsChecked="{Binding IsSelected, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                       VerticalAlignment="Center" HorizontalAlignment="Center" Margin="0,0,12,0"
+                       ToolTip="Select this application" Cursor="Hand" FocusVisualStyle="{x:Null}"
+                       Width="19" Height="19" VerticalContentAlignment="Center" HorizontalContentAlignment="Center">
+              <CheckBox.Template>
+               <ControlTemplate TargetType="CheckBox">
+                <Border x:Name="SelectionSurface" Width="18" Height="18" CornerRadius="5"
+                        Background="#FF202C3B" BorderBrush="#FF65758B" BorderThickness="1.2"
+                        SnapsToDevicePixels="True">
+                 <Grid>
+                  <Path x:Name="SelectionTick" Data="M 3,9 L 7,13 L 15,4"
+                        Stroke="#FFFFFFFF" StrokeThickness="2.0" StrokeStartLineCap="Round"
+                        StrokeEndLineCap="Round" StrokeLineJoin="Round" Visibility="Collapsed"
+                        HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                 </Grid>
+                </Border>
+                <ControlTemplate.Triggers>
+                 <Trigger Property="IsMouseOver" Value="True">
+                  <Setter TargetName="SelectionSurface" Property="BorderBrush" Value="#FFE0AD"/>
+                  <Setter TargetName="SelectionSurface" Property="Background" Value="#FF34465A"/>
+                 </Trigger>
+                 <Trigger Property="IsChecked" Value="True">
+                  <Setter TargetName="SelectionSurface" Property="Background" Value="#FFB88D4D"/>
+                  <Setter TargetName="SelectionSurface" Property="BorderBrush" Value="#FFFFE0AD"/>
+                  <Setter TargetName="SelectionTick" Property="Visibility" Value="Visible"/>
+                 </Trigger>
+                 <Trigger Property="IsEnabled" Value="False">
+                  <Setter TargetName="SelectionSurface" Property="Opacity" Value="0.45"/>
+                 </Trigger>
+                </ControlTemplate.Triggers>
+               </ControlTemplate>
+              </CheckBox.Template>
              </CheckBox>
              <Grid Grid.Column="1" Width="36" Height="36" Margin="0,0,8,0">
               <Grid.Style>
@@ -6149,6 +6642,464 @@ function C {
     return $script:Window.FindName($Name)
 }
 
+# --- AMR Windows Update Center | isolated profile, scan, install and recovery engine ---
+$script:AMRUpdateJob = $null
+$script:AMRUpdateTimer = $null
+$script:AMRUpdateLastResults = @()
+$script:AMRUpdateBackupRoot = Join-Path $env:ProgramData 'AMR_Utility\Backups\WindowsUpdate'
+
+function Get-AMRUpdateProfileSnapshot {
+    $entries = @(
+        @{ Path='HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate'; Names=@('ExcludeWUDriversInQualityUpdate','DeferFeatureUpdates','DeferFeatureUpdatesPeriodInDays','DeferQualityUpdates','DeferQualityUpdatesPeriodInDays') },
+        @{ Path='HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU'; Names=@('NoAutoUpdate','AUOptions','AUPowerManagement','NoAutoRebootWithLoggedOnUsers') },
+        @{ Path='HKLM:\SOFTWARE\Policies\Microsoft\Windows\DriverSearching'; Names=@('DontPromptForWindowsUpdate','DontSearchWindowsUpdate','DriverUpdateWizardWuSearchEnabled') },
+        @{ Path='HKLM:\SOFTWARE\Microsoft\WindowsUpdate\UX\Settings'; Names=@('BranchReadinessLevel','DeferFeatureUpdatesPeriodInDays','DeferQualityUpdatesPeriodInDays') }
+    )
+    $saved = New-Object System.Collections.Generic.List[object]
+    foreach ($entry in $entries) {
+        foreach ($name in $entry.Names) {
+            $exists = $false; $value = $null; $kind = 'DWord'
+            try {
+                $key = Get-Item -LiteralPath $entry.Path -ErrorAction Stop
+                if ($key.GetValueNames() -contains $name) {
+                    $exists = $true; $value = $key.GetValue($name,$null,[Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+                    try { $rk = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey(($entry.Path -replace '^HKLM:\\','')); if ($rk) { $kind = [string]$rk.GetValueKind($name); $rk.Close() } } catch {}
+                }
+            } catch {}
+            $saved.Add([pscustomobject]@{Path=$entry.Path;Name=$name;Exists=$exists;Value=$value;Kind=$kind})
+        }
+    }
+    return @($saved.ToArray())
+}
+
+function Save-AMRUpdateProfileBackup {
+    if (-not (Test-Path -LiteralPath $script:AMRUpdateBackupRoot)) { New-Item -ItemType Directory -Path $script:AMRUpdateBackupRoot -Force | Out-Null }
+    $snapshot = Get-AMRUpdateProfileSnapshot
+    $backup = [pscustomobject]@{ Schema=1; Created=(Get-Date).ToString('o'); Computer=$env:COMPUTERNAME; Values=@($snapshot) }
+    $file = Join-Path $script:AMRUpdateBackupRoot ('profile_{0}.json' -f (Get-Date -Format 'yyyyMMdd_HHmmss_fff'))
+    $backup | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $file -Encoding UTF8
+    return $file
+}
+
+function Set-AMRUpdateRegistryDword {
+    param([string]$Path,[string]$Name,[int]$Value)
+    if (-not (Test-Path -LiteralPath $Path)) { New-Item -Path $Path -Force -ErrorAction Stop | Out-Null }
+    New-ItemProperty -LiteralPath $Path -Name $Name -PropertyType DWord -Value $Value -Force -ErrorAction Stop | Out-Null
+}
+
+function Remove-AMRUpdatePolicyValues {
+    $map = @(
+        @{Path='HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate';Names=@('ExcludeWUDriversInQualityUpdate','DeferFeatureUpdates','DeferFeatureUpdatesPeriodInDays','DeferQualityUpdates','DeferQualityUpdatesPeriodInDays')},
+        @{Path='HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU';Names=@('NoAutoUpdate','AUOptions','AUPowerManagement','NoAutoRebootWithLoggedOnUsers')},
+        @{Path='HKLM:\SOFTWARE\Policies\Microsoft\Windows\DriverSearching';Names=@('DontPromptForWindowsUpdate','DontSearchWindowsUpdate','DriverUpdateWizardWuSearchEnabled')},
+        @{Path='HKLM:\SOFTWARE\Microsoft\WindowsUpdate\UX\Settings';Names=@('BranchReadinessLevel','DeferFeatureUpdatesPeriodInDays','DeferQualityUpdatesPeriodInDays')}
+    )
+    foreach ($entry in $map) { foreach ($name in $entry.Names) { Remove-ItemProperty -LiteralPath $entry.Path -Name $name -ErrorAction SilentlyContinue } }
+}
+
+function Invoke-AMRUpdateProfile {
+    param([ValidateSet('Recommended','Default','Restricted')][string]$Profile)
+    if (-not (Test-AMRAdmin)) { Show-AMRMessage 'This profile requires Administrator permissions. Restart AMR as Administrator.' 'Update Center' OK Warning | Out-Null; return }
+    $managed = $false
+    try { $cs = Get-CimInstance Win32_ComputerSystem -ErrorAction Stop; $managed = [bool]$cs.PartOfDomain } catch {}
+    if ($managed) { Show-AMRMessage 'This PC appears to be domain-managed. Group Policy or MDM may overwrite local Windows Update settings. AMR will not apply a profile to avoid fighting your organization policies.' 'Managed Device' OK Warning | Out-Null; return }
+    if ($Profile -eq 'Restricted') {
+        $answer = Show-AMRMessage 'This advanced profile changes automatic-update policy (NoAutoUpdate=1). Security updates may not install automatically. It does not disable or delete Windows Update services, tasks, or caches. You can restore the previous policy using Undo Last Profile or Windows Default. Continue?' 'Restrict Automatic Updates' YesNo Warning
+        if ($answer -ne 'Yes') { return }
+    } elseif ($Profile -eq 'Default') {
+        $answer = Show-AMRMessage 'Restore Windows Update policy defaults? AMR will first save the exact current values, then remove only the known Windows Update profile values. This does not reset third-party/organization management outside these exact values.' 'Restore Windows Defaults' YesNo Warning
+        if ($answer -ne 'Yes') { return }
+    }
+    $backup = $null
+    try {
+        $backup = Save-AMRUpdateProfileBackup
+        switch ($Profile) {
+            'Recommended' {
+                $wu='HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate'; $au=Join-Path $wu 'AU'; $ds='HKLM:\SOFTWARE\Policies\Microsoft\Windows\DriverSearching'
+                Set-AMRUpdateRegistryDword $ds 'DontPromptForWindowsUpdate' 1
+                Set-AMRUpdateRegistryDword $ds 'DontSearchWindowsUpdate' 1
+                Set-AMRUpdateRegistryDword $ds 'DriverUpdateWizardWuSearchEnabled' 0
+                Set-AMRUpdateRegistryDword $wu 'ExcludeWUDriversInQualityUpdate' 1
+                Set-AMRUpdateRegistryDword $wu 'DeferFeatureUpdates' 1
+                Set-AMRUpdateRegistryDword $wu 'DeferFeatureUpdatesPeriodInDays' 365
+                Set-AMRUpdateRegistryDword $wu 'DeferQualityUpdates' 1
+                Set-AMRUpdateRegistryDword $wu 'DeferQualityUpdatesPeriodInDays' 4
+                Remove-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\WindowsUpdate\UX\Settings' -Name BranchReadinessLevel,DeferFeatureUpdatesPeriodInDays,DeferQualityUpdatesPeriodInDays -ErrorAction SilentlyContinue
+                Set-AMRUpdateRegistryDword $au 'AUOptions' 3
+                Set-AMRUpdateRegistryDword $au 'AUPowerManagement' 0
+                Remove-ItemProperty -LiteralPath $au -Name NoAutoRebootWithLoggedOnUsers -ErrorAction SilentlyContinue
+            }
+            'Default' { Remove-AMRUpdatePolicyValues }
+            'Restricted' {
+                $au='HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU'
+                Set-AMRUpdateRegistryDword $au 'NoAutoUpdate' 1
+                Set-AMRUpdateRegistryDword $au 'AUOptions' 1
+            }
+        }
+        $verify = Get-AMRUpdateProfileSnapshot
+        $failed = @()
+        if ($Profile -eq 'Recommended') {
+            foreach ($check in @(@('HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate','DeferFeatureUpdatesPeriodInDays',365),@('HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate','DeferQualityUpdatesPeriodInDays',4),@('HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU','AUOptions',3))) {
+                $found = $verify | Where-Object { $_.Path -eq $check[0] -and $_.Name -eq $check[1] } | Select-Object -First 1
+                if (-not $found -or -not $found.Exists -or [int]$found.Value -ne [int]$check[2]) { $failed += ($check[1]+' verification failed') }
+            }
+        } elseif ($Profile -eq 'Restricted') {
+            $found = $verify | Where-Object { $_.Name -eq 'NoAutoUpdate' -and $_.Path -like '*\AU' } | Select-Object -First 1
+            if (-not $found -or -not $found.Exists -or [int]$found.Value -ne 1) { $failed += 'NoAutoUpdate verification failed' }
+        } elseif ($Profile -eq 'Default') {
+            $remaining = @($verify | Where-Object { $_.Exists })
+            if ($remaining.Count -gt 0) { $failed += ('{0} known policy value(s) remain after reset' -f $remaining.Count) }
+        }
+        if ($failed.Count -gt 0) { throw ($failed -join '; ') }
+        $label = switch ($Profile) { Recommended {'Recommended'} Default {'Windows Default'} Restricted {'Restricted Automatic Updates'} }
+        (C 'AMRUpdateActionStatus').Text = ('{0} profile applied and verified. Backup: {1}' -f $label,[IO.Path]::GetFileName($backup))
+        Write-AMRLog ('Windows Update profile applied and verified: '+$label+'. Backup='+$backup) SUCCESS System
+        Update-AMRUpdateCenterStatus
+    } catch {
+        $failure = $_.Exception.Message
+        if ($backup -and (Test-Path -LiteralPath $backup)) { try { Restore-AMRUpdateProfileBackup -Path $backup -Quiet } catch { $failure += ' | Automatic rollback failed: '+$_.Exception.Message } }
+        (C 'AMRUpdateActionStatus').Text = 'Profile failed: '+$failure
+        Write-AMRLog ('Windows Update profile failed: '+$failure) ERROR System
+        Show-AMRMessage $failure 'Windows Update Profile Failed' OK Error | Out-Null
+    }
+}
+
+function Restore-AMRUpdateProfileBackup {
+    param([string]$Path,[switch]$Quiet)
+    if (-not (Test-AMRAdmin)) { throw 'Administrator permissions are required to restore Windows Update policy.' }
+    if (-not $Path) {
+        $latest = Get-ChildItem -LiteralPath $script:AMRUpdateBackupRoot -Filter 'profile_*.json' -File -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+        if (-not $latest) { throw 'No Windows Update profile backup was found.' }; $Path=$latest.FullName
+    }
+    $data = Get-Content -LiteralPath $Path -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    if ([int]$data.Schema -ne 1 -or -not $data.Values) { throw 'The selected Windows Update backup has an unsupported format.' }
+    foreach ($item in $data.Values) {
+        if ($item.Exists) {
+            if (-not (Test-Path -LiteralPath $item.Path)) { New-Item -Path $item.Path -Force -ErrorAction Stop | Out-Null }
+            $kind = [string]$item.Kind
+            if ($kind -notin @('DWord','QWord','String','ExpandString','MultiString','Binary')) { $kind='DWord' }
+            New-ItemProperty -LiteralPath $item.Path -Name $item.Name -PropertyType $kind -Value $item.Value -Force -ErrorAction Stop | Out-Null
+        } else { Remove-ItemProperty -LiteralPath $item.Path -Name $item.Name -ErrorAction SilentlyContinue }
+    }
+    if (-not $Quiet) { (C 'AMRUpdateActionStatus').Text='Previous Windows Update policy values restored from backup.'; Write-AMRLog ('Restored Windows Update profile backup: '+$Path) SUCCESS System; Update-AMRUpdateCenterStatus }
+}
+
+function Update-AMRUpdateCenterStatus {
+    # Service state
+    try {
+        $wu=Get-Service -Name wuauserv -ErrorAction SilentlyContinue
+        $bits=Get-Service -Name BITS -ErrorAction SilentlyContinue
+        $svcText = if ($wu -and $wu.Status -eq 'Running') {'Running'} elseif ($wu) {'Stopped'} else {'Unavailable'}
+        (C 'AMRUpdateServiceValue').Text=$svcText
+        (C 'AMRUpdateServiceDetail').Text=('BITS: {0}' -f $(if($bits){[string]$bits.Status}else{'Unavailable'}))
+    } catch { (C 'AMRUpdateServiceValue').Text='Unknown' }
+
+    # Query Windows Update Agent history, then use its legacy registry timestamp as fallback.
+    $last='No successful update recorded'
+    try {
+        $session=New-Object -ComObject Microsoft.Update.Session -ErrorAction Stop
+        $searcher=$session.CreateUpdateSearcher()
+        $historyCount=[int]$searcher.GetTotalHistoryCount()
+        if($historyCount -gt 0){
+            $take=[Math]::Min($historyCount,250)
+            $history=@($searcher.QueryHistory(0,$take))
+            $success=$history | Where-Object { [int]$_.Operation -eq 1 -and [int]$_.ResultCode -eq 2 -and $_.Date } | Sort-Object Date -Descending | Select-Object -First 1
+            if($success){$last=([datetime]$success.Date).ToString('yyyy-MM-dd HH:mm')}
+        }
+    } catch { Write-AMRLog ('Windows Update Agent history query unavailable: '+$_.Exception.Message) WARNING System }
+    if($last -eq 'No successful update recorded'){
+        try {
+            $key=Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\Results\Install' -ErrorAction SilentlyContinue
+            if($key -and $key.LastSuccessTime){
+                $parsed=[datetime]::MinValue
+                if([datetime]::TryParse([string]$key.LastSuccessTime,[ref]$parsed)){$last=$parsed.ToString('yyyy-MM-dd HH:mm')}
+            }
+        } catch {}
+    }
+    (C 'AMRUpdateLastValue').Text=$last
+
+    # Multiple independent Windows restart indicators; 
+    $pending=$false
+    foreach($path in @('HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending','HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired','HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Services\Pending')){
+        if(Test-Path -LiteralPath $path){$pending=$true}
+    }
+    try {
+        $sm=Get-ItemProperty -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager' -Name PendingFileRenameOperations -ErrorAction SilentlyContinue
+        if($sm -and $sm.PendingFileRenameOperations){$pending=$true}
+    } catch {}
+    (C 'AMRUpdateRebootValue').Text=if($pending){'Restart required'}else{'No restart flag detected'}
+
+    try {
+        $v=Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' -ErrorAction Stop
+        $edition=if($v.DisplayVersion){[string]$v.DisplayVersion}elseif($v.ReleaseId){[string]$v.ReleaseId}else{'Version unknown'}
+        (C 'AMRUpdateEditionValue').Text=('{0} · {1}' -f $v.ProductName,$edition)
+    } catch { (C 'AMRUpdateEditionValue').Text='Windows edition unavailable' }
+
+    # Detect AMR signatures precisely; otherwise distinguish custom policy from default.
+    $profile='Windows Default'
+    try {
+        $p=Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate' -ErrorAction SilentlyContinue
+        $au=Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU' -ErrorAction SilentlyContinue
+        $hasPolicy=$false
+        foreach($obj in @($p,$au)){
+            if($obj){
+                $names=@($obj.PSObject.Properties | Where-Object { $_.MemberType -eq 'NoteProperty' -and $_.Name -notlike 'PS*' } | ForEach-Object {$_.Name})
+                if($names.Count -gt 0){$hasPolicy=$true}
+            }
+        }
+        if($au -and $au.NoAutoUpdate -eq 1 -and $au.AUOptions -eq 1){$profile='Restricted Automatic Updates'}
+        elseif($p -and $p.DeferFeatureUpdatesPeriodInDays -eq 365 -and $p.DeferQualityUpdatesPeriodInDays -eq 4 -and $p.ExcludeWUDriversInQualityUpdate -eq 1 -and $au -and $au.AUOptions -eq 3){$profile='AMR Recommended'}
+        elseif($hasPolicy){$profile='Custom Windows Update Policy'}
+    } catch { $profile='Policy status unavailable' }
+    (C 'AMRUpdateProfileValue').Text=$profile
+}
+
+function Set-AMRUpdateCheckVisual {
+    param([Parameter(Mandatory=$true)][bool]$Running)
+    $button = C 'AMRUpdateCheckBtn'
+    $progress = C 'AMRUpdateProgress'
+    if (-not $button) { return }
+
+    if ($Running) {
+        if (-not ($button.Content -is [System.Windows.Controls.StackPanel])) {
+            $panel = New-Object System.Windows.Controls.StackPanel
+            $panel.Orientation = [System.Windows.Controls.Orientation]::Horizontal
+            $panel.HorizontalAlignment = 'Center'
+            $panel.VerticalAlignment = 'Center'
+            $glyph = New-Object System.Windows.Controls.TextBlock
+            $glyph.Text = '↻'
+            $glyph.FontSize = 15
+            $glyph.Margin = [System.Windows.Thickness]::new(0,0,7,0)
+            $glyph.VerticalAlignment = 'Center'
+            $label = New-Object System.Windows.Controls.TextBlock
+            $label.Text = 'Checking Updates…'
+            $label.FontWeight = [System.Windows.FontWeights]::SemiBold
+            $label.VerticalAlignment = 'Center'
+            [void]$panel.Children.Add($glyph)
+            [void]$panel.Children.Add($label)
+            $button.Content = $panel
+        }
+        $glyph = $button.Content.Children[0]
+        if (-not ($glyph.RenderTransform -is [System.Windows.Media.RotateTransform])) {
+            $glyph.RenderTransformOrigin = [System.Windows.Point]::new(0.5,0.5)
+            $glyph.RenderTransform = [System.Windows.Media.RotateTransform]::new(0)
+        }
+        $spin = [System.Windows.Media.Animation.DoubleAnimation]::new(0,360,[System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(850)))
+        $spin.RepeatBehavior = [System.Windows.Media.Animation.RepeatBehavior]::Forever
+        $glyph.RenderTransform.BeginAnimation([System.Windows.Media.RotateTransform]::AngleProperty,$spin,[System.Windows.Media.Animation.HandoffBehavior]::SnapshotAndReplace)
+        $pulse = [System.Windows.Media.Animation.DoubleAnimation]::new(0.78,1.0,[System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(720)))
+        $pulse.AutoReverse = $true
+        $pulse.RepeatBehavior = [System.Windows.Media.Animation.RepeatBehavior]::Forever
+        $button.BeginAnimation([System.Windows.UIElement]::OpacityProperty,$pulse,[System.Windows.Media.Animation.HandoffBehavior]::SnapshotAndReplace)
+        $button.IsEnabled = $false
+        if ($progress) { $progress.IsIndeterminate = $true; $progress.Visibility = 'Visible' }
+    } else {
+        if ($button.Content -is [System.Windows.Controls.StackPanel] -and $button.Content.Children.Count -gt 0) {
+            $glyph = $button.Content.Children[0]
+            if ($glyph.RenderTransform -is [System.Windows.Media.RotateTransform]) {
+                $glyph.RenderTransform.BeginAnimation([System.Windows.Media.RotateTransform]::AngleProperty,$null)
+                $glyph.RenderTransform.Angle = 0
+            }
+        }
+        $button.BeginAnimation([System.Windows.UIElement]::OpacityProperty,$null)
+        $button.Opacity = 1.0
+        $button.Content = '⌕  Check for Updates'
+        $button.IsEnabled = $true
+        if ($progress) { $progress.IsIndeterminate = $false; $progress.Visibility = 'Collapsed' }
+    }
+}
+
+function Start-AMRUpdateWorker {
+    param([ValidateSet('Scan','Download','Install','History')][string]$Action,[object[]]$Selected=@())
+    if ($script:AMRUpdateJob -and $script:AMRUpdateJob.State -in @('Running','NotStarted')) { (C 'AMRUpdateActionStatus').Text='An update operation is already running. Wait for it to finish.'; return }
+    try { if ($script:AMRUpdateJob) { Remove-Job -Job $script:AMRUpdateJob -Force -ErrorAction SilentlyContinue } } catch {}
+    $selectedIds=@($Selected | ForEach-Object { [string]$_.UpdateId } | Where-Object { $_ -match '^[0-9a-fA-F-]{36}$' } | Select-Object -Unique)
+    if ($Action -in @('Download','Install') -and -not (Test-AMRAdmin)) { Show-AMRMessage 'Downloading or installing Windows updates requires AMR to run as Administrator.' 'Administrator Required' OK Warning | Out-Null; return }
+    if ($Action -in @('Download','Install') -and $selectedIds.Count -eq 0) { Show-AMRMessage 'Select one or more updates first.' 'Update Center' OK Information | Out-Null; return }
+    $progressPath = Join-Path $env:TEMP ('AMR_WU_Search_' + [guid]::NewGuid().ToString('N') + '.status')
+    $script:AMRUpdateProgressPath = $progressPath
+    $worker = {
+        param([string]$Mode,[string]$IdsCsv,[string]$ProgressPath)
+        function Set-WorkerProgress([string]$Message) {
+            try { [System.IO.File]::WriteAllText($ProgressPath,$Message,[System.Text.Encoding]::UTF8) } catch {}
+        }
+        $Ids=@($IdsCsv -split ',' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+        $ErrorActionPreference='Stop'
+        try {
+            Set-WorkerProgress 'Starting the Windows Update Agent worker…'
+            $session=New-Object -ComObject Microsoft.Update.Session
+            if (-not $session) { throw 'Windows Update Agent session could not be created.' }
+            $session.ClientApplicationID='AMR Windows Utility'
+            Set-WorkerProgress 'Windows Update Agent session created. Preparing the update searcher…'
+            $searcher=$session.CreateUpdateSearcher()
+            if (-not $searcher) { throw 'Windows Update Agent did not create an update searcher.' }
+            if ($Mode -eq 'History') {
+                $count=[Math]::Min(50,[int]$searcher.GetTotalHistoryCount())
+                $history=$searcher.QueryHistory(0,$count)
+                $out=@(); foreach($h in $history){$historyResult=switch([int]$h.ResultCode){2{'Succeeded'} 3{'Succeeded with errors'} 4{'Failed'} 5{'Aborted'} default{'Unknown'}};$out += [pscustomobject]@{Title=[string]$h.Title;KB='';SizeText='';DownloadedText=$historyResult;UpdateId='';Operation='History'}}
+                [pscustomobject]@{Ok=$true;Mode=$Mode;Items=$out;Message=('Loaded {0} recent history record(s).' -f $out.Count)}; return
+            }
+            if ($Mode -eq 'Scan') {
+                # Keep the WUA COM search isolated in the background job, but use
+                # the synchronous Search call there. Asynchronous COM callbacks can
+                # stall in non-STA job processes and provide no useful progress
+                # to the WPF dispatcher. The UI remains responsive and receives
+                # explicit worker-stage/elapsed updates through the status file.
+                Set-WorkerProgress 'Update searcher ready. Checking the configured update source…'
+                # Respect the machine's configured source (Windows Update or an
+                # organization-managed WSUS source); do not silently override policy.
+                $searcher.Online=$true
+                Set-WorkerProgress 'Searching the configured Windows Update service for applicable updates. The search is running in the background…'
+                $searchStarted = Get-Date
+                $result = $searcher.Search('IsInstalled=0 and IsHidden=0')
+                if (-not $result) { throw 'Windows Update Agent completed without returning a search result.' }
+                Set-WorkerProgress 'Search completed. Collecting and preparing update details…'
+            } else {
+                $result=$searcher.Search('IsInstalled=0 and IsHidden=0')
+            }
+            $matches=@()
+            foreach($u in $result.Updates){
+                $id=[string]$u.Identity.UpdateID
+                if($Mode -eq 'Scan' -or $Ids -contains $id){
+                    $kb=''; try{$kb=(@($u.KBArticleIDs) -join ', ')}catch{}
+                    $size=''; try{if([double]$u.MaxDownloadSize -gt 0){$size=('{0:N1} MB' -f ([double]$u.MaxDownloadSize/1MB))}}catch{}
+                    if($Mode -eq 'Scan'){$matches += [pscustomobject]@{Title=[string]$u.Title;KB=$kb;SizeText=$size;DownloadedText=$(if($u.IsDownloaded){'Yes'}else{'No'});Downloaded=[bool]$u.IsDownloaded;UpdateId=$id;Revision=[int]$u.Identity.RevisionNumber;EulaAccepted=[bool]$u.EulaAccepted;Operation='Update'}}
+                    else{$matches += $u}
+                }
+            }
+            if($Mode -eq 'Scan') { [pscustomobject]@{Ok=$true;Mode=$Mode;Items=$matches;Message=('The configured update service returned {0} applicable update(s).' -f $matches.Count)}; return }
+            if($matches.Count -eq 0){[pscustomobject]@{Ok=$false;Mode=$Mode;Items=@();Message='The selected updates are no longer applicable. Run Check for Updates again.'};return}
+            $collection=New-Object -ComObject Microsoft.Update.UpdateColl
+            foreach($u in $matches){if(-not $u.EulaAccepted){$u.AcceptEula()};[void]$collection.Add($u)}
+            if($Mode -eq 'Download'){$downloader=$session.CreateUpdateDownloader();$downloader.Updates=$collection;$r=$downloader.Download();$msg=('Download result code: {0}; updates: {1}' -f $r.ResultCode,$collection.Count)}
+            else{$installer=$session.CreateUpdateInstaller();$installer.Updates=$collection;$r=$installer.Install();$msg=('Install result code: {0}; reboot required: {1}; updates: {2}' -f $r.ResultCode,$r.RebootRequired,$collection.Count)}
+            $detailLines=@(); for($i=0;$i -lt $collection.Count;$i++){try{$ur=$r.GetUpdateResult($i);$detailLines+=('{0}: Result={1}; HRESULT=0x{2:X8}' -f $collection.Item($i).Title,$ur.ResultCode,$ur.HResult)}catch{}}
+            if($detailLines.Count -gt 0){$msg += ' | '+($detailLines -join ' ; ')}
+            [pscustomobject]@{Ok=(($r.ResultCode -eq 2) -or ($r.ResultCode -eq 3));Mode=$Mode;Items=@();Message=$msg;ResultCode=[int]$r.ResultCode;RebootRequired=[bool]$r.RebootRequired}
+        } catch {
+            $failureMessage = [string]$_.Exception.Message
+            Set-WorkerProgress ('Windows Update operation failed: ' + $failureMessage)
+            [pscustomobject]@{Ok=$false;Mode=$Mode;Items=@();Message=$failureMessage}
+        }
+    }
+    try {
+        if ($Action -eq 'Scan') { [System.IO.File]::WriteAllText($progressPath,'Starting Windows Update Agent…',[System.Text.Encoding]::UTF8) }
+        $script:AMRUpdateJob=Start-Job -ScriptBlock $worker -ArgumentList $Action,($selectedIds -join ','),$progressPath -ErrorAction Stop
+        $script:AMRUpdateStartedAt=Get-Date
+        $script:AMRUpdateCurrentAction=$Action
+        (C 'AMRUpdateActionStatus').Text= switch($Action){Scan{'Connecting to Windows Update Agent and checking the configured update source…'} Download{'Downloading selected updates in background…'} Install{'Installing selected updates in background…'} History{'Reading Windows Update history…'}}
+        if($Action -eq 'Scan'){(C 'AMRUpdateListSummary').Text='Starting the Windows Update scan. Live worker status and elapsed time will appear here while the search runs.'}
+        foreach($name in @('AMRUpdateCheckBtn','AMRUpdateDownloadBtn','AMRUpdateInstallBtn','AMRUpdateRefreshBtn')){(C $name).IsEnabled=$false}
+        if($Action -eq 'Scan'){ Set-AMRUpdateCheckVisual -Running $true }
+        else { $progressControl=C 'AMRUpdateProgress'; if($progressControl){$progressControl.IsIndeterminate=$true;$progressControl.Visibility='Visible'} }
+        # Recreate the dispatcher timer for every operation. Reusing an event
+        # handler captured by an earlier invocation can leave stale local state.
+        try { if ($script:AMRUpdateTimer) { $script:AMRUpdateTimer.Stop(); $script:AMRUpdateTimer = $null } } catch {}
+        $script:AMRUpdateTimer = New-Object System.Windows.Threading.DispatcherTimer
+        $script:AMRUpdateTimer.Interval = [TimeSpan]::FromMilliseconds(900)
+        $script:AMRUpdateTimer.Add_Tick({
+            try {
+                $job = $script:AMRUpdateJob
+                if (-not $job) {
+                    if ($script:AMRUpdateTimer) { $script:AMRUpdateTimer.Stop() }
+                    return
+                }
+                if ($job.State -in @('Running','NotStarted')) {
+                    $elapsed = 0
+                    if ($script:AMRUpdateStartedAt) { $elapsed = [int]((Get-Date)-$script:AMRUpdateStartedAt).TotalSeconds }
+                    if ($script:AMRUpdateCurrentAction -eq 'Scan') {
+                        $stage = 'Windows Update Agent is searching the configured update source…'
+                        if ($script:AMRUpdateProgressPath -and (Test-Path -LiteralPath $script:AMRUpdateProgressPath)) {
+                            try {
+                                $reported = [System.IO.File]::ReadAllText($script:AMRUpdateProgressPath).Trim()
+                                if ($reported) { $stage = $reported }
+                            } catch {}
+                        }
+                        $elapsedText = ([TimeSpan]::FromSeconds($elapsed)).ToString('hh\:mm\:ss')
+                        $liveStatus = '{0}  |  Elapsed: {1}' -f $stage,$elapsedText
+                        $statusControl = C 'AMRUpdateActionStatus'
+                        $summaryControl = C 'AMRUpdateListSummary'
+                        if ($statusControl) { $statusControl.Text = $liveStatus }
+                        if ($summaryControl) { $summaryControl.Text = $liveStatus + '  Results will appear automatically when the search completes.' }
+                        # A worker that remains blocked is terminated after 20 minutes.
+                        if ($elapsed -ge 1200) {
+                            try { Stop-Job -Job $job -ErrorAction SilentlyContinue } catch {}
+                        }
+                    }
+                }
+                if ($job.State -in @('Completed','Failed','Stopped')) {
+                    if ($script:AMRUpdateTimer) { $script:AMRUpdateTimer.Stop() }
+                    $completedState = [string]$job.State
+                    $output = @(Receive-Job -Job $job -ErrorAction SilentlyContinue)
+                    try { Remove-Job -Job $job -Force -ErrorAction SilentlyContinue } catch {}
+                    $script:AMRUpdateJob = $null
+                    $script:AMRUpdateCurrentAction = $null
+                    if ($script:AMRUpdateProgressPath) {
+                        try { Remove-Item -LiteralPath $script:AMRUpdateProgressPath -Force -ErrorAction SilentlyContinue } catch {}
+                        $script:AMRUpdateProgressPath = $null
+                    }
+                    foreach ($name in @('AMRUpdateCheckBtn','AMRUpdateDownloadBtn','AMRUpdateInstallBtn','AMRUpdateRefreshBtn')) { try { (C $name).IsEnabled = $true } catch {} }
+                    Set-AMRUpdateCheckVisual -Running $false
+                    $progressControl = C 'AMRUpdateProgress'
+                    if ($progressControl) { $progressControl.IsIndeterminate = $false; $progressControl.Visibility = 'Collapsed' }
+                    $result = $output | Where-Object { $_ -and $_.PSObject.Properties['Mode'] } | Select-Object -Last 1
+                    if (-not $result) {
+                        $reason = 'The background update worker stopped without returning a result.'
+                        if ($completedState -eq 'Failed') { try { $reason = [string]$job.ChildJobs[0].JobStateInfo.Reason.Message } catch {} }
+                        if ($completedState -eq 'Stopped') { $reason = 'The Windows Update scan was stopped because it exceeded the 20-minute safety limit.' }
+                        (C 'AMRUpdateActionStatus').Text = $reason
+                        (C 'AMRUpdateListSummary').Text = $reason
+                        Write-AMRLog ('Windows Update worker ended without a result. State=' + $completedState + '; ' + $reason) ERROR System
+                        return
+                    }
+                    (C 'AMRUpdateActionStatus').Text = [string]$result.Message
+                    (C 'AMRUpdateListSummary').Text = [string]$result.Message
+                    if ($result.Mode -in @('Scan','History')) {
+                        $items = @($result.Items)
+                        $script:AMRUpdateLastResults = $items
+                        (C 'AMRUpdateResultsList').ItemsSource = $null
+                        (C 'AMRUpdateResultsList').ItemsSource = $items
+                    }
+                    if ($result.Ok) { Write-AMRLog ('Windows Update {0}: {1}' -f $result.Mode,$result.Message) SUCCESS System }
+                    else { Write-AMRLog ('Windows Update {0} warning: {1}' -f $result.Mode,$result.Message) WARNING System }
+                    if ($result.RebootRequired) { (C 'AMRUpdateRebootValue').Text = 'Required' }
+                    Update-AMRUpdateCenterStatus
+                    if ($result.Ok -and $result.Mode -in @('Download','Install')) {
+                        (C 'AMRUpdateActionStatus').Text += ' Refreshing the available update list…'
+                        Start-AMRUpdateWorker -Action Scan
+                        return
+                    }
+                }
+            } catch {
+                $pollError = $_
+                $pollMessage = [string]$pollError.Exception.Message
+                $pollLine = ''
+                try { $pollLine = [string]$pollError.InvocationInfo.Line } catch {}
+                $pollDiagnostic = 'Update worker polling error: ' + $pollMessage
+                if ($pollLine) { $pollDiagnostic += ' | At: ' + $pollLine.Trim() }
+                try { $statusErrorControl = C 'AMRUpdateActionStatus'; if ($statusErrorControl) { $statusErrorControl.Text = $pollDiagnostic } } catch {}
+                try { Write-AMRLog ($pollDiagnostic + ' | Stack: ' + [string]$pollError.ScriptStackTrace) ERROR System } catch {}
+            }
+        })
+        $script:AMRUpdateTimer.Start()
+    } catch { if($script:AMRUpdateProgressPath){Remove-Item -LiteralPath $script:AMRUpdateProgressPath -Force -ErrorAction SilentlyContinue;$script:AMRUpdateProgressPath=$null}; Set-AMRUpdateCheckVisual -Running $false; $progressControl=C 'AMRUpdateProgress';if($progressControl){$progressControl.Visibility='Collapsed'}; foreach($name in @('AMRUpdateDownloadBtn','AMRUpdateInstallBtn','AMRUpdateRefreshBtn')){try{(C $name).IsEnabled=$true}catch{}}; (C 'AMRUpdateActionStatus').Text='Could not start update worker: '+$_.Exception.Message;Write-AMRLog ('Could not start Windows Update worker: '+$_.Exception.Message) ERROR System }
+}
+
+function Invoke-AMRUpdateServiceRepair {
+    if (-not (Test-AMRAdmin)) { Show-AMRMessage 'Administrator permissions are required.' 'Update Repair' OK Warning | Out-Null; return }
+    $answer=Show-AMRMessage 'AMR will attempt to start the standard Windows Update services (BITS, Cryptographic Services and Windows Update) and verify their resulting states. This is a non-destructive service repair; it does not delete caches or reset update history. Continue?' 'Repair Update Services' YesNo Warning
+    if($answer -ne 'Yes'){return}
+    $results=New-Object System.Collections.Generic.List[string]
+    foreach($serviceName in @('cryptsvc','bits','wuauserv')){
+        try{$service=Get-Service -Name $serviceName -ErrorAction Stop;if($service.Status -ne 'Running'){Start-Service -Name $serviceName -ErrorAction Stop};$service=Get-Service -Name $serviceName -ErrorAction Stop;if($service.Status -eq 'Running'){$results.Add($serviceName+': Running')}else{$results.Add($serviceName+': '+$service.Status)}}catch{$results.Add($serviceName+': FAILED - '+$_.Exception.Message)}
+    }
+    $failed=@($results | Where-Object {$_ -match 'FAILED'}).Count
+    (C 'AMRUpdateActionStatus').Text=($results -join ' | ')
+    Write-AMRLog ('Windows Update service repair: '+($results -join '; ')) $(if($failed){'WARNING'}else{'SUCCESS'}) System
+    Update-AMRUpdateCenterStatus
+    Show-AMRMessage (($results -join "`n")) 'Update Service Repair Results' OK $(if($failed){[System.Windows.MessageBoxImage]::Warning}else{[System.Windows.MessageBoxImage]::Information}) | Out-Null
+}
+
 # Four-column real virtualization for the existing Software card template.
 # The original card objects and paging pipeline remain unchanged. The custom
 # panel measures the actual ScrollViewer viewport, returns the full logical
@@ -6615,6 +7566,151 @@ foreach ($tweakName in $script:AMRBasicInfoNames) {
         $scaleTarget.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleXProperty,$pop)
         $scaleTarget.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleYProperty,$pop)
     }.GetNewClosure())
+}
+
+
+# Toolkit / Tweaks: lightweight pointer feedback tuned for smooth scrolling.
+# Only the actual option cards receive card-level hover handlers. No per-frame
+# DropShadowEffect blur animation, no opacity animation across the scroll tree,
+# and no replacement of existing control transforms/effects.
+function Set-AMRTweaksPointerMotion {
+    param([System.Windows.FrameworkElement]$Root)
+    if (-not $Root -or $Root.Tag -eq 'AMR-TweaksPointerMotionAttached') { return }
+
+    # BasicTweaksPanel contains a header Border followed by the option WrapPanel.
+    # Restrict card effects to direct WrapPanel children; avoid recursively wiring
+    # every nested Border in the scrolling visual tree.
+    $cardsHost = $null
+    foreach ($child in $Root.Children) {
+        if ($child -is [System.Windows.Controls.WrapPanel]) { $cardsHost = $child; break }
+    }
+
+    if ($cardsHost) {
+        foreach ($card in @($cardsHost.Children)) {
+            if (-not ($card -is [System.Windows.Controls.Border])) { continue }
+            if ($card.Tag -eq 'AMR-TweakCardHoverAttached') { continue }
+
+            $baseBrush = $card.BorderBrush
+            if ($baseBrush -is [System.Windows.Media.SolidColorBrush]) {
+                try { $hoverBrush = $baseBrush.Clone(); $card.BorderBrush = $hoverBrush } catch { $hoverBrush = $null }
+            } else { $hoverBrush = $null }
+
+            # Reuse the existing TranslateTransform used by the card's entrance
+            # animation. Translation is render-only and does not invalidate layout.
+            $motion = $card.RenderTransform -as [System.Windows.Media.TranslateTransform]
+            $cardRef = $card; $brushRef = $hoverBrush; $originalColor = $null
+            if ($hoverBrush) { $originalColor = $hoverBrush.Color }
+            $motionRef = $motion
+
+            $card.Add_MouseEnter({
+                if ($brushRef) {
+                    $colorAnim = New-Object System.Windows.Media.Animation.ColorAnimation
+                    $colorAnim.To = [System.Windows.Media.Color]::FromRgb(139,198,244)
+                    $colorAnim.Duration = [System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(135))
+                    $colorAnim.FillBehavior = [System.Windows.Media.Animation.FillBehavior]::HoldEnd
+                    $brushRef.BeginAnimation([System.Windows.Media.SolidColorBrush]::ColorProperty,$colorAnim)
+                }
+                if ($motionRef) {
+                    $lift = New-Object System.Windows.Media.Animation.DoubleAnimation
+                    $lift.To = -1.4
+                    $lift.Duration = [System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(125))
+                    $lift.EasingFunction = New-Object System.Windows.Media.Animation.CubicEase
+                    $lift.EasingFunction.EasingMode = [System.Windows.Media.Animation.EasingMode]::EaseOut
+                    $motionRef.BeginAnimation([System.Windows.Media.TranslateTransform]::YProperty,$lift)
+                }
+            }.GetNewClosure())
+
+            $card.Add_MouseLeave({
+                if ($brushRef -and $originalColor) {
+                    $colorBack = New-Object System.Windows.Media.Animation.ColorAnimation
+                    $colorBack.To = $originalColor
+                    $colorBack.Duration = [System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(155))
+                    $colorBack.FillBehavior = [System.Windows.Media.Animation.FillBehavior]::HoldEnd
+                    $brushRef.BeginAnimation([System.Windows.Media.SolidColorBrush]::ColorProperty,$colorBack)
+                }
+                if ($motionRef) {
+                    $settle = New-Object System.Windows.Media.Animation.DoubleAnimation
+                    $settle.To = 0
+                    $settle.Duration = [System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(155))
+                    $settle.EasingFunction = New-Object System.Windows.Media.Animation.CubicEase
+                    $settle.EasingFunction.EasingMode = [System.Windows.Media.Animation.EasingMode]::EaseOut
+                    $motionRef.BeginAnimation([System.Windows.Media.TranslateTransform]::YProperty,$settle)
+                }
+            }.GetNewClosure())
+            $card.Tag = 'AMR-TweakCardHoverAttached'
+        }
+    }
+
+    # Light feedback for the controls: animate only their existing brush colors.
+    # Do not add effects or replace RenderTransform, keeping input and scroll cost low.
+    $pending = New-Object 'System.Collections.Generic.Stack[System.Windows.DependencyObject]'
+    $pending.Push($Root)
+    while ($pending.Count -gt 0) {
+        $item = $pending.Pop()
+        $count = [System.Windows.Media.VisualTreeHelper]::GetChildrenCount($item)
+        for ($i = $count - 1; $i -ge 0; $i--) { $pending.Push([System.Windows.Media.VisualTreeHelper]::GetChild($item,$i)) }
+
+        if ($item -is [System.Windows.Controls.Button] -and $item.Tag -ne 'AMR-TweakButtonHoverAttached') {
+            $button = $item
+            $buttonBrush = $button.BorderBrush
+            if ($buttonBrush -is [System.Windows.Media.SolidColorBrush]) {
+                try { $buttonBrush = $buttonBrush.Clone(); $button.BorderBrush = $buttonBrush } catch { $buttonBrush = $null }
+            } else { $buttonBrush = $null }
+            $buttonBaseColor = $null
+            if ($buttonBrush) { $buttonBaseColor = $buttonBrush.Color }
+            $buttonBrushRef = $buttonBrush; $buttonColorRef = $buttonBaseColor
+            $button.Add_MouseEnter({
+                if ($buttonBrushRef) {
+                    $a = New-Object System.Windows.Media.Animation.ColorAnimation
+                    $a.To = [System.Windows.Media.Color]::FromRgb(151,207,250)
+                    $a.Duration = [System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(115))
+                    $buttonBrushRef.BeginAnimation([System.Windows.Media.SolidColorBrush]::ColorProperty,$a)
+                }
+            }.GetNewClosure())
+            $button.Add_MouseLeave({
+                if ($buttonBrushRef -and $buttonColorRef) {
+                    $a = New-Object System.Windows.Media.Animation.ColorAnimation
+                    $a.To = $buttonColorRef
+                    $a.Duration = [System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(145))
+                    $buttonBrushRef.BeginAnimation([System.Windows.Media.SolidColorBrush]::ColorProperty,$a)
+                }
+            }.GetNewClosure())
+            $button.Tag = 'AMR-TweakButtonHoverAttached'
+        }
+        elseif ($item -is [System.Windows.Controls.CheckBox] -and $item.Tag -ne 'AMR-TweakCheckHoverAttached') {
+            $check = $item
+            $checkBase = $check.Foreground
+            if ($checkBase -is [System.Windows.Media.SolidColorBrush]) {
+                try { $checkBase = $checkBase.Clone(); $check.Foreground = $checkBase } catch { $checkBase = $null }
+            } else { $checkBase = $null }
+            $checkBaseColor = $null
+            if ($checkBase) { $checkBaseColor = $checkBase.Color }
+            $checkBrushRef = $checkBase; $checkColorRef = $checkBaseColor
+            $check.Add_MouseEnter({
+                if ($checkBrushRef) {
+                    $a = New-Object System.Windows.Media.Animation.ColorAnimation
+                    $a.To = [System.Windows.Media.Color]::FromRgb(222,240,255)
+                    $a.Duration = [System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(105))
+                    $checkBrushRef.BeginAnimation([System.Windows.Media.SolidColorBrush]::ColorProperty,$a)
+                }
+            }.GetNewClosure())
+            $check.Add_MouseLeave({
+                if ($checkBrushRef -and $checkColorRef) {
+                    $a = New-Object System.Windows.Media.Animation.ColorAnimation
+                    $a.To = $checkColorRef
+                    $a.Duration = [System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(135))
+                    $checkBrushRef.BeginAnimation([System.Windows.Media.SolidColorBrush]::ColorProperty,$a)
+                }
+            }.GetNewClosure())
+            $check.Tag = 'AMR-TweakCheckHoverAttached'
+        }
+    }
+    $Root.Tag = 'AMR-TweaksPointerMotionAttached'
+}
+
+$script:AMRBasicTweaksPanel = C 'BasicTweaksPanel'
+if ($script:AMRBasicTweaksPanel) {
+    Set-AMRTweaksPointerMotion -Root $script:AMRBasicTweaksPanel
 }
 
 
@@ -8861,6 +9957,7 @@ $kitTabs = C 'ToolKitSubTabs'
         $mainTabs.Add_SelectionChanged({
             if ($_.OriginalSource -ne $this) { return }
             $activeSection = if ($this.SelectedItem) { [string]$this.SelectedItem.Header } else { '' }
+            if($activeSection -ne 'Backups'){$script:AMRBackupEntranceLastKey=$null}
             if ($activeSection -eq 'Cleanup') {
                 $activeCleanupTabs = C 'CleanupSubTabs'
                 if ($activeCleanupTabs -and $activeCleanupTabs.SelectedItem) {
@@ -8891,8 +9988,9 @@ $kitTabs = C 'ToolKitSubTabs'
             } elseif ($activeSection -eq 'Backups') {
                 $activeBackupTabs = C 'BackupSubTabs'
                 if ($activeBackupTabs -and $activeBackupTabs.SelectedItem) {
-                    Invoke-AMRContainerEntranceAnimation -Root $activeBackupTabs.SelectedItem.Content -StepDelayMs 58 -DurationMs 440
-                    if ([string]$activeBackupTabs.SelectedItem.Header -eq 'Backup Center') {
+                    $activeBackupName=[string]$activeBackupTabs.SelectedItem.Header
+                    if($script:AMRBackupEntranceLastKey -ne $activeBackupName){
+                        $script:AMRBackupEntranceLastKey=$activeBackupName
                     }
                 }
             }
@@ -8977,11 +10075,15 @@ $kitTabs = C 'ToolKitSubTabs'
     }
     $backupTabs = C 'BackupSubTabs'
     if ($backupTabs) {
+        $script:AMRBackupEntranceLastKey=$null
         $backupTabs.Add_SelectionChanged({
             if ($_.OriginalSource -ne $this) { return }
             Update-AMRSmartSearchContext
             if ($this.SelectedItem) {
-                Invoke-AMRContainerEntranceAnimation -Root $this.SelectedItem.Content -StepDelayMs 58 -DurationMs 440
+                $activeBackupName=[string]$this.SelectedItem.Header
+                if($script:AMRBackupEntranceLastKey -ne $activeBackupName){
+                    $script:AMRBackupEntranceLastKey=$activeBackupName
+                }
             }
         })
     }
@@ -9023,6 +10125,54 @@ $script:LogControls['Tweaks']    = C 'LogConsoleTweaks'
 $script:LogControls['Cleanup']   = C 'LogConsoleCleanup'
 $script:LogControls['Tools']     = C 'LogConsoleTools'
 $script:DriverLogConsole = C 'DriverLogConsole'
+
+# Logs suite micro-interactions. Reuse the restrained Activation copy-button motion
+# (same scale, timing and soft glow), while preserving each Logs button's own colors.
+try {
+    $logInteractiveButtonNames = @(
+        'LogCopyAllBtn','LogCopySystemBtn','LogCopyToolsBtn','LogCopyOverviewBtn',
+        'LogCopySoftwareBtn','LogCopyCustomizeBtn','LogCopyTweaksBtn','LogCopyCleanupBtn',
+        'ExportLogsBtn','ClearAllLogsBtn','DriverLogRefreshBtn','DriverLogCopyBtn','DriverLogExportBtn'
+    )
+    foreach ($logButtonName in $logInteractiveButtonNames) {
+        $logButton = C $logButtonName
+        if ($logButton -and $logButton -is [System.Windows.Controls.Button]) {
+            Set-AMRActivationCopyButtonMotion -Button $logButton
+            # PreviewMouseDown gives immediate tactile feedback for every action,
+            # including refresh/export/clear, without changing their click handlers.
+            $logButton.Add_PreviewMouseDown({
+                param($sender,$eventArgs)
+                Invoke-AMRActivationCopyButtonFeedback -Button $sender
+            }.GetNewClosure())
+        }
+    }
+
+    # The Driver severity selector (whose first item is All) already has its own
+    # face-color hover triggers. Add only a tiny lift/settle to make the selector
+    # feel responsive without changing the selected value or popup behavior.
+    $driverSeveritySelector = C 'DriverLogSeverityFilter'
+    if ($driverSeveritySelector) {
+        $driverSeveritySelector.RenderTransformOrigin = [System.Windows.Point]::new(0.5,0.5)
+        $driverSeverityScale = New-Object System.Windows.Media.ScaleTransform(1.0,1.0)
+        $driverSeveritySelector.RenderTransform = $driverSeverityScale
+        $driverSeveritySelector.Add_MouseEnter({
+            $a = [System.Windows.Media.Animation.DoubleAnimation]::new(1.0,1.025,[System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(135)))
+            $a.EasingFunction = [System.Windows.Media.Animation.QuadraticEase]::new()
+            $a.EasingFunction.EasingMode = [System.Windows.Media.Animation.EasingMode]::EaseOut
+            $driverSeverityScale.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleXProperty,$a)
+            $driverSeverityScale.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleYProperty,$a)
+        }.GetNewClosure())
+        $driverSeveritySelector.Add_MouseLeave({
+            $a = [System.Windows.Media.Animation.DoubleAnimation]::new(1.025,1.0,[System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(155)))
+            $a.EasingFunction = [System.Windows.Media.Animation.QuadraticEase]::new()
+            $a.EasingFunction.EasingMode = [System.Windows.Media.Animation.EasingMode]::EaseOut
+            $driverSeverityScale.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleXProperty,$a)
+            $driverSeverityScale.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleYProperty,$a)
+        }.GetNewClosure())
+    }
+} catch {
+    Write-AMRLog ('Logs interaction setup warning: ' + $_.Exception.Message) WARNING System
+}
 
 # Copy buttons for the standard log consoles (Driver Center keeps its existing Copy Visible button).
 $logCopyTargets = @{
@@ -10630,11 +11780,53 @@ function Set-AMRRefreshButtonVisual {
 
 function Start-AMRRefreshButtonAnimation {
     param([Parameter(Mandatory=$true)]$Button)
-    if (-not $Button -or -not ($Button.Content -is [System.Windows.Controls.StackPanel])) { return }
-    $glyph = $Button.Content.Children[0]
+    if (-not $Button) { return }
+    $glyph = $null
+    if ($Button.Content -is [System.Windows.Controls.StackPanel] -and $Button.Content.Children.Count -gt 0) {
+        $glyph = $Button.Content.Children[0]
+    } elseif ($Button.Content -is [System.Windows.Controls.ContentPresenter]) {
+        $glyph = $Button.Content
+    }
     if (-not $glyph -or -not ($glyph.RenderTransform -is [System.Windows.Media.RotateTransform])) { return }
 
-    # Keep the existing refresh-glyph spin.
+    # Startup-only premium refresh: a smooth double-turn, breathing glass edge and a restrained lift.
+    # Other refresh buttons retain their existing animation unchanged.
+    if ([string]$Button.Name -eq 'AMRStartupRefreshBtn') {
+        $spin = [System.Windows.Media.Animation.DoubleAnimation]::new(0,720,[System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(880)))
+        $spin.EasingFunction = [System.Windows.Media.Animation.CubicEase]::new()
+        $spin.EasingFunction.EasingMode = [System.Windows.Media.Animation.EasingMode]::EaseInOut
+        $glyph.RenderTransform.BeginAnimation([System.Windows.Media.RotateTransform]::AngleProperty,$spin)
+
+        $edge = $Button.BorderBrush
+        if ($edge -is [System.Windows.Media.SolidColorBrush]) {
+            $pulse = [System.Windows.Media.Animation.ColorAnimationUsingKeyFrames]::new()
+            [void]$pulse.KeyFrames.Add([System.Windows.Media.Animation.LinearColorKeyFrame]::new([System.Windows.Media.ColorConverter]::ConvertFromString('#E6C98F'),[System.Windows.Media.KeyTime]::FromTimeSpan([TimeSpan]::FromMilliseconds(0))))
+            [void]$pulse.KeyFrames.Add([System.Windows.Media.Animation.EasingColorKeyFrame]::new([System.Windows.Media.ColorConverter]::ConvertFromString('#FFF0C8'),[System.Windows.Media.KeyTime]::FromTimeSpan([TimeSpan]::FromMilliseconds(260))))
+            [void]$pulse.KeyFrames.Add([System.Windows.Media.Animation.EasingColorKeyFrame]::new([System.Windows.Media.ColorConverter]::ConvertFromString('#A98A5C'),[System.Windows.Media.KeyTime]::FromTimeSpan([TimeSpan]::FromMilliseconds(880))))
+            $pulse.KeyFrames[1].EasingFunction = [System.Windows.Media.Animation.CubicEase]::new()
+            $pulse.KeyFrames[2].EasingFunction = [System.Windows.Media.Animation.CubicEase]::new()
+            $edge.BeginAnimation([System.Windows.Media.SolidColorBrush]::ColorProperty,$pulse)
+        }
+
+        if ($Button.RenderTransform -is [System.Windows.Media.TransformGroup] -and $Button.RenderTransform.Children.Count -ge 3) {
+            $lift = $Button.RenderTransform.Children[0]
+            $scale = $Button.RenderTransform.Children[2]
+            $liftY = [System.Windows.Media.Animation.DoubleAnimation]::new(0,-2.2,[System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(250)))
+            $liftY.AutoReverse = $true
+            $liftY.EasingFunction = [System.Windows.Media.Animation.CubicEase]::new()
+            $liftY.EasingFunction.EasingMode = [System.Windows.Media.Animation.EasingMode]::EaseOut
+            $lift.BeginAnimation([System.Windows.Media.TranslateTransform]::YProperty,$liftY)
+            $scalePulse = [System.Windows.Media.Animation.DoubleAnimation]::new(1,1.035,[System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(260)))
+            $scalePulse.AutoReverse = $true
+            $scalePulse.EasingFunction = [System.Windows.Media.Animation.CubicEase]::new()
+            $scalePulse.EasingFunction.EasingMode = [System.Windows.Media.Animation.EasingMode]::EaseOut
+            $scale.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleXProperty,$scalePulse)
+            $scale.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleYProperty,$scalePulse)
+        }
+        return
+    }
+
+    # Keep the existing refresh-glyph spin for the other refresh buttons.
     $spin = [System.Windows.Media.Animation.DoubleAnimation]::new(0,360,[System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(620)))
     $spin.EasingFunction = [System.Windows.Media.Animation.CubicEase]::new()
     $spin.EasingFunction.EasingMode = [System.Windows.Media.Animation.EasingMode]::EaseOut
@@ -10724,50 +11916,260 @@ Enable-AMRRefreshButtonPressFeedback -Button (C 'AMRStartupRefreshBtn')
 
 # --- AMR DRIVER RESTORE POINT MANAGEMENT ---
 function Get-AMRComputerRestorePoints {
-    $command = Get-Command -Name Get-ComputerRestorePoint -ErrorAction SilentlyContinue
-    if (-not $command) { throw 'Get-ComputerRestorePoint is unavailable on this Windows installation.' }
-    return @(Get-ComputerRestorePoint -ErrorAction Stop)
+    param([ValidateRange(1,60)][int]$TimeoutSec = 5)
+    $command = Get-Command -Name Get-CimInstance -ErrorAction SilentlyContinue
+    if (-not $command) { throw 'Get-CimInstance is unavailable in this worker session.' }
+    try {
+        # SystemRestore is exposed by Windows in root/default. Use CIM directly so
+        # the query timeout is bounded and the worker can report the real provider error.
+        $points = @(Get-CimInstance -ClassName 'SystemRestore' -Namespace 'root/default' -OperationTimeoutSec $TimeoutSec -ErrorAction Stop)
+    } catch {
+        throw ('Windows System Restore inventory query failed (timeout {0}s): {1}' -f $TimeoutSec,$_.Exception.Message)
+    }
+    return @($points | Select-Object SequenceNumber,Description,CreationTime,RestorePointType,EventType)
+}
+
+function ConvertFrom-AMRRestorePointTime {
+    param([object]$Value)
+    if ($null -eq $Value) { return $null }
+    $raw = [string]$Value
+    try {
+        if ($raw -match '^\d{14}\.\d{6}[+-]\d{3}$') { return [System.Management.ManagementDateTimeConverter]::ToDateTime($raw) }
+        return [datetime]$Value
+    } catch { return $null }
 }
 
 function New-AMRDriverSafetyRestorePoint {
+    [CmdletBinding()]
     param([string]$Reason = 'Before driver changes')
-    $checkpointCommand = Get-Command -Name Checkpoint-Computer -ErrorAction SilentlyContinue
-    if (-not $checkpointCommand) { throw 'Checkpoint-Computer is unavailable. Windows System Protection may be disabled or the System Restore module is unavailable.' }
-    $stamp = Get-Date
-    $description = 'AMR Driver Safety - ' + $script:AMRSessionId.Substring(0,8) + ' - ' + $stamp.ToString('yyyyMMdd-HHmmss')
-    Checkpoint-Computer -Description $description -RestorePointType 'DEVICE_DRIVER_INSTALL' -ErrorAction Stop
-    Start-Sleep -Seconds 2
-    $points = @(Get-AMRComputerRestorePoints | Where-Object { [string]$_.Description -eq $description } | Sort-Object { [long]$_.SequenceNumber } -Descending)
-    if ($points.Count -lt 1) {
-        throw 'Windows accepted the restore-point request, but AMR could not verify the resulting restore point. No restore target has been recorded.'
+
+    # Confirm elevation inside the retained background worker.
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $principal = New-Object Security.Principal.WindowsPrincipal($identity)
+    if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+        throw ('The Restore Point worker is not elevated. Worker identity: {0}. Relaunch AMR with Run as administrator.' -f $identity.Name)
     }
-    $point = $points[0]
+    if ([string]::IsNullOrWhiteSpace([string]$env:SystemDrive) -or $env:SystemDrive -notmatch '^[A-Za-z]:$') { throw 'Windows did not report a valid system drive.' }
+    if ([string]::IsNullOrWhiteSpace([string]$script:DriverRestorePointStateFile)) { throw 'The isolated AMR Driver Backup receipt path is not configured.' }
+    foreach ($name in @('Enable-ComputerRestore','Get-CimInstance','Get-WmiObject')) {
+        if (-not (Get-Command -Name $name -ErrorAction SilentlyContinue)) { throw ('Required Windows command is unavailable in the worker: ' + $name) }
+    }
+
+    $metadataRoot = Split-Path -Parent $script:DriverRestorePointStateFile
+    try {
+        if (-not (Test-Path -LiteralPath $metadataRoot -PathType Container)) { New-Item -ItemType Directory -Path $metadataRoot -Force -ErrorAction Stop | Out-Null }
+        $metadataRoot = [IO.Path]::GetFullPath($metadataRoot)
+        $probe = Join-Path $metadataRoot ('.write-test-' + [guid]::NewGuid().ToString('N'))
+        [IO.File]::WriteAllText($probe,'AMR')
+        Remove-Item -LiteralPath $probe -Force -ErrorAction Stop
+    } catch { throw ('AMR Driver Backup isolated storage is not writable: {0}' -f $_.Exception.Message) }
+
+    $systemDriveRoot = [string]($env:SystemDrive + '\')
+    if (Get-Command -Name Write-AMRDriverWorkerProgress -ErrorAction SilentlyContinue) {
+        Write-AMRDriverWorkerProgress -Path $script:DriverWorkerProgressPath -Stage ('Confirming elevated token and System Protection on {0}' -f $systemDriveRoot)
+    }
+    # Native snapshots remain owned by Windows in System Volume Information.
+    # AMR stores only the exact Windows identity receipt in its private folder.
+    try { Enable-ComputerRestore -Drive $systemDriveRoot -ErrorAction Stop }
+    catch { throw ('Windows could not enable System Protection on {0}: {1}' -f $systemDriveRoot,$_.Exception.Message) }
+
+    $baseline = @(Get-AMRComputerRestorePoints -TimeoutSec 12)
+    $baselineSequences = @{}
+    foreach ($oldPoint in $baseline) {
+        $oldSeq = 0L
+        if ([long]::TryParse([string]$oldPoint.SequenceNumber,[ref]$oldSeq) -and $oldSeq -gt 0) { $baselineSequences[[string]$oldSeq] = $true }
+    }
+
+    $requestStarted = Get-Date
+    $stamp = Get-Date
+    $sessionTag = ([string]$script:AMRSessionId -replace '[^A-Fa-f0-9]','')
+    if ($sessionTag.Length -gt 8) { $sessionTag = $sessionTag.Substring(0,8) }
+    if ([string]::IsNullOrWhiteSpace($sessionTag)) { $sessionTag = [guid]::NewGuid().ToString('N').Substring(0,8) }
+    $description = 'Driver Safety - AMR-' + $sessionTag + ' - ' + $stamp.ToString('yyyyMMdd-HHmmss')
+
+    if (Get-Command -Name Write-AMRDriverWorkerProgress -ErrorAction SilentlyContinue) {
+        Write-AMRDriverWorkerProgress -Path $script:DriverWorkerProgressPath -Stage 'Requesting a Windows restore point through the native SystemRestore provider'
+    }
+
+    # Use the documented SystemRestore.CreateRestorePoint WMI method rather than
+    # Checkpoint-Computer. Windows may return S_OK while applying its default
+    # 24-hour frequency rule and skipping the new snapshot. Therefore success is
+    # determined ONLY by a new sequence in the Windows inventory, never by S_OK.
+    $nativeReturnCode = $null
+    try {
+        $systemRestoreClass = [wmiclass]'\\.\root\default:SystemRestore'
+        $nativeResult = $systemRestoreClass.CreateRestorePoint($description,10,100)
+        if ($null -eq $nativeResult -or $null -eq $nativeResult.ReturnValue) {
+            throw 'SystemRestore.CreateRestorePoint returned no status code.'
+        }
+        $nativeReturnCode = [uint32]$nativeResult.ReturnValue
+        if ($nativeReturnCode -ne 0) {
+            throw ('SystemRestore.CreateRestorePoint returned Windows status 0x{0:X8}.' -f $nativeReturnCode)
+        }
+    } catch {
+        throw ('Windows System Restore rejected the native CreateRestorePoint request: {0}' -f $_.Exception.Message)
+    }
+
+    if (Get-Command -Name Write-AMRDriverWorkerProgress -ErrorAction SilentlyContinue) {
+        Write-AMRDriverWorkerProgress -Path $script:DriverWorkerProgressPath -Stage 'Verifying whether Windows created a new checkpoint or applied its frequency limit'
+    }
+
+    $verifyDeadline = (Get-Date).AddSeconds(30)
+    $selected = $null
+    $isReusedExisting = $false
+    $lastInventoryError = $null
+    $lastCandidateSummary = @()
+    $latestInventory = @()
+    do {
+        $remaining = [int][math]::Ceiling(($verifyDeadline - (Get-Date)).TotalSeconds)
+        if ($remaining -le 0) { break }
+        $queryTimeout = [int][math]::Max(1,[math]::Min(8,$remaining))
+        try {
+            $latestInventory = @(Get-AMRComputerRestorePoints -TimeoutSec $queryTimeout)
+            $lastInventoryError = $null
+            $candidates = @()
+            foreach ($candidate in $latestInventory) {
+                $seq = 0L
+                if (-not [long]::TryParse([string]$candidate.SequenceNumber,[ref]$seq) -or $seq -le 0) { continue }
+                if ($baselineSequences.ContainsKey([string]$seq)) { continue }
+                $createdAt = ConvertFrom-AMRRestorePointTime -Value $candidate.CreationTime
+                if ($null -eq $createdAt) { continue }
+                if ($createdAt -lt $requestStarted.AddMinutes(-2) -or $createdAt -gt (Get-Date).AddMinutes(2)) { continue }
+                if ([int]$candidate.RestorePointType -ne 10) { continue }
+                $candidates += [pscustomobject]@{
+                    Point=$candidate; Sequence=$seq; CreatedAt=$createdAt
+                    ExactDescription=([string]$candidate.Description -ceq $description)
+                }
+            }
+            $lastCandidateSummary = @($candidates | ForEach-Object {
+                [pscustomobject]@{Sequence=$_.Sequence;Description=[string]$_.Point.Description;CreationTime=$_.CreatedAt.ToString('o');Type=[int]$_.Point.RestorePointType;ExactDescription=$_.ExactDescription}
+            })
+            $exact = @($candidates | Where-Object { $_.ExactDescription })
+            if ($exact.Count -eq 1) { $selected = $exact[0]; break }
+            if ($exact.Count -eq 0 -and $candidates.Count -eq 1) { $selected = $candidates[0]; break }
+            if ($candidates.Count -gt 1) {
+                throw ('More than one new Windows driver checkpoint matched this request; refusing to guess. Candidates: ' + ($lastCandidateSummary | ConvertTo-Json -Compress -Depth 4))
+            }
+        } catch {
+            if ($_.Exception.Message -like 'More than one new Windows driver checkpoint*') { throw }
+            $lastInventoryError = [string]$_.Exception.Message
+        }
+        $remaining = [int][math]::Ceiling(($verifyDeadline - (Get-Date)).TotalSeconds)
+        if ($remaining -gt 0) { Start-Sleep -Seconds ([int][math]::Min(2,$remaining)) }
+    } while ((Get-Date) -lt $verifyDeadline)
+
+    if ($null -eq $selected) {
+        if ($lastInventoryError) {
+            throw ('Windows accepted the native request, but its restore-point inventory could not be verified: {0}. No restore target was recorded.' -f $lastInventoryError)
+        }
+        # Windows documents that CreateRestorePoint may return S_OK while skipping
+        # creation when a point already exists within the default 24-hour window.
+        # In that case AMR may safely pin the latest existing checkpoint as a
+        # clearly labelled REUSED target; it must never call it newly created.
+        $reuseCandidates = @()
+        foreach ($existing in $latestInventory) {
+            $seq = 0L
+            if (-not [long]::TryParse([string]$existing.SequenceNumber,[ref]$seq) -or $seq -le 0) { continue }
+            if (-not $baselineSequences.ContainsKey([string]$seq)) { continue }
+            $existingTime = ConvertFrom-AMRRestorePointTime -Value $existing.CreationTime
+            if ($null -eq $existingTime) { continue }
+            if ($existingTime -gt $requestStarted -or $existingTime -lt $requestStarted.AddHours(-24)) { continue }
+            $reuseCandidates += [pscustomobject]@{Point=$existing;Sequence=$seq;CreatedAt=$existingTime;ExactDescription=$false}
+        }
+        $reuseCandidates = @($reuseCandidates | Sort-Object -Property CreatedAt,Sequence -Descending)
+        if ($reuseCandidates.Count -gt 0) {
+            $selected = $reuseCandidates[0]
+            $isReusedExisting = $true
+        } else {
+            $details = if ($lastCandidateSummary.Count) { ' Candidate details: ' + ($lastCandidateSummary | ConvertTo-Json -Compress -Depth 4) } else { ' Windows did not publish a new driver-install checkpoint, and no existing checkpoint from the last 24 hours is available to reuse.' }
+            throw ('Windows did not create a new restore point (the native API can report success when its 24-hour frequency rule skips creation).{0} No restore target was recorded.' -f $details)
+        }
+    }
+
+    $point = $selected.Point
+    $sequence = [long]$selected.Sequence
+    $createdAt = [datetime]$selected.CreatedAt
+    $actualDescription = [string]$point.Description
     $state = [pscustomobject]@{
-        Product = 'AMR Windows Utility - Driver Center'
+        SchemaVersion = 4
+        Product = 'AMR Windows Utility - Driver Backup'
         SessionId = [string]$script:AMRSessionId
-        SequenceNumber = [long]$point.SequenceNumber
-        Description = [string]$point.Description
-        CreationTime = [string]$point.CreationTime
+        SequenceNumber = $sequence
+        Description = $actualDescription
+        RequestedDescription = $description
+        RequestedDescriptionMatched = [bool]$selected.ExactDescription
+        IsReusedExisting = [bool]$isReusedExisting
+        PointOrigin = $(if ($isReusedExisting) { 'ExistingWindowsCheckpoint-Reused' } else { 'CreatedByAMR-NativeSystemRestore' })
+        NativeCreateReturnCode = $nativeReturnCode
+        CreationTime = $createdAt.ToString('o')
+        RestorePointType = [int]$point.RestorePointType
+        EventType = [int]$point.EventType
+        WindowsDrive = $systemDriveRoot
+        StorageOwner = 'Windows System Restore (System Volume Information)'
+        AMRMetadataRoot = $metadataRoot
         Reason = [string]$Reason
+        VerificationMethod = $(if ($isReusedExisting) { 'Exact existing Windows sequence + exact description + creation within preceding 24 hours; reused because Windows frequency rule skipped new creation' } else { 'New sequence absent from pre-request inventory + request-time window + DEVICE_DRIVER_INSTALL type; exact description preferred' })
+        VerifiedAt = (Get-Date).ToString('o')
         RecordedAt = (Get-Date).ToString('o')
     }
-    $state | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $script:DriverRestorePointStateFile -Encoding UTF8 -ErrorAction Stop
+
+    $statePath = [IO.Path]::GetFullPath([string]$script:DriverRestorePointStateFile)
+    $temporaryStatePath = $statePath + '.' + [guid]::NewGuid().ToString('N') + '.tmp'
+    try {
+        $state | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $temporaryStatePath -Encoding UTF8 -ErrorAction Stop
+        $staged = Get-Content -LiteralPath $temporaryStatePath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        if ([long]$staged.SequenceNumber -ne $sequence -or [string]$staged.Description -cne $actualDescription -or [string]$staged.CreationTime -cne $createdAt.ToString('o') -or [bool]$staged.IsReusedExisting -ne [bool]$isReusedExisting) {
+            throw 'Staged AMR receipt failed its checkpoint identity check.'
+        }
+        Move-Item -LiteralPath $temporaryStatePath -Destination $statePath -Force -ErrorAction Stop
+    } catch {
+        try { Remove-Item -LiteralPath $temporaryStatePath -Force -ErrorAction SilentlyContinue } catch {}
+        throw ('Windows checkpoint #{0} was verified, but its isolated AMR receipt could not be committed: {1}' -f $sequence,$_.Exception.Message)
+    }
     return $state
 }
 
 function Get-AMRRecordedDriverRestorePoint {
-    if (-not (Test-Path -LiteralPath $script:DriverRestorePointStateFile -PathType Leaf)) {
-        throw 'AMR has not recorded a verified driver restore point yet. Create one first.'
+    [CmdletBinding()]
+    param([ValidateRange(1,60)][int]$InventoryTimeoutSec = 5)
+
+    $statePath = [string]$script:DriverRestorePointStateFile
+    if ([string]::IsNullOrWhiteSpace($statePath) -or -not (Test-Path -LiteralPath $statePath -PathType Leaf)) {
+        throw 'No AMR Driver Backup receipt exists. Create and verify a Driver Safety Point first.'
     }
-    $state = Get-Content -LiteralPath $script:DriverRestorePointStateFile -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
-    if ([string]::IsNullOrWhiteSpace([string]$state.SequenceNumber) -or [string]$state.Description -notmatch '^AMR Driver Safety - ') {
-        throw 'The saved AMR restore-point record is invalid. Create a new restore point.'
+
+    try {
+        $state = Get-Content -LiteralPath $statePath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    } catch {
+        throw ('The AMR Driver Backup receipt is unreadable or damaged. Create a new verified restore point. Details: {0}' -f $_.Exception.Message)
     }
-    $matches = @(Get-AMRComputerRestorePoints | Where-Object {
-        [long]$_.SequenceNumber -eq [long]$state.SequenceNumber -and [string]$_.Description -eq [string]$state.Description
-    })
+
+    $sequence = 0L
+    if (-not [long]::TryParse([string]$state.SequenceNumber,[ref]$sequence) -or $sequence -le 0) {
+        throw 'The saved AMR restore-point sequence is invalid. Create a new Driver Safety Point.'
+    }
+    $description = [string]$state.Description
+    $isReusedReceipt = ([bool]$state.IsReusedExisting -and [int]$state.SchemaVersion -ge 4 -and [string]$state.PointOrigin -ceq 'ExistingWindowsCheckpoint-Reused')
+    if ([string]::IsNullOrWhiteSpace($description)) {
+        throw 'The saved receipt has no Windows restore-point description. Smart Restore is blocked.'
+    }
+    if (-not $isReusedReceipt -and $description -notmatch '^(Driver Safety - AMR-[A-Fa-f0-9]{8} - \d{8}-\d{6}|(AMR )?Driver Safety - )') {
+        throw 'The saved receipt does not identify an AMR-created or explicitly reused Windows checkpoint. Smart Restore is blocked.'
+    }
+    if ($sequence -gt [int]::MaxValue) {
+        throw 'The saved restore-point sequence is outside the range supported by Windows Restore-Computer. Smart Restore is blocked.'
+    }
+
+    try {
+        $matches = @(Get-AMRComputerRestorePoints -TimeoutSec $InventoryTimeoutSec | Where-Object {
+            [long]$_.SequenceNumber -eq $sequence -and [string]$_.Description -ceq $description
+        })
+    } catch {
+        throw ('Windows System Restore inventory could not be verified within the configured timeout. Smart Restore is blocked; no alternate point will be selected. Details: {0}' -f $_.Exception.Message)
+    }
+
     if ($matches.Count -ne 1) {
-        throw 'The exact AMR restore point is no longer present in Windows System Restore. It may have been removed by Windows or disk-space cleanup. No other restore point will be selected automatically.'
+        throw 'The exact saved Driver Safety Point is missing or ambiguous in Windows System Restore. Windows may have removed it during storage cleanup. Smart Restore will not substitute another point.'
     }
     return [pscustomobject]@{ State=$state; Point=$matches[0] }
 }
@@ -10775,73 +12177,266 @@ function Get-AMRRecordedDriverRestorePoint {
 function Update-AMRDriverRestorePointStatus {
     try {
         $record = Get-AMRRecordedDriverRestorePoint
-        $when = [string]$record.State.CreationTime
-        (C 'DriverRestorePointStatus').Text = ('Verified AMR restore point #{0} • {1} • {2}' -f $record.State.SequenceNumber,$record.State.Description,$when)
+        $when = try { ([datetime]$record.State.CreationTime).ToString('dd MMM yyyy  ·  hh:mm tt') } catch { [string]$record.State.CreationTime }
+        $statusPrefix = if ([bool]$record.State.IsReusedExisting) { 'Verified existing Windows checkpoint (reused)' } else { 'Verified AMR-created checkpoint' }; (C 'DriverRestorePointStatus').Text = ('{0}  #{1}  ·  {2}  ·  {3}' -f $statusPrefix,$record.State.SequenceNumber,$record.State.Description,$when)
         (C 'DriverSmartRestoreBtn').IsEnabled = $true
     } catch {
-        (C 'DriverRestorePointStatus').Text = 'No verified AMR restore point is recorded. Use Driver Backup > Create Restore Point whenever you want to save a recovery point.'
-        (C 'DriverSmartRestoreBtn').IsEnabled = $false
+        $savedState = $null
+        try {
+            if (Test-Path -LiteralPath $script:DriverRestorePointStateFile -PathType Leaf) {
+                $savedState = Get-Content -LiteralPath $script:DriverRestorePointStateFile -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+            }
+        } catch {}
+        if ($savedState -and -not [string]::IsNullOrWhiteSpace([string]$savedState.SequenceNumber)) {
+            $reason = [string]$_.Exception.Message
+            (C 'DriverRestorePointStatus').Text = ('Saved checkpoint #{0} · inventory check unavailable: {1}' -f $savedState.SequenceNumber,$reason)
+        } else {
+            (C 'DriverRestorePointStatus').Text = 'No verified driver restore point is recorded. Use Create Restore Point whenever you want to save a recovery point.'
+        }
+        (C 'DriverSmartRestoreBtn').IsEnabled = $true
     }
 }
 
 function Invoke-AMRDriverSmartRestore {
     if($script:DriverManagedJob -or $script:DriverActionJob -or $script:DriverScanJob -or $script:DriverBatchActive -or $script:DriverSmartQueueActive -or $script:DriverOperationState.State -eq 'Running'){Show-AMRMessage 'System Restore cannot be started while another driver operation is active. Wait for it to finish first.' 'Driver Operation Busy' OK Warning | Out-Null;return}
     try {
-        $record = Get-AMRRecordedDriverRestorePoint
+        $record = Get-AMRRecordedDriverRestorePoint -InventoryTimeoutSec 12
         $sequence = [long]$record.Point.SequenceNumber
+        if ($sequence -le 0 -or $sequence -gt [int]::MaxValue) {
+            throw 'Windows returned a restore-point sequence that cannot be passed safely to Restore-Computer. No restore was started.'
+        }
         $description = [string]$record.Point.Description
-        $created = [string]$record.Point.CreationTime
-        $message = "AMR found and verified the exact restore point you saved with Create Restore Point:`n`n$description`nSequence: $sequence`nCreated: $created`n`nWindows will start System Restore using this exact sequence number. This can close applications and restart Windows. Save your work before continuing. Other restore points will not be deleted.`n`nStart restoring now?"
+        if ([string]$record.Point.Description -cne [string]$record.State.Description) {
+            throw 'The Windows inventory identity no longer matches the saved AMR receipt. No restore was started.'
+        }
+        $created = try { ([datetime]$record.State.CreationTime).ToString('dd MMM yyyy  ·  hh:mm tt') } catch { [string]$record.State.CreationTime }
+        $restoreOriginNote = if ([bool]$record.State.IsReusedExisting) { "Windows did not create a new point because a recent checkpoint already exists. AMR is reusing this existing Windows checkpoint; it was NOT created by AMR.`n`n" } else { "This is the new Windows checkpoint created and verified by AMR.`n`n" }; $message = "${restoreOriginNote}The exact Windows restore point was found and verified:`n`n$description`nSequence: $sequence`nCreated: $created`n`nWindows will start System Restore using this exact sequence number. This can close applications and restart Windows. Save your work before continuing. Other restore points will not be deleted.`n`nStart restoring now?"
         if ((Show-AMRMessage $message 'Confirm Smart Restore' YesNo Warning) -ne 'Yes') { return }
         $restoreCommand = Get-Command -Name Restore-Computer -ErrorAction SilentlyContinue
-        if (-not $restoreCommand) {
-            Show-AMRMessage 'This Windows PowerShell installation does not expose Restore-Computer. AMR verified the target point but cannot safely invoke an exact-point restore on this system. No restore point was changed.' 'Smart Restore Unavailable' OK Warning | Out-Null
+        if (-not $restoreCommand -or -not $restoreCommand.Parameters.ContainsKey('RestorePoint')) {
+            Show-AMRMessage 'This Windows PowerShell installation does not expose Restore-Computer with its exact RestorePoint parameter. The target point was verified, but AMR cannot safely invoke an exact-point restore. No restore point was changed.' 'Smart Restore Unavailable' OK Warning | Out-Null
             return
         }
-        Show-AMRMessage 'AMR is now handing the exact restore-point sequence to Windows. Windows System Restore will restart the computer; the restore completes during startup. Do not power off the computer during the process.' 'Starting Smart Restore' OK Warning | Out-Null
-        Write-AMRLog ("Smart Restore requested for AMR restore point #{0} ({1})." -f $sequence,$description) WARNING Overview
+        Show-AMRMessage 'The exact restore-point sequence is being handed to Windows. Windows System Restore will restart the computer; the restore completes during startup. Do not power off the computer during the process.' 'Starting Smart Restore' OK Warning | Out-Null
+        Write-AMRLog (("Smart Restore requested for {0} Windows restore point #{1} ({2})." -f $(if ([bool]$record.State.IsReusedExisting) { 'reused existing' } else { 'AMR-created' }),$sequence,$description)) WARNING Overview
         Restore-Computer -RestorePoint ([int]$sequence) -Confirm:$false -ErrorAction Stop
     } catch {
-        Show-AMRMessage ('Smart Restore could not continue: ' + [string]$_.Exception.Message + "`n`nNo alternative restore point will be selected automatically.") 'Smart Restore Error' OK Error | Out-Null
-        Write-AMRLog ('Smart Restore validation/invocation failed: ' + [string]$_.Exception.Message) ERROR Overview
+        $detail = [string]$_.Exception.Message
+        if ($detail -like 'No verified driver restore point*') {
+            Show-AMRMessage 'There is no verified Driver Safety Point yet. Create a restore point first; Smart Restore will then target that exact checkpoint.' 'Smart Restore Not Ready' OK Information | Out-Null
+        } else {
+            Show-AMRMessage ('Smart Restore could not continue: ' + $detail + "`n`nNo alternative restore point will be selected automatically.") 'Smart Restore Error' OK Error | Out-Null
+        }
+        Write-AMRLog ('Smart Restore validation/invocation failed: ' + $detail) ERROR Overview
     }
+}
+
+function Complete-AMRDriverRestorePointWorker {
+    [CmdletBinding()]
+    param([Parameter(Mandatory=$true)][System.Management.Automation.Job]$Job)
+
+    # Restore Point owns a private job reference captured by its button handler.
+    # Never depend on the shared DriverManagedJob slot: unrelated dispatcher
+    # callbacks may clear that slot while this specific job is still alive.
+    $job = $Job
+    if ($job.State -notin @('Completed','Failed','Stopped')) { return $null }
+
+    $result = $null
+    $failure = $null
+    $errorRecord = $null
+    try {
+        if ($job.State -eq 'Completed') {
+            $received = @(Receive-Job -Job $job -ErrorAction Stop)
+            if ($received.Count -gt 0) { $result = $received[-1] }
+            if ($null -eq $result) { $failure = 'The Restore Point worker completed without returning a result object.' }
+        } else {
+            foreach ($child in @($job.ChildJobs)) {
+                if ($child.Error -and $child.Error.Count -gt 0) { $errorRecord = $child.Error[-1] }
+                if ($child.JobStateInfo -and $child.JobStateInfo.Reason) { $failure = [string]$child.JobStateInfo.Reason.Message }
+            }
+            if (-not $failure -and $errorRecord) { $failure = [string]$errorRecord.Exception.Message }
+            if (-not $failure) { $failure = ('Restore Point worker ended in state: ' + [string]$job.State) }
+        }
+    } catch {
+        $errorRecord = $_
+        $failure = [string]$_.Exception.Message
+    }
+
+    $operationId = if ($job.PSObject.Properties['AMROperationId']) { [string]$job.AMROperationId } else { '' }
+    $durationMs = $null
+    if ($script:DriverOperationState -and $script:DriverOperationState.StartedAt) {
+        try { $durationMs = [long]((Get-Date) - [datetime]$script:DriverOperationState.StartedAt).TotalMilliseconds } catch {}
+    }
+
+    # Clean only resources still owned by this exact job. Do not reset another
+    # operation that may have started after this job's shared slot was cleared.
+    $isCurrentJob = $false
+    try { $isCurrentJob = [object]::ReferenceEquals($script:DriverManagedJob,$job) } catch {}
+    $ownsRestoreOperation = ($script:DriverOperationState -and [string]$script:DriverOperationState.Name -eq 'RestorePoint' -and $job.PSObject.Properties['AMRGeneration'] -and [int]$job.AMRGeneration -eq [int]$script:DriverOperationState.Generation)
+    $isActiveRestoreJob = $false
+    try { $isActiveRestoreJob = [object]::ReferenceEquals($script:DriverRestorePointActiveJob,$job) } catch {}
+    try { Remove-Job -Job $job -Force -ErrorAction SilentlyContinue } catch {}
+    if ($isCurrentJob -or $ownsRestoreOperation -or $isActiveRestoreJob) {
+        if ($isCurrentJob) { $script:DriverManagedJob = $null }
+        if ($isCurrentJob -and $script:DriverManagedProgressTimer) { try { $script:DriverManagedProgressTimer.Stop() } catch {}; $script:DriverManagedProgressTimer = $null }
+        if ($isCurrentJob -and $script:DriverManagedProgressFile) {
+            try { Remove-Item -LiteralPath $script:DriverManagedProgressFile -Force -ErrorAction SilentlyContinue; Remove-Item -LiteralPath ($script:DriverManagedProgressFile + '.tmp') -Force -ErrorAction SilentlyContinue } catch {}
+        }
+        if ($isCurrentJob) { $script:DriverManagedProgressFile = $null; $script:DriverManagedWorkerId = $null; $script:DriverManagedWatchdog = $null }
+        $script:DriverRestorePointActiveJob = $null
+        if ($script:DriverOperationState -and [string]$script:DriverOperationState.Name -eq 'RestorePoint') {
+            $script:DriverOperationState = [pscustomobject]@{ Name='Idle'; State='Idle'; StartedAt=$null; Generation=[int]$script:DriverOperationState.Generation; CanCancel=$false; Status='Ready' }
+        }
+        try { Release-AMRDriverOperationLock } catch {}
+        try { (C 'DriverOperationProgress').IsIndeterminate=$false; (C 'DriverOperationProgress').Visibility='Collapsed' } catch {}
+        try { Update-AMRDriverActionButtons } catch {}
+    }
+
+    if ($failure) {
+        Write-AMRDriverDiagnostic -Severity ERROR -Operation 'RestorePoint' -Stage 'WorkerResultCollectionFailed' -Message 'The dedicated Restore Point worker did not provide a usable result.' -OperationId $operationId -Source 'Complete-AMRDriverRestorePointWorker' -DurationMs $durationMs -Result 'Failed' -ErrorRecord $(if ($errorRecord) { $errorRecord } else { $failure })
+        throw $failure
+    }
+    Write-AMRDriverDiagnostic -Severity SUCCESS -Operation 'RestorePoint' -Stage 'WorkerResultCollected' -Message 'The dedicated Restore Point worker result was collected from its retained job reference.' -OperationId $operationId -Source 'Complete-AMRDriverRestorePointWorker' -DurationMs $durationMs -Result 'Completed'
+    return $result
 }
 
 (C 'DriverCreateRestorePointBtn').Add_Click({
     $button = C 'DriverCreateRestorePointBtn'
     if ($script:DriverManagedJob -or $script:DriverActionJob -or $script:DriverScanJob -or $script:DriverBatchActive -or $script:DriverSmartQueueActive -or $script:DriverOperationState.State -eq 'Running') { Show-AMRMessage 'Wait for the current driver operation to finish before creating a restore point.' 'Driver Operation Busy' OK Information | Out-Null; return }
-    if ((Show-AMRMessage 'Create a Windows System Restore point now? Windows System Protection must be enabled. This does not install or change any driver.' 'Create AMR Driver Restore Point' YesNo Warning) -ne 'Yes') { return }
+    if (-not (Test-AMRAdmin)) { Show-AMRMessage 'Creating and verifying a Windows restore point requires Administrator privileges. Close the utility and launch it again as Administrator.' 'Administrator Required' OK Warning | Out-Null; return }
+    if ((Show-AMRMessage 'Create a Windows System Restore point now? AMR will enable System Protection on the Windows drive if needed, request a checkpoint, and verify the exact Windows result. If Windows skips a new point due to its frequency rule, AMR may record a clearly labelled recent existing checkpoint instead. This does not install or change any driver. Windows does not expose a native percentage for this operation, so AMR displays activity rather than a fabricated percentage. You can stop AMR waiting, but Windows may still finish a request it has already accepted.' 'Create Driver Safety Point' YesNo Warning) -ne 'Yes') { return }
+    $progressPanel=C 'DriverRestoreProgressPanel';$progressBar=C 'DriverRestorePointProgressBar';$progressText=C 'DriverRestorePointProgressText';$elapsedText=C 'DriverRestorePointElapsed';$percentText=C 'DriverRestorePointPercent';$estimateText=C 'DriverRestorePointEstimate';$cancelButton=C 'DriverRestorePointCancelBtn'
+    $script:DriverRestorePointStartedAt=Get-Date;$script:DriverRestorePointLastFailure=$null;$script:DriverRestorePointCancelled=$false
+    if($progressPanel){$progressPanel.Visibility='Visible'}
+    if($progressBar){$progressBar.IsIndeterminate=$true;$progressBar.Value=0}
+    if($percentText){$percentText.Text='Running'}
+    if($progressText){$progressText.Text='Starting Windows System Restore…'}
+    if($elapsedText){$elapsedText.Text='Elapsed 00:00'}
+    if($estimateText){$estimateText.Text='Waiting for Windows'}
+    if($cancelButton){$cancelButton.Visibility='Visible';$cancelButton.IsEnabled=$true}
+    $button.IsEnabled=$false;$button.Content='Creating checkpoint…'
     try {
-        $null=Start-AMRDriverManagedWorker -Operation RestorePoint -Device ([pscustomobject]@{DeviceName='Driver Backup';DeviceId='DriverBackup'}) -Candidate 'Manually created from Driver Backup'
-        $button.IsEnabled=$false; $button.Content='Creating…'
+        $restoreJob=Start-AMRDriverManagedWorker -Operation RestorePoint -Device ([pscustomobject]@{DeviceName='Driver Backup';DeviceId='DriverBackup'}) -Candidate 'Manually created from Driver Backup'
+        $script:DriverRestorePointActiveJob = $restoreJob
+        $restoreProgressPath = [string]$script:DriverManagedProgressFile
+        if (-not $restoreJob -or -not ($restoreJob -is [System.Management.Automation.Job])) {
+            throw 'Start-AMRDriverManagedWorker did not return a valid PowerShell Job object for Restore Point.'
+        }
         $poll=New-Object System.Windows.Threading.DispatcherTimer
         $poll.Interval=[TimeSpan]::FromMilliseconds(500)
         $poll.Add_Tick(({
-            if(-not $script:DriverManagedJob){$poll.Stop();$button.Content='Create Restore Point';$button.IsEnabled=$true;return}
-            if($script:DriverManagedJob.State -in @('Completed','Failed','Stopped')){
-                $poll.Stop()
+            # This closure-held job is the sole authority for this Restore Point UI.
+            # A null shared slot is not a failure while the captured job still exists.
+            $jobState = [string]$restoreJob.State
+            if ($script:DriverRestorePointStartedAt) {
+                $elapsed=[timespan]((Get-Date)-[datetime]$script:DriverRestorePointStartedAt)
+                if($elapsedText){$elapsedText.Text=('Elapsed '+$elapsed.ToString('mm\:ss'))}
+            }
+            if ($restoreProgressPath -and (Test-Path -LiteralPath $restoreProgressPath -PathType Leaf)) {
                 try {
-                    $created=Complete-AMRDriverManagedWorker
-                    if(-not $created -or -not $created.Success){throw $(if($created.Failure){[string]$created.Failure}else{'Restore point creation did not return a verified result.'})}
-                    $state=$created.RestoreState
-                    (C 'DriverRestorePointStatus').Text=('Verified AMR restore point #{0} created: {1}' -f $state.SequenceNumber,$state.Description)
-                    (C 'DriverSmartRestoreBtn').IsEnabled=$true
-                    Show-AMRMessage ("AMR created and verified the Windows restore point successfully.`n`nSequence: $($state.SequenceNumber)`nDescription: $($state.Description)") 'Restore Point Created' OK Information | Out-Null
-                    Write-AMRLog ("Created AMR driver restore point #{0}." -f $state.SequenceNumber) SUCCESS Overview
-                } catch {
-                    (C 'DriverRestorePointStatus').Text='Restore point creation failed. Check System Protection and available restore-point storage.'
-                    Show-AMRMessage ('AMR could not create and verify a restore point: '+[string]$_.Exception.Message) 'Restore Point Failed' OK Error | Out-Null
-                    Write-AMRLog ('AMR driver restore point creation failed: '+[string]$_.Exception.Message) ERROR Overview
-                } finally {$button.Content='Create Restore Point';$button.IsEnabled=$true}
+                    $liveProgress=Get-Content -LiteralPath $restoreProgressPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+                    if($liveProgress.Stage -and $progressText){$progressText.Text=[string]$liveProgress.Stage}
+                } catch {}
+            }
+            if ($jobState -notin @('Completed','Failed','Stopped')) {
+                if($progressBar){$progressBar.IsIndeterminate=$true}
+                if($percentText){$percentText.Text='Running'}
+                if($estimateText){$estimateText.Text='Waiting for Windows'}
+                return
+            }
+
+            $poll.Stop()
+            try {
+                $created=Complete-AMRDriverRestorePointWorker -Job $restoreJob
+                if(-not $created -or -not $created.Success){throw $(if($created -and $created.Failure){[string]$created.Failure}else{'Restore point creation did not return a verified result.'})}
+                $state=$created.RestoreState
+                Update-AMRDriverRestorePointStatus
+                (C 'DriverSmartRestoreBtn').IsEnabled=$true
+                if($progressBar){$progressBar.IsIndeterminate=$false;$progressBar.Value=100}
+                if($percentText){$percentText.Text='Verified'}
+                if($progressText){$progressText.Text='Success — Windows created the restore point and the exact sequence number was verified.'}
+                if($estimateText){$estimateText.Text='Completed and verified'}
+                Write-AMRLog ("Created AMR driver restore point #{0}." -f $state.SequenceNumber) SUCCESS Overview
+            } catch {
+                if($progressBar){$progressBar.IsIndeterminate=$false;$progressBar.Value=0}
+                if($percentText){$percentText.Text='Not verified'}
+                if($progressText){$progressText.Text=('Failed — '+[string]$_.Exception.Message)}
+                if($estimateText){$estimateText.Text='Operation ended · not verified'}
+                Update-AMRDriverRestorePointStatus
+                Show-AMRMessage ('Could not create and verify a Windows restore point: '+[string]$_.Exception.Message) 'Restore Point Failed' OK Error | Out-Null
+                Write-AMRLog ('AMR driver restore point creation failed: '+[string]$_.Exception.Message) ERROR Overview
+            } finally {
+                $script:DriverRestorePointStartedAt=$null
+                $button.Content='＋  Create Restore Point';$button.IsEnabled=$true
+                if($cancelButton){$cancelButton.Visibility='Collapsed';$cancelButton.IsEnabled=$false}
             }
         }).GetNewClosure())
-        $script:DriverManagedTimer=$poll; $poll.Start()
+        $script:DriverManagedTimer=$poll;$poll.Start()
     } catch {
-        $button.Content='Create Restore Point';$button.IsEnabled=$true
+        $button.Content='＋  Create Restore Point';$button.IsEnabled=$true
+        if($progressBar){$progressBar.IsIndeterminate=$false;$progressBar.Value=0}
+        if($percentText){$percentText.Text='—'}
+        if($progressText){$progressText.Text=('Could not start — '+[string]$_.Exception.Message)}
+        if($estimateText){$estimateText.Text='Not started'}
+        if($cancelButton){$cancelButton.Visibility='Collapsed';$cancelButton.IsEnabled=$false}
+        $script:DriverRestorePointStartedAt=$null
         Show-AMRMessage ('Could not start restore point creation: '+[string]$_.Exception.Message) 'Restore Point Failed' OK Error | Out-Null
     }
 })
+
+(C 'DriverRestorePointCancelBtn').Add_Click({
+    $restoreCancelJob=$script:DriverRestorePointActiveJob
+    if(-not $restoreCancelJob -or [string]$script:DriverOperationState.Name -ne 'RestorePoint'){return}
+    if((Show-AMRMessage 'Stop the AMR background worker now? This ends AMR waiting and verification. If Windows has already accepted the native restore-point request, Windows may still complete it in the background; AMR will not mark it as verified unless it can confirm the exact checkpoint.' 'Cancel Restore Point Operation' YesNo Warning) -ne 'Yes'){return}
+    $script:DriverRestorePointCancelled=$true
+    try { if ([object]::ReferenceEquals($script:DriverManagedJob,$restoreCancelJob)) { Stop-AMRDriverManagedWorker -Force } else { Stop-Job -Job $restoreCancelJob -ErrorAction SilentlyContinue } } catch {}
+    $button=C 'DriverCreateRestorePointBtn';if($button){$button.Content='＋  Create Restore Point';$button.IsEnabled=$true}
+    $progressBar=C 'DriverRestorePointProgressBar';if($progressBar){$progressBar.IsIndeterminate=$false;$progressBar.Value=0}
+    $percentText=C 'DriverRestorePointPercent';if($percentText){$percentText.Text='Cancelled'}
+    $progressText=C 'DriverRestorePointProgressText';if($progressText){$progressText.Text='AMR worker cancelled. Windows may still finish a request already accepted; check System Protection before retrying.'}
+    $elapsedText=C 'DriverRestorePointElapsed';if($elapsedText){$elapsedText.Text='Stopped by user'}
+    $estimateText=C 'DriverRestorePointEstimate';if($estimateText){$estimateText.Text='Not verified'}
+    $cancelButton=C 'DriverRestorePointCancelBtn';if($cancelButton){$cancelButton.Visibility='Collapsed';$cancelButton.IsEnabled=$false}
+    $script:DriverRestorePointStartedAt=$null
+    Update-AMRDriverRestorePointStatus
+})
 (C 'DriverSmartRestoreBtn').Add_Click({ Invoke-AMRDriverSmartRestore })
+
+# Driver Backup buttons: matched neutral-glass hover and press feedback for both actions.
+foreach($driverActionButtonName in @('DriverCreateRestorePointBtn','DriverSmartRestoreBtn')){
+    $driverActionButton=C $driverActionButtonName
+    if(-not $driverActionButton){continue}
+    $driverActionButton.RenderTransformOrigin=[System.Windows.Point]::new(0.5,0.5)
+    $driverActionButton.RenderTransform=[System.Windows.Media.ScaleTransform]::new(1.0,1.0)
+    $driverActionButton.Add_MouseEnter({
+        try{
+            if(-not $this.IsEnabled){return}
+            $hoverColor='#A0788796'
+            $brush=[System.Windows.Media.SolidColorBrush]::new($this.Background.Color);$this.Background=$brush
+            $ca=New-Object System.Windows.Media.Animation.ColorAnimation;$ca.To=[System.Windows.Media.ColorConverter]::ConvertFromString($hoverColor);$ca.Duration=[TimeSpan]::FromMilliseconds(165);$ca.EasingFunction=New-Object System.Windows.Media.Animation.QuadraticEase;$brush.BeginAnimation([System.Windows.Media.SolidColorBrush]::ColorProperty,$ca)
+            $edge=[System.Windows.Media.SolidColorBrush]::new($this.BorderBrush.Color);$this.BorderBrush=$edge
+            $ea=New-Object System.Windows.Media.Animation.ColorAnimation;$ea.To=[System.Windows.Media.ColorConverter]::ConvertFromString('#F0F4F8');$ea.Duration=[TimeSpan]::FromMilliseconds(165);$edge.BeginAnimation([System.Windows.Media.SolidColorBrush]::ColorProperty,$ea)
+            $scale=New-Object System.Windows.Media.Animation.DoubleAnimation;$scale.To=1.018;$scale.Duration=[TimeSpan]::FromMilliseconds(165);$scale.EasingFunction=New-Object System.Windows.Media.Animation.QuadraticEase;$this.RenderTransform.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleXProperty,$scale);$this.RenderTransform.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleYProperty,$scale)
+        }catch{}
+    }.GetNewClosure())
+    $driverActionButton.Add_MouseLeave({
+        try{
+            $baseColor='#805E6B78'
+            $edgeColor='#D0DAE4'
+            $brush=[System.Windows.Media.SolidColorBrush]::new($this.Background.Color);$this.Background=$brush
+            $ca=New-Object System.Windows.Media.Animation.ColorAnimation;$ca.To=[System.Windows.Media.ColorConverter]::ConvertFromString($baseColor);$ca.Duration=[TimeSpan]::FromMilliseconds(185);$brush.BeginAnimation([System.Windows.Media.SolidColorBrush]::ColorProperty,$ca)
+            $edge=[System.Windows.Media.SolidColorBrush]::new($this.BorderBrush.Color);$this.BorderBrush=$edge
+            $ea=New-Object System.Windows.Media.Animation.ColorAnimation;$ea.To=[System.Windows.Media.ColorConverter]::ConvertFromString($edgeColor);$ea.Duration=[TimeSpan]::FromMilliseconds(185);$edge.BeginAnimation([System.Windows.Media.SolidColorBrush]::ColorProperty,$ea)
+            $scale=New-Object System.Windows.Media.Animation.DoubleAnimation;$scale.To=1.0;$scale.Duration=[TimeSpan]::FromMilliseconds(185);$this.RenderTransform.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleXProperty,$scale);$this.RenderTransform.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleYProperty,$scale)
+        }catch{}
+    }.GetNewClosure())
+    $driverActionButton.Add_PreviewMouseDown({
+        try{if(-not $this.IsEnabled){return};$a=New-Object System.Windows.Media.Animation.DoubleAnimation;$a.To=0.986;$a.Duration=[TimeSpan]::FromMilliseconds(65);$this.RenderTransform.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleXProperty,$a);$this.RenderTransform.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleYProperty,$a)}catch{}
+    }.GetNewClosure())
+    $driverActionButton.Add_PreviewMouseUp({
+        try{if(-not $this.IsEnabled -or -not $this.IsMouseOver){return};$a=New-Object System.Windows.Media.Animation.DoubleAnimation;$a.To=1.018;$a.Duration=[TimeSpan]::FromMilliseconds(90);$this.RenderTransform.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleXProperty,$a);$this.RenderTransform.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleYProperty,$a)}catch{}
+    }.GetNewClosure())
+}
 
 # --- Phase 6.10.3 | ASUS routing + ASRock Latest Driver Catalog metadata (building on MSI + GIGABYTE) (based on Phase 6.10.1) ---
 # Phase 6.10.1 universal 72-vendor support routing is preserved below.
@@ -13636,13 +15231,13 @@ function Set-AMRDriverExperienceMode {
     }
 
     if ($Mode -eq 'Smart') {
-        if ($smartButton) { $smartButton.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#263646'); $smartButton.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#B89A62'); $smartButton.FontWeight = 'Bold' }
-        if ($advancedButton) { $advancedButton.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#182638'); $advancedButton.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#344B68'); $advancedButton.FontWeight = 'Normal' }
+        if ($smartButton) { $smartButton.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#344A43'); $smartButton.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#D6B77E'); $smartButton.FontWeight = 'Bold' }
+        if ($advancedButton) { $advancedButton.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#1C293B'); $advancedButton.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#456A91'); $advancedButton.FontWeight = 'Normal' }
         if ($description) { $description.Text = '' }
         if ($modeEyebrow) { $modeEyebrow.Text = 'SMART ASSISTANT' }
         if ($modeHeading) { $modeHeading.Text = '' }
-        if ($smartButton) { $smartButton.Content = '✦ Smart'; $smartButton.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#263646'); $smartButton.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#F4D99B') }
-        if ($advancedButton) { $advancedButton.Content = 'Professional'; $advancedButton.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#CBD5E1') }
+        if ($smartButton) { $smartButton.Content = '✦ Smart'; $smartButton.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#344A43'); $smartButton.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#F4D99B') }
+        if ($advancedButton) { $advancedButton.Content = 'Professional'; $advancedButton.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#B9C9DC') }
         if ($scrollViewer) { $scrollViewer.Padding = [System.Windows.Thickness]::new(10,8,10,16) }
         if ($smartActionsPanel) { $smartActionsPanel.Visibility = 'Visible' }
         if ($professionalActionsPanel) { $professionalActionsPanel.Visibility = 'Collapsed' }
@@ -13692,12 +15287,12 @@ function Set-AMRDriverExperienceMode {
         if ($smartInstallButton) { $smartInstallButton.Visibility = 'Visible'; $smartInstallButton.Content = 'Smart Install' }
     }
     else {
-        if ($smartButton) { $smartButton.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#182638'); $smartButton.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#344B68'); $smartButton.FontWeight = 'Normal' }
-        if ($advancedButton) { $advancedButton.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#263646'); $advancedButton.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#B89A62'); $advancedButton.FontWeight = 'Bold' }
+        if ($smartButton) { $smartButton.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#1C293B'); $smartButton.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#456A91'); $smartButton.FontWeight = 'Normal' }
+        if ($advancedButton) { $advancedButton.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#344A43'); $advancedButton.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#D6B77E'); $advancedButton.FontWeight = 'Bold' }
         if ($description) { $description.Text = 'Full control for experienced users: inspect every detected device, compare candidates, manage official sources, review rollback options and build installation plans.' }
         if ($modeEyebrow) { $modeEyebrow.Text = 'PROFESSIONAL WORKSPACE  •  FULL CONTROL' }
         if ($modeHeading) { $modeHeading.Text = 'FULL DRIVER INVENTORY & CONTROL' }
-        if ($smartButton) { $smartButton.Content = '✦ Smart'; $smartButton.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#CBD5E1') }
+        if ($smartButton) { $smartButton.Content = '✦ Smart'; $smartButton.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#B9C9DC') }
         if ($advancedButton) { $advancedButton.Content = 'Professional'; $advancedButton.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#F4D99B') }
         if ($scrollViewer) { $scrollViewer.Padding = [System.Windows.Thickness]::new(10,8,10,16) }
         if ($smartActionsPanel) { $smartActionsPanel.Visibility = 'Collapsed' }
@@ -15649,15 +17244,32 @@ function Start-AMRDriverManagedWorker {
             [pscustomobject]@{Success=$true;PackageFolder=$packageFolder;ManifestPath=$manifestPath;InstallableInfFiles=@($stagedInfs);Signer=[string]$manifest.CatalogSigner;VerificationState=[string]$manifest.VerificationState;StagingOutput=($stageOutputs -join "`n")}
         } elseif ($operationName -eq 'RestorePoint') {
             try {
+                # Background jobs run in a separate PowerShell session. Explicitly
+                # import the Windows modules that own the native restore-point and
+                # CIM commands instead of relying on module auto-loading in ISE.
+                Write-AMRDriverWorkerProgress -Path $script:DriverWorkerProgressPath -Stage 'Loading Windows System Restore and CIM components'
+                Import-Module Microsoft.PowerShell.Management -ErrorAction Stop
+                Import-Module CimCmdlets -ErrorAction Stop
+                foreach($requiredCommand in @('Enable-ComputerRestore','Get-CimInstance','Get-WmiObject')){
+                    if(-not (Get-Command -Name $requiredCommand -ErrorAction SilentlyContinue)){
+                        throw ('Required Windows command is unavailable in the background worker: '+$requiredCommand)
+                    }
+                }
+                $workerIdentity = [Security.Principal.WindowsIdentity]::GetCurrent()
+                $workerPrincipal = New-Object Security.Principal.WindowsPrincipal($workerIdentity)
+                $workerIsAdmin = $workerPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+                $workerMetadataRoot = if (-not [string]::IsNullOrWhiteSpace([string]$script:DriverRestorePointStateFile)) { Split-Path -Parent $script:DriverRestorePointStateFile } else { [string]$script:DriverBackupRestoreRoot }; Write-AMRDriverWorkerEvent -Severity INFO -Stage 'RestorePointEnvironmentReady' -Message 'Windows SystemRestore WMI, CIM inventory and metadata paths loaded in the background worker.' -Context @{PowerShellVersion=$PSVersionTable.PSVersion.ToString();Edition=$PSVersionTable.PSEdition;SystemDrive=$env:SystemDrive;WorkerIdentity=$workerIdentity.Name;WorkerIsAdministrator=$workerIsAdmin;MetadataRoot=$workerMetadataRoot}
                 Write-AMRDriverWorkerProgress -Path $script:DriverWorkerProgressPath -Stage 'Creating Windows System Restore point'
                 $reason=if([string]::IsNullOrWhiteSpace([string]$candidateData)){'Before AMR driver installation'}else{[string]$candidateData}
                 $created=New-AMRDriverSafetyRestorePoint -Reason $reason
-                Write-AMRDriverWorkerProgress -Path $script:DriverWorkerProgressPath -Stage 'Restore point created and verified' -Percent 100
-                [pscustomobject]@{Success=$true;Status=('Verified AMR restore point #{0} created' -f $created.SequenceNumber);Failure='';ExistingState=$null;RestoreState=$created}
+                Write-AMRDriverWorkerProgress -Path $script:DriverWorkerProgressPath -Stage 'Exact Windows restore-point target verified and recorded' -Percent 100
+                [pscustomobject]@{Success=$true;Status=$(if([bool]$created.IsReusedExisting){'Verified existing Windows restore point #{0} reused' -f $created.SequenceNumber}else{'Verified new AMR restore point #{0} created' -f $created.SequenceNumber});Failure='';ExistingState=$null;RestoreState=$created}
             } catch {
-                $failure=[string]$_.Exception.Message; $existing=$null
-                try { $existing=Get-AMRRecordedDriverRestorePoint } catch {}
-                [pscustomobject]@{Success=$false;Status='';Failure=$failure;ExistingState=$(if($existing){$existing.State}else{$null});RestoreState=$null}
+                $failure=[string]$_.Exception.Message
+                Write-AMRDriverWorkerEvent -Severity ERROR -Stage 'RestorePointFailed' -Message 'Restore point creation or bounded verification failed.' -ErrorRecord $_ -Result 'Failed' -Context @{OperationId=$workerOperationId}
+                # Do not perform a second inventory query in the failure handler:
+                # that could re-enter the same hung WMI provider and hide the real error.
+                [pscustomobject]@{Success=$false;Status='';Failure=$failure;ExistingState=$null;RestoreState=$null}
             }
         } else {
             Write-AMRDriverWorkerProgress -Path $script:DriverWorkerProgressPath -Stage 'Checking Windows Driver Store and AMR recovery manifests'
@@ -15725,9 +17337,19 @@ function Start-AMRDriverManagedWorker {
             $managedWatchdog=$script:DriverManagedWatchdog
             if($managedWatchdog -and [int]$managedWatchdog.TimeoutSeconds -gt 0 -and (Test-AMRDriverOperationTimeout -Operation ([string]$managedWatchdog.Operation) -StartedAt ([datetime]$managedWatchdog.StartedAt))){
                 $timedOutOperation=[string]$managedWatchdog.Operation; $timedOutId=[string]$script:DriverManagedJob.AMROperationId
+                if($timedOutOperation -eq 'RestorePoint'){$script:DriverRestorePointLastFailure='Windows System Restore did not return within the 10-minute safety limit. The AMR worker was stopped; Windows may still finish an accepted native request. Check System Protection and Driver Diagnostics before retrying.'}
                 Write-AMRDriverTimeoutEvent -Operation $timedOutOperation -Message ('Managed driver operation exceeded its configured timeout: '+$timedOutOperation) -OperationId $timedOutId
                 try { Stop-AMRDriverManagedWorker -Force } catch { Write-AMRDiagnostic -Severity 'ERROR' -Area 'DriverCenter' -Operation 'ManagedWorkerTimeoutRecovery' -Message ([string]$_.Exception.Message) }
-                (C 'DriverActionStatus').Text=('The {0} operation timed out and was stopped. Review Diagnostics before retrying.' -f $timedOutOperation)
+                (C 'DriverActionStatus').Text=('The {0} operation timed out and its AMR worker was stopped. Review Diagnostics before retrying.' -f $timedOutOperation)
+                if($timedOutOperation -eq 'RestorePoint'){
+                    $restoreButton=C 'DriverCreateRestorePointBtn';if($restoreButton){$restoreButton.Content='＋  Create Restore Point';$restoreButton.IsEnabled=$true}
+                    $restoreBar=C 'DriverRestorePointProgressBar';if($restoreBar){$restoreBar.IsIndeterminate=$false;$restoreBar.Value=0}
+                    $restorePercent=C 'DriverRestorePointPercent';if($restorePercent){$restorePercent.Text='Timed out'}
+                    $restoreText=C 'DriverRestorePointProgressText';if($restoreText){$restoreText.Text='Timed out — Windows did not return within 10 minutes. The AMR worker was stopped; check System Protection before retrying.'}
+                    $restoreEstimate=C 'DriverRestorePointEstimate';if($restoreEstimate){$restoreEstimate.Text='Timed out · not verified'}
+                    $restoreCancel=C 'DriverRestorePointCancelBtn';if($restoreCancel){$restoreCancel.Visibility='Collapsed';$restoreCancel.IsEnabled=$false}
+                    $script:DriverRestorePointStartedAt=$null;Update-AMRDriverRestorePointStatus
+                }
                 return
             }
             $path=[string]$script:DriverManagedProgressFile
@@ -19908,6 +21530,48 @@ function Reset-AMRSoftwareGridPages {
     } catch { Write-AMRLog ("Could not toggle installed application details: $($_.Exception.Message)") WARNING Software }
 }, $true)
 Reset-AMRSoftwareGridPages -View $script:AppsView
+
+# Make the complete Software card a one-click selection surface. Buttons,
+# checkboxes and the details arrow retain their own click behavior.
+try {
+    $softwareCardGrid = C 'SoftwareGrid'
+    if ($softwareCardGrid -and -not $script:SoftwareCardSelectionHandlerAttached) {
+        $script:SoftwareCardSelectionHandler = [System.Windows.Input.MouseButtonEventHandler]{
+            param($sender,$eventArgs)
+            try {
+                $node = $eventArgs.OriginalSource
+                while ($null -ne $node -and $node -ne $sender) {
+                    if ($node -is [System.Windows.Controls.Primitives.ButtonBase] -or
+                        $node -is [System.Windows.Controls.Primitives.TextBoxBase] -or
+                        $node -is [System.Windows.Controls.Primitives.Selector]) {
+                        return
+                    }
+                    if ($node -is [System.Windows.FrameworkElement]) {
+                        $candidate = $node.DataContext
+                        if ($null -ne $candidate -and $candidate.PSObject.Properties['IsSelected']) {
+                            $candidate.IsSelected = -not [bool]$candidate.IsSelected
+                            $eventArgs.Handled = $true
+                            return
+                        }
+                    }
+                    try { $node = [System.Windows.Media.VisualTreeHelper]::GetParent($node) }
+                    catch { try { $node = [System.Windows.LogicalTreeHelper]::GetParent($node) } catch { $node = $null } }
+                }
+            } catch {
+                try { Write-AMRLog ('Software card selection click was ignored: ' + $_.Exception.Message) WARNING Software } catch {}
+            }
+        }.GetNewClosure()
+        $softwareCardGrid.AddHandler(
+            [System.Windows.UIElement]::MouseLeftButtonUpEvent,
+            $script:SoftwareCardSelectionHandler,
+            $true
+        )
+        $script:SoftwareCardSelectionHandlerAttached = $true
+    }
+} catch {
+    Write-AMRLog ('Could not attach whole-card selection interaction: ' + $_.Exception.Message) WARNING Software
+}
+
 try {
     $script:AMRStartupPhaseTimings['InitialCatalogPreparedMs'] = [int]$script:AMRStartupStopwatch.ElapsedMilliseconds
     Write-AMRLog ('Startup timing checkpoint: ' + (($script:AMRStartupPhaseTimings.GetEnumerator() | ForEach-Object { '{0}={1}ms' -f $_.Key,$_.Value }) -join '; ')) INFO Startup
@@ -22598,6 +24262,129 @@ foreach ($tweakName in $script:AMRCustomizeCheckboxNames) {
     }.GetNewClosure())
 }
 
+# --- Customization interaction polish (lightweight; preserves selected-state visuals) ---
+# Keep the existing blue selection fill + pop animation. Hover only adds a subtle
+# surface tint and border response; it does not animate expensive DropShadow blur.
+$script:AMRCustomizationBaseRowColor = [System.Windows.Media.Color]::FromArgb(30,45,75,103)
+$script:AMRCustomizationSelectedRowColor = [System.Windows.Media.Color]::FromArgb(72,49,130,190)
+$script:AMRCustomizationHoverRowColor = [System.Windows.Media.Color]::FromArgb(48,68,125,180)
+$script:AMRCustomizationHoverBorderColor = [System.Windows.Media.Color]::FromRgb(120,190,245)
+
+# The dynamically-created option rows retain their current blue selection animation.
+foreach ($customName in $script:AMRCustomizeCheckboxNames) {
+    $customCheck = C $customName
+    if (-not $customCheck) { continue }
+    $customRow = [System.Windows.LogicalTreeHelper]::GetParent($customCheck)
+    if (-not ($customRow -is [System.Windows.Controls.Grid])) { continue }
+    $customRowBorder = [System.Windows.LogicalTreeHelper]::GetParent($customRow)
+    if (-not ($customRowBorder -is [System.Windows.Controls.Border])) { continue }
+
+    $customRowBorder.Tag = $customCheck
+    $customRowBorder.Cursor = [System.Windows.Input.Cursors]::Hand
+    $customRowBorder.Add_MouseEnter({
+        $row = $this
+        $check = $row.Tag
+        $target = if ($check -and $check.IsChecked -eq $true) { $script:AMRCustomizationSelectedRowColor } else { $script:AMRCustomizationHoverRowColor }
+        if ($row.Background -is [System.Windows.Media.SolidColorBrush]) {
+            $anim = New-Object System.Windows.Media.Animation.ColorAnimation($target,[System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(115)))
+            $anim.EasingFunction = New-Object System.Windows.Media.Animation.CubicEase
+            $anim.EasingFunction.EasingMode = [System.Windows.Media.Animation.EasingMode]::EaseOut
+            $row.Background.BeginAnimation([System.Windows.Media.SolidColorBrush]::ColorProperty,$anim)
+        }
+        if ($row.BorderBrush -is [System.Windows.Media.SolidColorBrush]) {
+            $borderAnim = New-Object System.Windows.Media.Animation.ColorAnimation($script:AMRCustomizationHoverBorderColor,[System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(115)))
+            $row.BorderBrush.BeginAnimation([System.Windows.Media.SolidColorBrush]::ColorProperty,$borderAnim)
+        }
+    }.GetNewClosure())
+    $customRowBorder.Add_MouseLeave({
+        $row = $this
+        $check = $row.Tag
+        $target = if ($check -and $check.IsChecked -eq $true) { $script:AMRCustomizationSelectedRowColor } else { $script:AMRCustomizationBaseRowColor }
+        if ($row.Background -is [System.Windows.Media.SolidColorBrush]) {
+            $anim = New-Object System.Windows.Media.Animation.ColorAnimation($target,[System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(145)))
+            $anim.EasingFunction = New-Object System.Windows.Media.Animation.CubicEase
+            $anim.EasingFunction.EasingMode = [System.Windows.Media.Animation.EasingMode]::EaseOut
+            $row.Background.BeginAnimation([System.Windows.Media.SolidColorBrush]::ColorProperty,$anim)
+        }
+        if ($row.BorderBrush -is [System.Windows.Media.SolidColorBrush]) {
+            $borderAnim = New-Object System.Windows.Media.Animation.ColorAnimation([System.Windows.Media.Color]::FromRgb(41,79,110),[System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(145)))
+            $row.BorderBrush.BeginAnimation([System.Windows.Media.SolidColorBrush]::ColorProperty,$borderAnim)
+        }
+    }.GetNewClosure())
+}
+
+# Category cards: restrained lift + blue edge shimmer. No shadow/blur animation,
+# so scrolling remains responsive even when many options are visible.
+$customCardsHost = C 'CustomizationCardsPanel'
+if ($customCardsHost -and $customCardsHost -is [System.Windows.Controls.WrapPanel]) {
+    foreach ($customCard in @($customCardsHost.Children)) {
+        if (-not ($customCard -is [System.Windows.Controls.Border])) { continue }
+        if (-not ($customCard.RenderTransform -is [System.Windows.Media.TranslateTransform])) { continue }
+        $baseBorderBrush = $customCard.BorderBrush
+        $baseBorderColor = [System.Windows.Media.Color]::FromRgb(102,143,192)
+        if ($baseBorderBrush -is [System.Windows.Media.SolidColorBrush]) { $baseBorderColor = $baseBorderBrush.Color }
+        $cardBrush = New-Object System.Windows.Media.SolidColorBrush($baseBorderColor)
+        $customCard.BorderBrush = $cardBrush
+        $customCard.Cursor = [System.Windows.Input.Cursors]::Hand
+        $customCard.Add_MouseEnter({
+            $card = $this
+            if ($card.RenderTransform -is [System.Windows.Media.TranslateTransform]) {
+                $lift = New-Object System.Windows.Media.Animation.DoubleAnimation(-2.0,[System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(145)))
+                $lift.EasingFunction = New-Object System.Windows.Media.Animation.CubicEase
+                $lift.EasingFunction.EasingMode = [System.Windows.Media.Animation.EasingMode]::EaseOut
+                $card.RenderTransform.BeginAnimation([System.Windows.Media.TranslateTransform]::YProperty,$lift)
+            }
+            if ($card.BorderBrush -is [System.Windows.Media.SolidColorBrush]) {
+                $edge = New-Object System.Windows.Media.Animation.ColorAnimation([System.Windows.Media.Color]::FromRgb(153,207,255),[System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(145)))
+                $card.BorderBrush.BeginAnimation([System.Windows.Media.SolidColorBrush]::ColorProperty,$edge)
+            }
+        }.GetNewClosure())
+        $customCard.Add_MouseLeave({
+            $card = $this
+            if ($card.RenderTransform -is [System.Windows.Media.TranslateTransform]) {
+                $settle = New-Object System.Windows.Media.Animation.DoubleAnimation(0.0,[System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(175)))
+                $settle.EasingFunction = New-Object System.Windows.Media.Animation.CubicEase
+                $settle.EasingFunction.EasingMode = [System.Windows.Media.Animation.EasingMode]::EaseOut
+                $card.RenderTransform.BeginAnimation([System.Windows.Media.TranslateTransform]::YProperty,$settle)
+            }
+            if ($card.BorderBrush -is [System.Windows.Media.SolidColorBrush]) {
+                $edge = New-Object System.Windows.Media.Animation.ColorAnimation($baseBorderColor,[System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(175)))
+                $card.BorderBrush.BeginAnimation([System.Windows.Media.SolidColorBrush]::ColorProperty,$edge)
+            }
+        }.GetNewClosure())
+    }
+}
+
+# Action buttons: tiny scale response and color lift, without changing their
+# existing semantic colors (green Apply, red Cancel, teal Restore).
+foreach ($actionName in @('ApplyCustomizeBtn','CancelCustomizeBtn','RestoreDefaultsBtn')) {
+    $actionButton = C $actionName
+    if (-not ($actionButton -is [System.Windows.Controls.Button])) { continue }
+    $actionButton.RenderTransformOrigin = [System.Windows.Point]::new(0.5,0.5)
+    $actionScale = New-Object System.Windows.Media.ScaleTransform(1,1)
+    $actionButton.RenderTransform = $actionScale
+    $actionButton.Add_MouseEnter({
+        $button = $this
+        $scale = $button.RenderTransform
+        $up = New-Object System.Windows.Media.Animation.DoubleAnimation(1.035,[System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(105)))
+        $up.EasingFunction = New-Object System.Windows.Media.Animation.CubicEase
+        $up.EasingFunction.EasingMode = [System.Windows.Media.Animation.EasingMode]::EaseOut
+        $scale.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleXProperty,$up)
+        $scale.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleYProperty,$up)
+        $button.Opacity = 0.96
+    }.GetNewClosure())
+    $actionButton.Add_MouseLeave({
+        $button = $this
+        $scale = $button.RenderTransform
+        $down = New-Object System.Windows.Media.Animation.DoubleAnimation(1.0,[System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(135)))
+        $down.EasingFunction = New-Object System.Windows.Media.Animation.CubicEase
+        $down.EasingFunction.EasingMode = [System.Windows.Media.Animation.EasingMode]::EaseOut
+        $scale.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleXProperty,$down)
+        $scale.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleYProperty,$down)
+        $button.Opacity = 1.0
+    }.GetNewClosure())
+}
+
 # Mutually exclusive appearance choices: selecting one clears its opposite.
 (C 'chkDarkMode').Add_Checked({ (C 'chkLightMode').IsChecked = $false })
 (C 'chkLightMode').Add_Checked({ (C 'chkDarkMode').IsChecked = $false })
@@ -23196,20 +24983,50 @@ function New-AMRCompactToolCard {
  $border.Background=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#202A35')
  $border.BorderBrush=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#344455')
  $border.BorderThickness='1'; $border.CornerRadius='7'; $border.Padding='4'; $border.Margin='0,0,7,7'; $border.MinHeight=42
+ # Match the Backup Center's premium card feedback: a restrained gold edge,
+ # soft surface tint and a tiny layout-neutral lift. Every card owns its brushes.
+ $border.RenderTransformOrigin=[System.Windows.Point]::new(0.5,0.5)
+ $border.RenderTransform=[System.Windows.Media.TranslateTransform]::new()
+ $border.Add_MouseEnter({
+  try {
+   $bg=$this.Background
+   if($bg -is [System.Windows.Media.SolidColorBrush]){$a=New-Object System.Windows.Media.Animation.ColorAnimation;$a.To=[System.Windows.Media.Color]::FromRgb(39,54,68);$a.Duration=[TimeSpan]::FromMilliseconds(150);$bg.BeginAnimation([System.Windows.Media.SolidColorBrush]::ColorProperty,$a)}
+   $br=$this.BorderBrush
+   if($br -is [System.Windows.Media.SolidColorBrush]){$a=New-Object System.Windows.Media.Animation.ColorAnimation;$a.To=[System.Windows.Media.Color]::FromRgb(184,154,98);$a.Duration=[TimeSpan]::FromMilliseconds(150);$br.BeginAnimation([System.Windows.Media.SolidColorBrush]::ColorProperty,$a)}
+   $m=New-Object System.Windows.Media.Animation.DoubleAnimation;$m.To=-1.5;$m.Duration=[TimeSpan]::FromMilliseconds(160);$m.EasingFunction=New-Object System.Windows.Media.Animation.QuadraticEase;$m.EasingFunction.EasingMode='EaseOut';$this.RenderTransform.BeginAnimation([System.Windows.Media.TranslateTransform]::YProperty,$m)
+  } catch {}
+ }.GetNewClosure())
+ $border.Add_MouseLeave({
+  try {
+   $bg=$this.Background
+   if($bg -is [System.Windows.Media.SolidColorBrush]){$a=New-Object System.Windows.Media.Animation.ColorAnimation;$a.To=[System.Windows.Media.Color]::FromRgb(32,42,53);$a.Duration=[TimeSpan]::FromMilliseconds(170);$bg.BeginAnimation([System.Windows.Media.SolidColorBrush]::ColorProperty,$a)}
+   $br=$this.BorderBrush
+   if($br -is [System.Windows.Media.SolidColorBrush]){$a=New-Object System.Windows.Media.Animation.ColorAnimation;$a.To=[System.Windows.Media.Color]::FromRgb(52,68,85);$a.Duration=[TimeSpan]::FromMilliseconds(170);$br.BeginAnimation([System.Windows.Media.SolidColorBrush]::ColorProperty,$a)}
+   $m=New-Object System.Windows.Media.Animation.DoubleAnimation;$m.To=0.0;$m.Duration=[TimeSpan]::FromMilliseconds(170);$m.EasingFunction=New-Object System.Windows.Media.Animation.QuadraticEase;$m.EasingFunction.EasingMode='EaseOut';$this.RenderTransform.BeginAnimation([System.Windows.Media.TranslateTransform]::YProperty,$m)
+  } catch {}
+ }.GetNewClosure())
  $layout=New-Object System.Windows.Controls.Grid
  $colA=New-Object System.Windows.Controls.ColumnDefinition; $colA.Width=[System.Windows.GridLength]::new(1,[System.Windows.GridUnitType]::Star)
  $colB=New-Object System.Windows.Controls.ColumnDefinition; $colB.Width=[System.Windows.GridLength]::new(28)
  [void]$layout.ColumnDefinitions.Add($colA); [void]$layout.ColumnDefinitions.Add($colB)
  $action=New-Object System.Windows.Controls.Button; $action.Content=('{0}  {1}' -f $Icon,$Name); $action.Tag=$Key
  $action.Background=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#263646'); $action.Foreground=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#E7EDF3')
- $action.BorderThickness='0'; $action.Padding='7,5'; $action.FontSize=11; $action.FontWeight='SemiBold'; $action.MinHeight=32; $action.HorizontalContentAlignment='Left'; $action.VerticalContentAlignment='Center'
+ $action.BorderBrush=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#40566B'); $action.BorderThickness='0.7'; $action.Padding='7,5'; $action.FontSize=11; $action.FontWeight='SemiBold'; $action.MinHeight=32; $action.HorizontalContentAlignment='Left'; $action.VerticalContentAlignment='Center'
  # Keep hover surfaces silent: all explanatory text is available only from the gold info button.
  $action.ToolTip=$null; $action.Add_Click($OnAction)
+ $action.Add_MouseEnter({
+  try{$b=$this.Background;if($b -is [System.Windows.Media.SolidColorBrush]){$a=New-Object System.Windows.Media.Animation.ColorAnimation;$a.To=[System.Windows.Media.Color]::FromRgb(49,73,94);$a.Duration=[TimeSpan]::FromMilliseconds(140);$b.BeginAnimation([System.Windows.Media.SolidColorBrush]::ColorProperty,$a)};$this.BorderBrush=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#B89A62')}catch{}
+ }.GetNewClosure())
+ $action.Add_MouseLeave({
+  try{$b=$this.Background;if($b -is [System.Windows.Media.SolidColorBrush]){$a=New-Object System.Windows.Media.Animation.ColorAnimation;$a.To=[System.Windows.Media.Color]::FromRgb(38,54,70);$a.Duration=[TimeSpan]::FromMilliseconds(170);$b.BeginAnimation([System.Windows.Media.SolidColorBrush]::ColorProperty,$a)};$this.BorderBrush=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#40566B')}catch{}
+ }.GetNewClosure())
  [System.Windows.Controls.Grid]::SetColumn($action,0); [void]$layout.Children.Add($action)
  $info=New-Object System.Windows.Controls.Button; $info.Content='i'; $info.Width=23; $info.Height=23; $info.Padding='0'; $info.FontSize=12; $info.FontWeight='Bold'
  $info.Background=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#B89A62'); $info.Foreground=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#17212B')
  $info.BorderThickness='0'; $info.ToolTip=$null; $info.HorizontalAlignment='Center'; $info.VerticalAlignment='Center'
  $info.Tag=$Description; $info.Add_Click({ Show-AMRMessage ([string]$this.Tag) 'Tool Information' OK Information | Out-Null }.GetNewClosure())
+ $info.Add_MouseEnter({try{$this.Background=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#D8BC83')}catch{}}.GetNewClosure())
+ $info.Add_MouseLeave({try{$this.Background=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#B89A62')}catch{}}.GetNewClosure())
  [System.Windows.Controls.Grid]::SetColumn($info,1); [void]$layout.Children.Add($info)
  $border.Child=$layout
  return $border
@@ -25341,6 +27158,20 @@ function Set-AMRCleanupUiBusy {
     $runButton = C 'CleanupRunBtn'
     $scanButton.IsEnabled = $false
     $runButton.IsEnabled = $false
+    # Give Scan Now a visible, continuous scanning state while the existing
+    # synchronous scan pumps WPF messages through Update-AMRCleanupProgress.
+    $scanButton.Content = '◌  Scanning...'
+    $scanButton.RenderTransformOrigin = [System.Windows.Point]::new(0.5,0.5)
+    $scanButton.RenderTransform = [System.Windows.Media.ScaleTransform]::new(1.0,1.0)
+    $scanPulse = New-Object System.Windows.Media.Animation.DoubleAnimation
+    $scanPulse.From = 1.0; $scanPulse.To = 1.035
+    $scanPulse.Duration = [TimeSpan]::FromMilliseconds(520)
+    $scanPulse.AutoReverse = $true
+    $scanPulse.RepeatBehavior = [System.Windows.Media.Animation.RepeatBehavior]::Forever
+    $scanPulse.EasingFunction = New-Object System.Windows.Media.Animation.QuadraticEase
+    $scanPulse.EasingFunction.EasingMode = [System.Windows.Media.Animation.EasingMode]::EaseInOut
+    $scanButton.RenderTransform.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleXProperty,$scanPulse)
+    $scanButton.RenderTransform.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleYProperty,$scanPulse)
     $script:CleanupScanResults = @{}
     $totalBytes = [int64]0
     $totalFiles = 0
@@ -25402,6 +27233,14 @@ function Set-AMRCleanupUiBusy {
         Write-AMRLog ("Cleanup scan failed: {0}" -f $_.Exception.Message) ERROR Cleanup
         Show-AMRCleanupSummary -Title 'AMR | Cleanup Scan' -Status 'Scan failed' -Details $_.Exception.Message -Kind Error
     } finally {
+        try {
+            if ($scanButton -and $scanButton.RenderTransform -is [System.Windows.Media.ScaleTransform]) {
+                $scanButton.RenderTransform.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleXProperty,$null)
+                $scanButton.RenderTransform.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleYProperty,$null)
+                $scanButton.RenderTransform.ScaleX = 1.0; $scanButton.RenderTransform.ScaleY = 1.0
+            }
+            if ($scanButton) { $scanButton.Content = '⌕  Scan Now' }
+        } catch {}
         Set-AMRCleanupUiBusy $false
         $script:AMRCleanupBusy = $false
         $scanButton.IsEnabled = $true
@@ -26001,77 +27840,218 @@ function Get-AMRBackupInfoText {
  return ("{0}`r`nCategory: {1}`r`n`r`n{2}" -f [string]$Action.Name,[string]$Action.Category,$detail)
 }
 
-function Update-AMRBackupView {
- # Category changes can leave the Backup Center ScrollViewer at a stale offset.
- # Always restore the filtered results to the top before rebuilding the cards.
- $backupScroll=C 'BackupCenterScrollViewer'
- if($backupScroll){$backupScroll.ScrollToTop()}
- $grid=C 'BackupActionsGrid'; $grid.VerticalAlignment='Top'; $grid.HorizontalAlignment='Stretch'; $grid.Children.Clear(); $search=[string](C 'BackupSearchBox').Text
- $selected=(C 'BackupCategoryFilter').SelectedItem; $category='All Categories'; if($selected){$category=([string]$selected.Content -replace '^[^A-Za-z0-9]+\s*','')}
- $visible=0
- # Responsive Backup-only card layout: use up to three columns and give each
- # card the remaining width so action names are readable without changing Tool Kit.
- $availableWidth=[double]$grid.ActualWidth
- if($availableWidth -lt 300){$availableWidth=1180}
- $columnCount=[Math]::Max(1,[Math]::Min(3,[Math]::Floor(($availableWidth + 8) / 188)))
- $columnCount=[int]$columnCount
- $cardWidth=[Math]::Floor(($availableWidth - ($columnCount * 8)) / $columnCount)
- $cardWidth=[Math]::Max(180,$cardWidth)
- $grid.ItemWidth=$cardWidth + 8
- foreach($a in $script:BackupActions){
-  if($category -ne 'All Categories' -and $a.Category -ne $category){continue}
-  if(-not [string]::IsNullOrWhiteSpace($search) -and ($a.Name -notlike "*$search*" -and $a.Category -notlike "*$search*")){continue}
+function New-AMRBackupActionCard {
+ param([object]$Action,[double]$CardWidth)
+ $a=$Action
+ $card=New-Object System.Windows.Controls.Border
+ $card.Width=$CardWidth; $card.Height=56; $card.Margin='0,0,8,8'; $card.Padding='5'
+ $card.CornerRadius='9'; $card.BorderThickness='1'
+ $card.Background=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#202A35')
+ $card.BorderBrush=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#43576C')
+ $card.SnapsToDevicePixels=$true
+ $card.RenderTransformOrigin=[System.Windows.Point]::new(0.5,0.5)
+ $card.RenderTransform=[System.Windows.Media.TranslateTransform]::new()
 
-  $card=New-Object System.Windows.Controls.Border
-  $card.Background=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#202A35')
-  $card.BorderBrush=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#344455')
-  $card.BorderThickness='1'; $card.CornerRadius='7'; $card.Padding='4'; $card.Margin='0,0,8,7'; $card.Width=$cardWidth; $card.Height=50
-  $card.HorizontalAlignment='Left'; $card.VerticalAlignment='Top'
+ $layout=New-Object System.Windows.Controls.Grid
+ [void]$layout.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition))
+ $infoColumn=New-Object System.Windows.Controls.ColumnDefinition
+ $infoColumn.Width=[System.Windows.GridLength]::new(30)
+ [void]$layout.ColumnDefinitions.Add($infoColumn)
 
-  $layout=New-Object System.Windows.Controls.Grid
-  $colMain=New-Object System.Windows.Controls.ColumnDefinition
-  $colMain.Width=[System.Windows.GridLength]::new(1,[System.Windows.GridUnitType]::Star)
-  $colInfo=New-Object System.Windows.Controls.ColumnDefinition
-  $colInfo.Width=[System.Windows.GridLength]::new(26)
-  [void]$layout.ColumnDefinitions.Add($colMain); [void]$layout.ColumnDefinitions.Add($colInfo)
+ $actionButton=New-Object System.Windows.Controls.Button
+ $actionButton.Content=('💾  '+[string]$a.Name); $actionButton.Tag=[string]$a.Key
+ $actionButton.Height=42; $actionButton.Padding='10,4'; $actionButton.FontSize=10.5
+ $actionButton.FontWeight='SemiBold'; $actionButton.HorizontalAlignment='Stretch'
+ $actionButton.HorizontalContentAlignment='Left'; $actionButton.VerticalContentAlignment='Center'
+ $actionButton.Background=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#263646')
+ $actionButton.Foreground=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#E7EDF3')
+ $actionButton.BorderBrush=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#40566B')
+ $actionButton.BorderThickness='0.7'; $actionButton.Cursor=[System.Windows.Input.Cursors]::Hand
+ $actionButton.Add_Click({ Invoke-AMRBackupAction -Key ([string]$this.Tag) }.GetNewClosure())
+ $actionButton.Add_MouseEnter({
+  try {
+   $b=$this.Background
+   if($b -is [System.Windows.Media.SolidColorBrush]){
+    $a=New-Object System.Windows.Media.Animation.ColorAnimation
+    $a.To=[System.Windows.Media.Color]::FromRgb(49,73,94);$a.Duration=[TimeSpan]::FromMilliseconds(140)
+    $b.BeginAnimation([System.Windows.Media.SolidColorBrush]::ColorProperty,$a)
+   }
+   $this.BorderBrush=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#B89A62')
+  } catch {}
+ }.GetNewClosure())
+ $actionButton.Add_MouseLeave({
+  try {
+   $b=$this.Background
+   if($b -is [System.Windows.Media.SolidColorBrush]){
+    $a=New-Object System.Windows.Media.Animation.ColorAnimation
+    $a.To=[System.Windows.Media.Color]::FromRgb(38,54,70);$a.Duration=[TimeSpan]::FromMilliseconds(170)
+    $b.BeginAnimation([System.Windows.Media.SolidColorBrush]::ColorProperty,$a)
+   }
+   $this.BorderBrush=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#40566B')
+  } catch {}
+ }.GetNewClosure())
+ [System.Windows.Controls.Grid]::SetColumn($actionButton,0);[void]$layout.Children.Add($actionButton)
 
-  $actionButton=New-Object System.Windows.Controls.Button
-  $actionButton.Content=('💾  ' + [string]$a.Name); $actionButton.Tag=[string]$a.Key
-  $actionButton.Background=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#263646')
-  $actionButton.Foreground=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#E7EDF3')
-  $actionButton.BorderThickness='0'; $actionButton.Padding='7,4'; $actionButton.FontSize=10
-  $actionButton.FontWeight='SemiBold'; $actionButton.MinHeight=34; $actionButton.Width=[double]::NaN
-  $actionButton.HorizontalAlignment='Stretch'; $actionButton.HorizontalContentAlignment='Left'
-  $actionButton.VerticalContentAlignment='Center'; $actionButton.ToolTip=$null
-  $actionButton.Add_Click({ Invoke-AMRBackupAction -Key ([string]$this.Tag) }.GetNewClosure())
-  [System.Windows.Controls.Grid]::SetColumn($actionButton,0); [void]$layout.Children.Add($actionButton)
-
-  $infoButton=New-Object System.Windows.Controls.Button
-  $infoButton.Content='i'; $infoButton.Width=21; $infoButton.Height=21; $infoButton.Padding='0'
-  $infoButton.FontSize=11; $infoButton.FontWeight='Bold'; $infoButton.BorderThickness='0'
-  $infoButton.Background=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#B89A62')
-  $infoButton.Foreground=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#17212B')
-  $infoButton.ToolTip=$null; $infoButton.HorizontalAlignment='Center'; $infoButton.VerticalAlignment='Center'
-  $infoButton.Tag=(Get-AMRBackupInfoText -Action $a)
-  $infoButton.Add_Click({ Show-AMRMessage ([string]$this.Tag) 'Backup Tool Information' OK Information | Out-Null }.GetNewClosure())
-  [System.Windows.Controls.Grid]::SetColumn($infoButton,1); [void]$layout.Children.Add($infoButton)
-
-  $card.Child=$layout
-  [void]$grid.Children.Add($card)
-  $visible++
- }
- (C 'BackupResultsCount').Text=('{0} backup actions shown' -f $visible)
+ $infoButton=New-Object System.Windows.Controls.Button
+ $infoButton.Content='i';$infoButton.Width=23;$infoButton.Height=23;$infoButton.Padding='0'
+ $infoButton.FontSize=11;$infoButton.FontWeight='Bold';$infoButton.BorderThickness='1'
+ $infoButton.BorderBrush=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#D0B77F')
+ $infoButton.Background=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#B89A62')
+ $infoButton.Foreground=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#17212B')
+ $infoButton.HorizontalAlignment='Center';$infoButton.VerticalAlignment='Center'
+ $infoButton.Cursor=[System.Windows.Input.Cursors]::Hand
+ $infoButton.Tag=(Get-AMRBackupInfoText -Action $a)
+ $infoButton.Add_Click({ Show-AMRMessage ([string]$this.Tag) 'Backup Tool Information' OK Information | Out-Null }.GetNewClosure())
+ $infoButton.Add_MouseEnter({try{$this.Background=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#D8BC83')}catch{}}.GetNewClosure())
+ $infoButton.Add_MouseLeave({try{$this.Background=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#B89A62')}catch{}}.GetNewClosure())
+ [System.Windows.Controls.Grid]::SetColumn($infoButton,1);[void]$layout.Children.Add($infoButton)
+ $card.Child=$layout
+ $card.Add_MouseEnter({
+  try {
+   $b=$this.Background
+   if($b -is [System.Windows.Media.SolidColorBrush]){$a=New-Object System.Windows.Media.Animation.ColorAnimation;$a.To=[System.Windows.Media.Color]::FromRgb(39,54,68);$a.Duration=[TimeSpan]::FromMilliseconds(150);$b.BeginAnimation([System.Windows.Media.SolidColorBrush]::ColorProperty,$a)}
+   $br=$this.BorderBrush
+   if($br -is [System.Windows.Media.SolidColorBrush]){$a=New-Object System.Windows.Media.Animation.ColorAnimation;$a.To=[System.Windows.Media.Color]::FromRgb(184,154,98);$a.Duration=[TimeSpan]::FromMilliseconds(150);$br.BeginAnimation([System.Windows.Media.SolidColorBrush]::ColorProperty,$a)}
+   $m=New-Object System.Windows.Media.Animation.DoubleAnimation;$m.To=-1.5;$m.Duration=[TimeSpan]::FromMilliseconds(140);$this.RenderTransform.BeginAnimation([System.Windows.Media.TranslateTransform]::YProperty,$m)
+  } catch {}
+ }.GetNewClosure())
+ $card.Add_MouseLeave({
+  try {
+   $b=$this.Background
+   if($b -is [System.Windows.Media.SolidColorBrush]){$a=New-Object System.Windows.Media.Animation.ColorAnimation;$a.To=[System.Windows.Media.Color]::FromRgb(32,42,53);$a.Duration=[TimeSpan]::FromMilliseconds(170);$b.BeginAnimation([System.Windows.Media.SolidColorBrush]::ColorProperty,$a)}
+   $br=$this.BorderBrush
+   if($br -is [System.Windows.Media.SolidColorBrush]){$a=New-Object System.Windows.Media.Animation.ColorAnimation;$a.To=[System.Windows.Media.Color]::FromRgb(67,87,108);$a.Duration=[TimeSpan]::FromMilliseconds(170);$br.BeginAnimation([System.Windows.Media.SolidColorBrush]::ColorProperty,$a)}
+   $m=New-Object System.Windows.Media.Animation.DoubleAnimation;$m.To=0.0;$m.Duration=[TimeSpan]::FromMilliseconds(160);$this.RenderTransform.BeginAnimation([System.Windows.Media.TranslateTransform]::YProperty,$m)
+  } catch {}
+ }.GetNewClosure())
+ return $card
 }
-$backupActionsGrid=C 'BackupActionsGrid'
-(C 'BackupSearchBox').Add_TextChanged({ Update-AMRBackupView })
-(C 'BackupCategoryFilter').Add_SelectionChanged({ Update-AMRBackupView })
-$script:AMRBackupGridLastWidth=0
-$backupActionsGrid.Add_SizeChanged({
- $newWidth=[double]$this.ActualWidth
- if([Math]::Abs($newWidth - [double]$script:AMRBackupGridLastWidth) -ge 48){
-  $script:AMRBackupGridLastWidth=$newWidth
-  Update-AMRBackupView
+
+function Invoke-AMRBackupGridBatch {
+ $state=$script:AMRBackupGridBuildState
+ if($null -eq $state -or $null -eq $state.Grid -or [int]$state.Generation -ne [int]$script:AMRBackupGridGeneration){return}
+ try {
+  $limit=[Math]::Min(([int]$state.Index+8),[int]$state.Actions.Count)
+  while([int]$state.Index -lt $limit){
+   $card=New-AMRBackupActionCard -Action $state.Actions[[int]$state.Index] -CardWidth ([double]$state.CardWidth)
+   if($null -eq $card){throw 'Backup card factory returned no control.'}
+   [void]$state.Grid.Children.Add($card)
+   $state.Index=[int]$state.Index+1
+  }
+  if([int]$state.Index -lt [int]$state.Actions.Count){
+   [void]$state.Grid.Dispatcher.BeginInvoke([System.Action]{Invoke-AMRBackupGridBatch},[System.Windows.Threading.DispatcherPriority]::Background)
+   return
+  }
+  $state.Grid.InvalidateMeasure();$state.Grid.InvalidateVisual()
+  $count=C 'BackupResultsCount';if($count){$count.Text=('{0} backup actions shown' -f [int]$state.Actions.Count)}
+  $script:AMRBackupGridLastFilterSignature=$state.FilterSignature
+  $script:AMRBackupGridRenderedSignature=$state.RenderSignature
+  $script:AMRBackupGridHasRendered=$true
+  $script:AMRBackupGridBuilding=$false
+  $script:AMRBackupGridBuildState=$null
+  # Keep the completed card set stable. Width changes are handled by the
+  # SizeChanged layout-only path below; never clear/rebuild after a batch.
+  $script:AMRBackupGridLastWidth=[double]$state.Grid.ActualWidth
+ } catch {
+  try{Write-AMRLog ('Backup card batch failed: '+$_.Exception.Message) ERROR System}catch{}
+  $script:AMRBackupGridBuilding=$false;$script:AMRBackupGridBuildState=$null
+  try {
+   $state.Grid.Children.Clear()
+   foreach($item in @($state.Actions)){$c=New-AMRBackupActionCard -Action $item -CardWidth ([double]$state.CardWidth);if($c){[void]$state.Grid.Children.Add($c)}}
+   $state.Grid.InvalidateMeasure();$state.Grid.InvalidateVisual()
+   $count=C 'BackupResultsCount';if($count){$count.Text=('{0} backup actions shown' -f $state.Grid.Children.Count)}
+   $script:AMRBackupGridHasRendered=($state.Grid.Children.Count -gt 0)
+   $script:AMRBackupGridRenderedSignature=$state.RenderSignature
+   $script:AMRBackupGridLastFilterSignature=$state.FilterSignature
+  } catch {try{Write-AMRLog ('Backup card recovery failed: '+$_.Exception.Message) ERROR System}catch{}}
  }
+}
+
+function Update-AMRBackupView {
+ $grid=C 'BackupActionsGrid';if(-not $grid){return}
+ $width=[double]$grid.ActualWidth
+ if($width -lt 300){$script:AMRBackupGridPending=$true;$count=C 'BackupResultsCount';if($count){$count.Text='Preparing backup tools…'};return}
+ $searchBox=C 'BackupSearchBox';$categoryBox=C 'BackupCategoryFilter'
+ $search=if($searchBox){[string]$searchBox.Text}else{''}
+ $selected=if($categoryBox){$categoryBox.SelectedItem}else{$null}
+ $category='All Categories';if($selected){$category=([string]$selected.Content -replace '^[^A-Za-z0-9]+\s*','')}
+ $filter=$category+'|'+$search
+ # The render identity is filter-only. Width is a layout concern, not a reason
+ # to destroy and recreate 50 WPF controls during navigation/resizing.
+ $signature=$filter
+ if($script:AMRBackupGridBuilding -and $script:AMRBackupGridBuildState -and $script:AMRBackupGridBuildState.FilterSignature -eq $filter){return}
+ if($script:AMRBackupGridHasRendered -and $script:AMRBackupGridRenderedSignature -eq $signature -and $grid.Children.Count -gt 0){return}
+ $script:AMRBackupGridGeneration=[int]$script:AMRBackupGridGeneration+1
+ $script:AMRBackupGridBuilding=$false;$script:AMRBackupGridBuildState=$null
+ if($script:AMRBackupGridLastFilterSignature -and $script:AMRBackupGridLastFilterSignature -ne $filter){$scroll=C 'BackupCenterScrollViewer';if($scroll){$scroll.ScrollToTop()}}
+ $grid.VerticalAlignment='Top';$grid.HorizontalAlignment='Stretch'
+ $grid.Children.Clear()
+ $columns=[int][Math]::Max(1,[Math]::Min(3,[Math]::Floor(($width+8)/188)))
+ $cardWidth=[Math]::Max(180,[Math]::Floor(($width-($columns*8))/$columns))
+ $grid.ItemWidth=$cardWidth+8;$grid.ItemHeight=64
+ $actions=@($script:BackupActions | Where-Object {
+  ($category -eq 'All Categories' -or [string]$_.Category -eq $category) -and
+  ([string]::IsNullOrWhiteSpace($search) -or ([string]$_.Name -like "*$search*" -or [string]$_.Category -like "*$search*"))
+ })
+ $count=C 'BackupResultsCount'
+ if($actions.Count -eq 0){if($count){$count.Text='0 backup actions shown'};$script:AMRBackupGridLastFilterSignature=$filter;$script:AMRBackupGridRenderedSignature=$signature;$script:AMRBackupGridHasRendered=$true;$script:AMRBackupGridPending=$false;return}
+ if($count){$count.Text=('Loading {0} backup tools…' -f $actions.Count)}
+ $script:AMRBackupGridBuilding=$true;$script:AMRBackupGridPending=$false
+ $script:AMRBackupGridBuildState=[pscustomobject]@{Grid=$grid;Actions=$actions;Index=0;CardWidth=[double]$cardWidth;FilterSignature=$filter;RenderSignature=$signature;WidthAtStart=$width;Generation=$script:AMRBackupGridGeneration}
+ [void]$grid.Dispatcher.BeginInvoke([System.Action]{Invoke-AMRBackupGridBatch},[System.Windows.Threading.DispatcherPriority]::Background)
+}
+
+function Request-AMRBackupViewRefresh {
+ $tabs=C 'OverviewSubTabs';$backupTabs=C 'BackupSubTabs'
+ if($tabs -and $tabs.SelectedItem -and [string]$tabs.SelectedItem.Header -ne 'Backups'){return}
+ if($backupTabs -and $backupTabs.SelectedItem -and [string]$backupTabs.SelectedItem.Header -ne 'Backup Center'){return}
+ $grid=C 'BackupActionsGrid';if(-not $grid){return}
+ try {
+  [void]$grid.Dispatcher.BeginInvoke([System.Action]{
+   try {
+    $activeOverview=C 'OverviewSubTabs';$activeBackup=C 'BackupSubTabs'
+    if($activeOverview -and $activeOverview.SelectedItem -and [string]$activeOverview.SelectedItem.Header -ne 'Backups'){return}
+    if($activeBackup -and $activeBackup.SelectedItem -and [string]$activeBackup.SelectedItem.Header -ne 'Backup Center'){return}
+    Update-AMRBackupView
+   } catch {}
+  },[System.Windows.Threading.DispatcherPriority]::ContextIdle)
+ } catch {try{Write-AMRLog ('Backup view refresh scheduling failed: '+$_.Exception.Message) WARNING System}catch{}}
+}
+
+$backupActionsGrid=C 'BackupActionsGrid'
+$script:AMRBackupGridGeneration=0
+$script:AMRBackupGridLastWidth=0
+$script:AMRBackupGridRenderedSignature=$null
+$script:AMRBackupGridLastFilterSignature=$null
+$script:AMRBackupGridHasRendered=$false
+$script:AMRBackupGridBuilding=$false
+$script:AMRBackupGridPending=$true
+$script:AMRBackupGridBuildState=$null
+(C 'BackupSearchBox').Add_TextChanged({Update-AMRBackupView})
+(C 'BackupCategoryFilter').Add_SelectionChanged({Update-AMRBackupView})
+$backupActionsGrid.Add_Loaded({Request-AMRBackupViewRefresh}.GetNewClosure())
+$backupActionsGrid.Add_SizeChanged({
+ # Layout-only resize: update existing cards in place. Do not call the data
+ # renderer here; doing so caused repeated clear/rebuild cycles and flicker.
+ try {
+  $w=[double]$this.ActualWidth
+  if($w -lt 300){return}
+  $columns=[int][Math]::Max(1,[Math]::Min(3,[Math]::Floor(($w+8)/188)))
+  $cardWidth=[Math]::Max(180,[Math]::Floor(($w-($columns*8))/$columns))
+  $this.ItemWidth=$cardWidth+8
+  if($script:AMRBackupGridBuildState){$script:AMRBackupGridBuildState.CardWidth=[double]$cardWidth}
+  foreach($card in $this.Children){if($card -is [System.Windows.FrameworkElement]){$card.Width=$cardWidth}}
+  $script:AMRBackupGridLastWidth=$w
+  if($script:AMRBackupGridPending -and -not $script:AMRBackupGridBuilding){Request-AMRBackupViewRefresh}
+ } catch {try{Write-AMRLog ('Backup card layout resize warning: '+$_.Exception.Message) WARNING System}catch{}}
+}.GetNewClosure())
+$backupTabsForRefresh=C 'BackupSubTabs'
+$backupTabsForRefresh.Add_SelectionChanged({
+ if($this.SelectedItem -and [string]$this.SelectedItem.Header -eq 'Backup Center'){Request-AMRBackupViewRefresh}
+}.GetNewClosure())
+$overviewTabsForRefresh=C 'OverviewSubTabs'
+$overviewTabsForRefresh.Add_SelectionChanged({
+ if($this.SelectedItem -and [string]$this.SelectedItem.Header -eq 'Backups'){Request-AMRBackupViewRefresh}
 }.GetNewClosure())
 
 # ----------------------------------------------------------
@@ -26314,7 +28294,7 @@ function Set-AMRStartupSwitchVisual {
         $slide.EasingFunction=New-Object System.Windows.Media.Animation.CubicEase
         $slide.EasingFunction.EasingMode=[System.Windows.Media.Animation.EasingMode]::EaseOut
         $transform.BeginAnimation([System.Windows.Media.TranslateTransform]::XProperty,$slide)
-        if($StatusText){$StatusText.Text=if($Enabled){'ON'}else{'OFF'};$StatusText.Foreground=[System.Windows.Media.BrushConverter]::new().ConvertFromString($(if($Enabled){'#72D9BC'}else{'#A3B2C1'}))}
+        if($StatusText){$StatusText.Text=if($Enabled){'●  ON'}else{'○  OFF'};$StatusText.Foreground=[System.Windows.Media.BrushConverter]::new().ConvertFromString($(if($Enabled){'#9BE8D0'}else{'#C0CCD8'}));try{$badge=$StatusText.Parent;$badge.Background=[System.Windows.Media.BrushConverter]::new().ConvertFromString($(if($Enabled){'#4935A88B'}else{'#493E5268'}));$badge.BorderBrush=[System.Windows.Media.BrushConverter]::new().ConvertFromString($(if($Enabled){'#8C6ED0B4'}else{'#806B8298'}))}catch{}}
     }catch{}
 }
 
@@ -26351,20 +28331,38 @@ function Refresh-AMRStartupManager {
             $entry=$state.Queue.Dequeue()
             $index=[int]$state.Index
 
+        # Premium Startup app card — visual-only treatment; the existing entry and toggle logic stays intact.
         $card=New-Object System.Windows.Controls.Border
-        $card.Background=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#80172638')
-        $card.BorderBrush=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#5030465C')
+        $card.Background=New-Object System.Windows.Media.LinearGradientBrush(
+            [System.Windows.Media.ColorConverter]::ConvertFromString('#F026303B'),
+            [System.Windows.Media.ColorConverter]::ConvertFromString('#E817202B'),
+            [System.Windows.Point]::new(0,0),
+            [System.Windows.Point]::new(1,1))
+        $card.BorderBrush=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#8C9B805F')
         $card.BorderThickness=[System.Windows.Thickness]::new(1)
-        $card.CornerRadius=[System.Windows.CornerRadius]::new(12)
-        $card.Padding=[System.Windows.Thickness]::new(13,11,13,11)
-        $card.Margin=[System.Windows.Thickness]::new(3,3,3,6)
+        $card.CornerRadius=[System.Windows.CornerRadius]::new(18)
+        $card.Padding=[System.Windows.Thickness]::new(16,13,16,13)
+        $card.Margin=[System.Windows.Thickness]::new(3,5,3,8)
+        $card.MinHeight=76
         $card.ToolTip=[string]$entry.Command
+        $card.Opacity=0
+        $card.RenderTransform=[System.Windows.Media.TranslateTransform]::new(0,10)
+        $card.Effect=[System.Windows.Media.Effects.DropShadowEffect]::new()
+        $card.Effect.Color=[System.Windows.Media.ColorConverter]::ConvertFromString('#000000')
+        $card.Effect.BlurRadius=19
+        $card.Effect.ShadowDepth=4
+        $card.Effect.Opacity=0.30
         $grid=New-Object System.Windows.Controls.Grid
-        $grid.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition -Property @{Width=[System.Windows.GridLength]::new(42)}))
+        $grid.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition -Property @{Width=[System.Windows.GridLength]::new(54)}))
         $grid.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition -Property @{Width=[System.Windows.GridLength]::new(1,[System.Windows.GridUnitType]::Star)}))
-        $grid.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition -Property @{Width=[System.Windows.GridLength]::new(82)}))
-        $grid.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition -Property @{Width=[System.Windows.GridLength]::new(52)}))
-        $glyph=New-Object System.Windows.Controls.Border;$glyph.Width=32;$glyph.Height=32;$glyph.CornerRadius=[System.Windows.CornerRadius]::new(9);$glyph.Background=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#80263D55');$glyph.VerticalAlignment='Center'
+        $grid.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition -Property @{Width=[System.Windows.GridLength]::new(88)}))
+        $grid.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition -Property @{Width=[System.Windows.GridLength]::new(58)}))
+        $glyph=New-Object System.Windows.Controls.Border;$glyph.Width=42;$glyph.Height=42;$glyph.CornerRadius=[System.Windows.CornerRadius]::new(13);$glyph.Background=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#B52D3A49');$glyph.BorderBrush=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#A9C6A77A');$glyph.BorderThickness=[System.Windows.Thickness]::new(1);$glyph.VerticalAlignment='Center'
+        $glyph.Effect=New-Object System.Windows.Media.Effects.DropShadowEffect
+        $glyph.Effect.Color=[System.Windows.Media.ColorConverter]::ConvertFromString('#C99B5A')
+        $glyph.Effect.BlurRadius=9
+        $glyph.Effect.ShadowDepth=0
+        $glyph.Effect.Opacity=0.18
         $initial=New-Object System.Windows.Controls.TextBlock;$entryDisplayName=[string]$entry.Name;$initial.Text=if($entryDisplayName.Length -gt 0){$entryDisplayName.Substring(0,1).ToUpperInvariant()}else{'A'};$initial.Foreground=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#D9BD8B');$initial.FontSize=14;$initial.FontWeight='Bold';$initial.HorizontalAlignment='Center';$initial.VerticalAlignment='Center';$glyph.Child=$initial
         $appImage=New-Object System.Windows.Controls.Image;$appImage.Width=27;$appImage.Height=27;$appImage.Stretch='Uniform';$appImage.HorizontalAlignment='Center';$appImage.VerticalAlignment='Center'
         if($entry.IconSource){$appImage.Source=$entry.IconSource;$glyph.Child=$appImage}
@@ -26375,10 +28373,23 @@ function Refresh-AMRStartupManager {
         $name=New-Object System.Windows.Controls.TextBlock;$name.Text=$entryDisplayName;$name.Foreground=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#F0F5FA');$name.FontSize=12;$name.FontWeight='SemiBold';$name.TextTrimming='CharacterEllipsis'
         $source=New-Object System.Windows.Controls.TextBlock;$source.Text=[string]$entry.Source;$source.Foreground=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#8FA6BC');$source.FontSize=9;$source.Margin=[System.Windows.Thickness]::new(0,3,0,0);$source.TextTrimming='CharacterEllipsis'
         [void]$details.Children.Add($name);[void]$details.Children.Add($source);[System.Windows.Controls.Grid]::SetColumn($details,1);[void]$grid.Children.Add($details)
-        $status=New-Object System.Windows.Controls.TextBlock;$status.Text=if($entry.Enabled){'ON'}else{'OFF'};$status.Foreground=[System.Windows.Media.BrushConverter]::new().ConvertFromString($(if($entry.Enabled){'#72D9BC'}else{'#A3B2C1'}));$status.FontSize=9;$status.FontWeight='Bold';$status.VerticalAlignment='Center';$status.HorizontalAlignment='Center';[System.Windows.Controls.Grid]::SetColumn($status,2);[void]$grid.Children.Add($status)
-        $switch=New-Object System.Windows.Controls.Grid;$switch.Width=48;$switch.Height=26;$switch.VerticalAlignment='Center';$switch.HorizontalAlignment='Center';$switch.Cursor=[System.Windows.Input.Cursors]::Hand
-        $track=New-Object System.Windows.Controls.Border;$track.Width=48;$track.Height=26;$track.CornerRadius=[System.Windows.CornerRadius]::new(13);$track.Background=[System.Windows.Media.BrushConverter]::new().ConvertFromString($(if($entry.Enabled){'#36B99A'}else{'#3B4C60'}));$track.BorderBrush=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#71869A');$track.BorderThickness=[System.Windows.Thickness]::new(0.7);[void]$switch.Children.Add($track)
-        $thumb=New-Object System.Windows.Shapes.Ellipse;$thumb.Width=20;$thumb.Height=20;$thumb.Fill=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#F7FAFC');$thumb.VerticalAlignment='Center';$thumb.HorizontalAlignment='Left';$thumb.Margin=[System.Windows.Thickness]::new(2,0,0,0);$thumb.RenderTransform=New-Object System.Windows.Media.TranslateTransform($(if($entry.Enabled){22.0}else{2.0}),0);[void]$switch.Children.Add($thumb)
+        $statusBadge=New-Object System.Windows.Controls.Border
+        $statusBadge.CornerRadius=[System.Windows.CornerRadius]::new(10)
+        $statusBadge.Padding=[System.Windows.Thickness]::new(10,6,10,6)
+        $statusBadge.HorizontalAlignment='Center'
+        $statusBadge.VerticalAlignment='Center'
+        $statusBadge.Background=[System.Windows.Media.BrushConverter]::new().ConvertFromString($(if($entry.Enabled){'#4935A88B'}else{'#493E5268'}))
+        $statusBadge.BorderBrush=[System.Windows.Media.BrushConverter]::new().ConvertFromString($(if($entry.Enabled){'#8C6ED0B4'}else{'#806B8298'}))
+        $statusBadge.BorderThickness=[System.Windows.Thickness]::new(1)
+        $status=New-Object System.Windows.Controls.TextBlock
+        $status.Text=if($entry.Enabled){'●  ON'}else{'○  OFF'}
+        $status.Foreground=[System.Windows.Media.BrushConverter]::new().ConvertFromString($(if($entry.Enabled){'#9BE8D0'}else{'#C0CCD8'}))
+        $status.FontSize=9;$status.FontWeight='Bold';$status.VerticalAlignment='Center';$status.HorizontalAlignment='Center'
+        $statusBadge.Child=$status
+        [System.Windows.Controls.Grid]::SetColumn($statusBadge,2);[void]$grid.Children.Add($statusBadge)
+        $switch=New-Object System.Windows.Controls.Grid;$switch.Width=52;$switch.Height=29;$switch.VerticalAlignment='Center';$switch.HorizontalAlignment='Center';$switch.Cursor=[System.Windows.Input.Cursors]::Hand
+        $track=New-Object System.Windows.Controls.Border;$track.Width=52;$track.Height=29;$track.CornerRadius=[System.Windows.CornerRadius]::new(15);$track.Background=[System.Windows.Media.BrushConverter]::new().ConvertFromString($(if($entry.Enabled){'#36B99A'}else{'#34485C'}));$track.BorderBrush=[System.Windows.Media.BrushConverter]::new().ConvertFromString($(if($entry.Enabled){'#9BE8D0'}else{'#8298AD'}));$track.BorderThickness=[System.Windows.Thickness]::new(1);$track.Effect=New-Object System.Windows.Media.Effects.DropShadowEffect;$track.Effect.Color=[System.Windows.Media.ColorConverter]::ConvertFromString($(if($entry.Enabled){'#36B99A'}else{'#66809A'}));$track.Effect.BlurRadius=10;$track.Effect.ShadowDepth=0;$track.Effect.Opacity=0.30;[void]$switch.Children.Add($track)
+        $thumb=New-Object System.Windows.Shapes.Ellipse;$thumb.Width=21;$thumb.Height=21;$thumb.Fill=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#FFFDF7');$thumb.Stroke=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#D8C49D');$thumb.StrokeThickness=0.7;$thumb.VerticalAlignment='Center';$thumb.HorizontalAlignment='Left';$thumb.Margin=[System.Windows.Thickness]::new(3,0,0,0);$thumb.RenderTransform=New-Object System.Windows.Media.TranslateTransform($(if($entry.Enabled){23.0}else{2.0}),0);$thumb.Effect=New-Object System.Windows.Media.Effects.DropShadowEffect;$thumb.Effect.Color=[System.Windows.Media.Colors]::Black;$thumb.Effect.BlurRadius=5;$thumb.Effect.ShadowDepth=1;$thumb.Effect.Opacity=0.30;[void]$switch.Children.Add($thumb)
         [System.Windows.Controls.Grid]::SetColumn($switch,3);[void]$grid.Children.Add($switch)
         $entryCopy=$entry;$trackCopy=$track;$thumbCopy=$thumb;$statusCopy=$status
         $switch.Add_MouseLeftButtonUp({
@@ -26400,7 +28411,62 @@ function Refresh-AMRStartupManager {
         $switch.ToolTip=if($entry.CanToggle){'Smooth ON/OFF control · Windows StartupApproved'}else{'Detected by Windows; no safe StartupApproved switch was exposed for this item.'}
         if(-not $entry.CanToggle){$switch.Opacity=0.45;$status.Text='INFO';$status.Foreground=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#A3B2C1')}
         [System.Windows.Controls.Grid]::SetColumn($switch,3)
-        $card.Child=$grid;[void]$script:StartupRenderHostPanel.Children.Add($card)
+        $card.Child=$grid
+
+        # Distinct per-card hover: gold glass edge, brighter surface and gentle lift.
+        $cardRef=$card
+        $cardRef.Add_MouseEnter({
+            try {
+                $hoverBg=[System.Windows.Media.Animation.ColorAnimation]::new([System.Windows.Media.ColorConverter]::ConvertFromString('#F13B4652'),[TimeSpan]::FromMilliseconds(160))
+                $hoverEdge=[System.Windows.Media.Animation.ColorAnimation]::new([System.Windows.Media.ColorConverter]::ConvertFromString('#FFE0AD'),[TimeSpan]::FromMilliseconds(180))
+                $hoverEase=[System.Windows.Media.Animation.CubicEase]::new();$hoverEase.EasingMode=[System.Windows.Media.Animation.EasingMode]::EaseOut
+                $hoverBg.EasingFunction=$hoverEase;$hoverEdge.EasingFunction=$hoverEase
+                if($cardRef.Background -is [System.Windows.Media.SolidColorBrush]){$cardRef.Background.BeginAnimation([System.Windows.Media.SolidColorBrush]::ColorProperty,$hoverBg)}
+                elseif($cardRef.Background -is [System.Windows.Media.LinearGradientBrush] -and $cardRef.Background.GradientStops.Count -ge 2){
+                    $g0=[System.Windows.Media.Animation.ColorAnimation]::new([System.Windows.Media.ColorConverter]::ConvertFromString('#FF3B4652'),[TimeSpan]::FromMilliseconds(160))
+                    $g1=[System.Windows.Media.Animation.ColorAnimation]::new([System.Windows.Media.ColorConverter]::ConvertFromString('#E91F2A36'),[TimeSpan]::FromMilliseconds(160))
+                    $cardRef.Background.GradientStops[0].BeginAnimation([System.Windows.Media.GradientStop]::ColorProperty,$g0)
+                    $cardRef.Background.GradientStops[1].BeginAnimation([System.Windows.Media.GradientStop]::ColorProperty,$g1)
+                }
+                if($cardRef.BorderBrush -is [System.Windows.Media.SolidColorBrush]){$cardRef.BorderBrush.BeginAnimation([System.Windows.Media.SolidColorBrush]::ColorProperty,$hoverEdge)}
+                if($cardRef.Effect -is [System.Windows.Media.Effects.DropShadowEffect]){$cardRef.Effect.Opacity=0.48;$cardRef.Effect.BlurRadius=24;$cardRef.Effect.Color=[System.Windows.Media.ColorConverter]::ConvertFromString('#B88D4D')}
+                $hoverLift=[System.Windows.Media.Animation.DoubleAnimation]::new(0,-2.5,[TimeSpan]::FromMilliseconds(160))
+                $hoverLift.EasingFunction=$hoverEase
+                $cardRef.RenderTransform.BeginAnimation([System.Windows.Media.TranslateTransform]::YProperty,$hoverLift)
+            } catch {}
+        }.GetNewClosure())
+        $cardRef.Add_MouseLeave({
+            try {
+                $leaveBg=[System.Windows.Media.Animation.ColorAnimation]::new([System.Windows.Media.ColorConverter]::ConvertFromString('#F026303B'),[TimeSpan]::FromMilliseconds(210))
+                $leaveEdge=[System.Windows.Media.Animation.ColorAnimation]::new([System.Windows.Media.ColorConverter]::ConvertFromString('#8C9B805F'),[TimeSpan]::FromMilliseconds(210))
+                $leaveEase=[System.Windows.Media.Animation.CubicEase]::new();$leaveEase.EasingMode=[System.Windows.Media.Animation.EasingMode]::EaseOut
+                $leaveBg.EasingFunction=$leaveEase;$leaveEdge.EasingFunction=$leaveEase
+                if($cardRef.Background -is [System.Windows.Media.SolidColorBrush]){$cardRef.Background.BeginAnimation([System.Windows.Media.SolidColorBrush]::ColorProperty,$leaveBg)}
+                elseif($cardRef.Background -is [System.Windows.Media.LinearGradientBrush] -and $cardRef.Background.GradientStops.Count -ge 2){
+                    $g0=[System.Windows.Media.Animation.ColorAnimation]::new([System.Windows.Media.ColorConverter]::ConvertFromString('#F026303B'),[TimeSpan]::FromMilliseconds(210))
+                    $g1=[System.Windows.Media.Animation.ColorAnimation]::new([System.Windows.Media.ColorConverter]::ConvertFromString('#E817202B'),[TimeSpan]::FromMilliseconds(210))
+                    $cardRef.Background.GradientStops[0].BeginAnimation([System.Windows.Media.GradientStop]::ColorProperty,$g0)
+                    $cardRef.Background.GradientStops[1].BeginAnimation([System.Windows.Media.GradientStop]::ColorProperty,$g1)
+                }
+                if($cardRef.BorderBrush -is [System.Windows.Media.SolidColorBrush]){$cardRef.BorderBrush.BeginAnimation([System.Windows.Media.SolidColorBrush]::ColorProperty,$leaveEdge)}
+                if($cardRef.Effect -is [System.Windows.Media.Effects.DropShadowEffect]){$cardRef.Effect.Opacity=0.30;$cardRef.Effect.BlurRadius=19;$cardRef.Effect.Color=[System.Windows.Media.Colors]::Black}
+                $leaveLift=[System.Windows.Media.Animation.DoubleAnimation]::new(-2.5,0,[TimeSpan]::FromMilliseconds(210))
+                $leaveLift.EasingFunction=$leaveEase
+                $cardRef.RenderTransform.BeginAnimation([System.Windows.Media.TranslateTransform]::YProperty,$leaveLift)
+            } catch {}
+        }.GetNewClosure())
+
+        [void]$script:StartupRenderHostPanel.Children.Add($card)
+        $cardFade=[System.Windows.Media.Animation.DoubleAnimation]::new(0,1,[System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(260)))
+        $cardFade.BeginTime=[TimeSpan]::FromMilliseconds([Math]::Min(180,($index % 8)*24))
+        $cardFade.EasingFunction=[System.Windows.Media.Animation.CubicEase]::new()
+        $cardFade.EasingFunction.EasingMode=[System.Windows.Media.Animation.EasingMode]::EaseOut
+        $card.BeginAnimation([System.Windows.UIElement]::OpacityProperty,$cardFade)
+        $cardRise=[System.Windows.Media.Animation.DoubleAnimation]::new(7,0,[System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(290)))
+        $cardRise.BeginTime=[TimeSpan]::FromMilliseconds([Math]::Min(180,($index % 8)*24))
+        $cardRise.EasingFunction=[System.Windows.Media.Animation.CubicEase]::new()
+        $cardRise.EasingFunction.EasingMode=[System.Windows.Media.Animation.EasingMode]::EaseOut
+        $card.RenderTransform.BeginAnimation([System.Windows.Media.TranslateTransform]::YProperty,$cardRise)
         $index++
             $state.Index=$index
             [void]$state.RenderedEntries.Add($entry)
@@ -26524,21 +28590,76 @@ function Set-AMRBackupSubTab {
   $backupButton.Background=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#29384A')
   $backupButton.Foreground=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#D9BD8B')
   $backupButton.BorderBrush=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#B89A62')
-  $driverButton.Background=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#263646')
-  $driverButton.Foreground=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#E7EAF0')
-  $driverButton.BorderBrush=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#34465B')
+  $driverButton.Background=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#303D35')
+  $driverButton.Foreground=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#E7EFE8')
+  $driverButton.BorderBrush=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#40564A')
  } else {
-  $driverButton.Background=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#29384A')
-  $driverButton.Foreground=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#D9BD8B')
-  $driverButton.BorderBrush=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#B89A62')
+  $driverButton.Background=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#344A3C')
+  $driverButton.Foreground=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#E4F0E6')
+  $driverButton.BorderBrush=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#8EAE98')
   $backupButton.Background=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#263646')
   $backupButton.Foreground=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#E7EAF0')
   $backupButton.BorderBrush=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#34465B')
  }
 }
 (C 'AMRStartupRefreshBtn').Add_Click({ Start-AMRRefreshButtonAnimation -Button (C 'AMRStartupRefreshBtn'); Refresh-AMRStartupManager -RefreshInventory })
+
+# Windows Update Center controls are deliberately isolated to the System > Update tab.
+Set-AMRRefreshButtonVisual -Button (C 'AMRUpdateRefreshBtn') -Label 'Refresh Status'
+(C 'AMRUpdateRefreshBtn').Add_Click({
+    $refreshButton=C 'AMRUpdateRefreshBtn'
+    Start-AMRRefreshButtonAnimation -Button $refreshButton
+    $refreshButton.IsEnabled=$false
+    try {
+        $refreshButton.Dispatcher.Invoke([action]{},[System.Windows.Threading.DispatcherPriority]::Render)
+        Update-AMRUpdateCenterStatus
+        (C 'AMRUpdateActionStatus').Text='Windows Update status refreshed from local services, Windows Update history and policy state.'
+    } catch {
+        (C 'AMRUpdateActionStatus').Text=('Status refresh failed: '+$_.Exception.Message)
+        Write-AMRLog ('Windows Update status refresh failed: '+$_.Exception.Message) ERROR System
+    } finally { $refreshButton.IsEnabled=$true }
+})
+(C 'AMRUpdateSettingsBtn').Add_Click({ try { Start-Process 'ms-settings:windowsupdate' } catch { Show-AMRMessage $_.Exception.Message 'Windows Update Settings' OK Warning | Out-Null } })
+(C 'AMRUpdateRecommendedBtn').Add_Click({ Invoke-AMRUpdateProfile -Profile Recommended })
+(C 'AMRUpdateDefaultBtn').Add_Click({ Invoke-AMRUpdateProfile -Profile Default })
+(C 'AMRUpdateRestrictBtn').Add_Click({ Invoke-AMRUpdateProfile -Profile Restricted })
+(C 'AMRUpdateRestoreBackupBtn').Add_Click({ try { Restore-AMRUpdateProfileBackup } catch { Show-AMRMessage $_.Exception.Message 'Restore Update Backup' OK Error | Out-Null } })
+(C 'AMRUpdateCheckBtn').Add_Click({ Start-AMRUpdateWorker -Action Scan })
+(C 'AMRUpdateHistoryBtn').Add_Click({ Start-AMRUpdateWorker -Action History })
+(C 'AMRUpdateDownloadBtn').Add_Click({ Start-AMRUpdateWorker -Action Download -Selected @((C 'AMRUpdateResultsList').SelectedItems) })
+(C 'AMRUpdateInstallBtn').Add_Click({
+    $selected=@((C 'AMRUpdateResultsList').SelectedItems)
+    $notDownloaded=@($selected | Where-Object { -not $_.Downloaded })
+    if($notDownloaded.Count -gt 0){ Show-AMRMessage 'Some selected updates are not downloaded yet. Download them first, then run Check for Updates again and install the downloaded selections.' 'Download Required' OK Information | Out-Null; return }
+    if((Show-AMRMessage ('Install {0} selected update(s)? Windows may request a restart. AMR will not restart the computer automatically.' -f $selected.Count) 'Confirm Update Installation' YesNo Warning) -ne 'Yes'){return}
+    Start-AMRUpdateWorker -Action Install -Selected $selected
+})
+(C 'AMRUpdateRepairBtn').Add_Click({ Invoke-AMRUpdateServiceRepair })
+try { Update-AMRUpdateCenterStatus } catch { Write-AMRLog ('Initial Update Center status refresh failed: '+$_.Exception.Message) WARNING System }
+try { Set-AMRUpdateCheckVisual -Running $false } catch {}
+
 (C 'BackupCenterChoiceBtn').Add_Click({ Set-AMRBackupSubTab 0 })
 (C 'DriverBackupChoiceBtn').Add_Click({ Set-AMRBackupSubTab 1 })
+foreach($backupChoiceName in @('BackupCenterChoiceBtn','DriverBackupChoiceBtn')){
+ $choice=C $backupChoiceName
+ if(-not $choice){continue}
+ $choice.Add_MouseEnter({
+  try {
+   $this.Opacity=1.0
+   $this.RenderTransformOrigin=[System.Windows.Point]::new(0.5,0.5)
+   if(-not ($this.RenderTransform -is [System.Windows.Media.ScaleTransform])){$this.RenderTransform=[System.Windows.Media.ScaleTransform]::new(1.0,1.0)}
+   $scale=New-Object System.Windows.Media.Animation.DoubleAnimation;$scale.To=1.035;$scale.Duration=[TimeSpan]::FromMilliseconds(130)
+   $this.RenderTransform.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleXProperty,$scale);$this.RenderTransform.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleYProperty,$scale)
+   $this.BorderBrush=[System.Windows.Media.BrushConverter]::new().ConvertFromString($(if($this.Name -eq 'DriverBackupChoiceBtn'){'#A6C4AE'}else{'#E2C68E'}))
+  }catch{}
+ }.GetNewClosure())
+ $choice.Add_MouseLeave({
+  try {
+   if($this.RenderTransform -is [System.Windows.Media.ScaleTransform]){$scale=New-Object System.Windows.Media.Animation.DoubleAnimation;$scale.To=1.0;$scale.Duration=[TimeSpan]::FromMilliseconds(150);$this.RenderTransform.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleXProperty,$scale);$this.RenderTransform.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleYProperty,$scale)}
+   if($this.IsMouseOver -eq $false){$active=($this.Name -eq 'BackupCenterChoiceBtn' -and (C 'BackupSubTabs').SelectedIndex -eq 0) -or ($this.Name -eq 'DriverBackupChoiceBtn' -and (C 'BackupSubTabs').SelectedIndex -eq 1);$this.BorderBrush=[System.Windows.Media.BrushConverter]::new().ConvertFromString($(if($active -and $this.Name -eq 'DriverBackupChoiceBtn'){'#8EAE98'}elseif($active){'#B89A62'}elseif($this.Name -eq 'DriverBackupChoiceBtn'){'#40564A'}else{'#34465B'}))}
+  }catch{}
+ }.GetNewClosure())
+}
 Set-AMRBackupSubTab 0
 Update-AMRBackupView
 
@@ -26681,6 +28802,22 @@ foreach ($utilityButton in $utilityButtons) {
     $card.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#202A35')
     $card.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#344455')
     $card.BorderThickness = '1'; $card.CornerRadius = '7'
+    $card.RenderTransformOrigin = [System.Windows.Point]::new(0.5,0.5)
+    $card.RenderTransform = [System.Windows.Media.TranslateTransform]::new()
+    $card.Add_MouseEnter({
+        try {
+            $bg=$this.Background; if($bg -is [System.Windows.Media.SolidColorBrush]){$a=New-Object System.Windows.Media.Animation.ColorAnimation;$a.To=[System.Windows.Media.Color]::FromRgb(39,54,68);$a.Duration=[TimeSpan]::FromMilliseconds(150);$bg.BeginAnimation([System.Windows.Media.SolidColorBrush]::ColorProperty,$a)}
+            $br=$this.BorderBrush; if($br -is [System.Windows.Media.SolidColorBrush]){$a=New-Object System.Windows.Media.Animation.ColorAnimation;$a.To=[System.Windows.Media.Color]::FromRgb(184,154,98);$a.Duration=[TimeSpan]::FromMilliseconds(150);$br.BeginAnimation([System.Windows.Media.SolidColorBrush]::ColorProperty,$a)}
+            $m=New-Object System.Windows.Media.Animation.DoubleAnimation;$m.To=-1.5;$m.Duration=[TimeSpan]::FromMilliseconds(160);$m.EasingFunction=New-Object System.Windows.Media.Animation.QuadraticEase;$m.EasingFunction.EasingMode='EaseOut';$this.RenderTransform.BeginAnimation([System.Windows.Media.TranslateTransform]::YProperty,$m)
+        } catch {}
+    }.GetNewClosure())
+    $card.Add_MouseLeave({
+        try {
+            $bg=$this.Background; if($bg -is [System.Windows.Media.SolidColorBrush]){$a=New-Object System.Windows.Media.Animation.ColorAnimation;$a.To=[System.Windows.Media.Color]::FromRgb(32,42,53);$a.Duration=[TimeSpan]::FromMilliseconds(170);$bg.BeginAnimation([System.Windows.Media.SolidColorBrush]::ColorProperty,$a)}
+            $br=$this.BorderBrush; if($br -is [System.Windows.Media.SolidColorBrush]){$a=New-Object System.Windows.Media.Animation.ColorAnimation;$a.To=[System.Windows.Media.Color]::FromRgb(52,68,85);$a.Duration=[TimeSpan]::FromMilliseconds(170);$br.BeginAnimation([System.Windows.Media.SolidColorBrush]::ColorProperty,$a)}
+            $m=New-Object System.Windows.Media.Animation.DoubleAnimation;$m.To=0.0;$m.Duration=[TimeSpan]::FromMilliseconds(170);$m.EasingFunction=New-Object System.Windows.Media.Animation.QuadraticEase;$m.EasingFunction.EasingMode='EaseOut';$this.RenderTransform.BeginAnimation([System.Windows.Media.TranslateTransform]::YProperty,$m)
+        } catch {}
+    }.GetNewClosure())
     $cardGrid = New-Object System.Windows.Controls.Grid
     $cardColA = New-Object System.Windows.Controls.ColumnDefinition; $cardColA.Width = [System.Windows.GridLength]::new(1,[System.Windows.GridUnitType]::Star)
     $cardColB = New-Object System.Windows.Controls.ColumnDefinition; $cardColB.Width = [System.Windows.GridLength]::new(28)
@@ -26703,6 +28840,8 @@ foreach ($utilityButton in $utilityButtons) {
     $infoButton.ToolTip = $null; $infoButton.HorizontalAlignment = 'Center'; $infoButton.VerticalAlignment = 'Center'
     $infoButton.Tag = $utilityDescription
     $infoButton.Add_Click({ Show-AMRMessage ([string]$this.Tag) 'Utility Information' OK Information | Out-Null }.GetNewClosure())
+    $infoButton.Add_MouseEnter({try{$this.Background=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#D8BC83')}catch{}}.GetNewClosure())
+    $infoButton.Add_MouseLeave({try{$this.Background=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#B89A62')}catch{}}.GetNewClosure())
     [System.Windows.Controls.Grid]::SetColumn($infoButton,1); [void]$cardGrid.Children.Add($infoButton)
     $card.Child = $cardGrid
     [void]$utilityPanel.Children.Add($card)
@@ -26724,6 +28863,290 @@ function Update-AMRUtilitiesView {
 (C 'UtilSearchBox').Add_TextChanged({ Update-AMRUtilitiesView })
 (C 'UtilCategoryFilter').Add_SelectionChanged({ Update-AMRUtilitiesView })
 Update-AMRUtilitiesView
+
+# --- Cleanup Center: premium lightweight hover + interaction pass ---
+# The interaction layer is intentionally visual-only: it does not change any
+# cleanup selection, scan, quarantine, browser, DISM, or disk-operation logic.
+$script:AMRCleanupHoverAttached = New-Object 'System.Collections.Generic.HashSet[int]'
+
+function Get-AMRCleanupVisualDescendants {
+    param([System.Windows.DependencyObject]$Parent)
+    if (-not $Parent) { return @() }
+    $items = New-Object System.Collections.ArrayList
+    try {
+        $count = [System.Windows.Media.VisualTreeHelper]::GetChildrenCount($Parent)
+        for ($i = 0; $i -lt $count; $i++) {
+            $child = [System.Windows.Media.VisualTreeHelper]::GetChild($Parent,$i)
+            if ($child) {
+                [void]$items.Add($child)
+                foreach ($nested in (Get-AMRCleanupVisualDescendants -Parent $child)) { [void]$items.Add($nested) }
+            }
+        }
+    } catch {
+        try {
+            foreach ($child in [System.Windows.LogicalTreeHelper]::GetChildren($Parent)) {
+                if ($child -is [System.Windows.DependencyObject]) {
+                    [void]$items.Add($child)
+                    foreach ($nested in (Get-AMRCleanupVisualDescendants -Parent $child)) { [void]$items.Add($nested) }
+                }
+            }
+        } catch {}
+    }
+    return ,$items.ToArray()
+}
+
+function Add-AMRCleanupButtonMotion {
+    param([System.Windows.Controls.Button]$Button)
+    if (-not $Button) { return }
+    $key = [System.Runtime.CompilerServices.RuntimeHelpers]::GetHashCode($Button)
+    if (-not $script:AMRCleanupHoverAttached.Add($key)) { return }
+    try {
+        $baseBorder = if ($Button.BorderBrush -is [System.Windows.Media.SolidColorBrush]) { $Button.BorderBrush.Color } else { [System.Windows.Media.Color]::FromRgb(64,86,109) }
+        $Button.BorderBrush = New-Object System.Windows.Media.SolidColorBrush($baseBorder)
+        $Button.RenderTransformOrigin = [System.Windows.Point]::new(0.5,0.5)
+        if (-not ($Button.RenderTransform -is [System.Windows.Media.ScaleTransform])) {
+            $Button.RenderTransform = [System.Windows.Media.ScaleTransform]::new(1.0,1.0)
+        }
+        $Button.Cursor = [System.Windows.Input.Cursors]::Hand
+        $restoreButtonBorder = $baseBorder
+        $Button.Add_MouseEnter({
+            try {
+                if (-not $this.IsEnabled) { return }
+                $a = New-Object System.Windows.Media.Animation.DoubleAnimation
+                $a.To = 1.035; $a.Duration = [TimeSpan]::FromMilliseconds(125)
+                $a.EasingFunction = New-Object System.Windows.Media.Animation.QuadraticEase
+                $a.EasingFunction.EasingMode = [System.Windows.Media.Animation.EasingMode]::EaseOut
+                $this.RenderTransform.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleXProperty,$a)
+                $this.RenderTransform.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleYProperty,$a)
+                if ($this.BorderBrush -is [System.Windows.Media.SolidColorBrush]) {
+                    $c = New-Object System.Windows.Media.Animation.ColorAnimation
+                    $c.To = [System.Windows.Media.Color]::FromRgb(184,154,98)
+                    $c.Duration = [TimeSpan]::FromMilliseconds(145)
+                    $this.BorderBrush.BeginAnimation([System.Windows.Media.SolidColorBrush]::ColorProperty,$c)
+                }
+            } catch {}
+        }.GetNewClosure())
+        $leave = {
+            try {
+                $a = New-Object System.Windows.Media.Animation.DoubleAnimation
+                $a.To = 1.0; $a.Duration = [TimeSpan]::FromMilliseconds(145)
+                $a.EasingFunction = New-Object System.Windows.Media.Animation.QuadraticEase
+                $a.EasingFunction.EasingMode = [System.Windows.Media.Animation.EasingMode]::EaseOut
+                $this.RenderTransform.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleXProperty,$a)
+                $this.RenderTransform.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleYProperty,$a)
+                if ($this.BorderBrush -is [System.Windows.Media.SolidColorBrush]) {
+                    $c = New-Object System.Windows.Media.Animation.ColorAnimation
+                    $c.To = $restoreButtonBorder; $c.Duration = [TimeSpan]::FromMilliseconds(155)
+                    $this.BorderBrush.BeginAnimation([System.Windows.Media.SolidColorBrush]::ColorProperty,$c)
+                }
+            } catch {}
+        }.GetNewClosure()
+        $Button.Add_MouseLeave($leave)
+        $Button.Add_PreviewMouseDown({
+            try {
+                if (-not $this.IsEnabled) { return }
+                $a = New-Object System.Windows.Media.Animation.DoubleAnimation
+                $a.To = 0.975; $a.Duration = [TimeSpan]::FromMilliseconds(65)
+                $this.RenderTransform.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleXProperty,$a)
+                $this.RenderTransform.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleYProperty,$a)
+            } catch {}
+        }.GetNewClosure())
+        $Button.Add_PreviewMouseUp({
+            try {
+                if (-not $this.IsEnabled -or -not $this.IsMouseOver) { return }
+                $a = New-Object System.Windows.Media.Animation.DoubleAnimation
+                $a.To = 1.035; $a.Duration = [TimeSpan]::FromMilliseconds(85)
+                $this.RenderTransform.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleXProperty,$a)
+                $this.RenderTransform.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleYProperty,$a)
+            } catch {}
+        }.GetNewClosure())
+    } catch {}
+}
+
+function Add-AMRCleanupCardMotion {
+    param([System.Windows.Controls.Border]$Card)
+    if (-not $Card) { return }
+    if ($Card.Name -eq 'BrowserChoiceFace' -or $Card.Name -eq 'CheckBoxFrame') { return }
+    if ($Card.CornerRadius -eq [System.Windows.CornerRadius]::new(0)) { return }
+    $key = [System.Runtime.CompilerServices.RuntimeHelpers]::GetHashCode($Card)
+    if (-not $script:AMRCleanupHoverAttached.Add($key)) { return }
+    try {
+        $baseBorder = if ($Card.BorderBrush -is [System.Windows.Media.SolidColorBrush]) { $Card.BorderBrush.Color } else { [System.Windows.Media.Color]::FromRgb(52,52,61) }
+        $baseBackground = if ($Card.Background -is [System.Windows.Media.SolidColorBrush]) { $Card.Background.Color } else { [System.Windows.Media.Color]::FromRgb(25,25,31) }
+        $Card.BorderBrush = New-Object System.Windows.Media.SolidColorBrush($baseBorder)
+        if ($Card.Background -is [System.Windows.Media.SolidColorBrush]) { $Card.Background = New-Object System.Windows.Media.SolidColorBrush($baseBackground) }
+        $restoreCardBorder = $baseBorder
+        $restoreCardBackground = $baseBackground
+        $Card.RenderTransformOrigin = [System.Windows.Point]::new(0.5,0.5)
+        if (-not ($Card.RenderTransform -is [System.Windows.Media.TranslateTransform])) {
+            $Card.RenderTransform = [System.Windows.Media.TranslateTransform]::new()
+        }
+        $Card.Add_MouseEnter({
+            try {
+                if ($this.BorderBrush -is [System.Windows.Media.SolidColorBrush]) {
+                    $b = New-Object System.Windows.Media.Animation.ColorAnimation
+                    $b.To = [System.Windows.Media.Color]::FromRgb(184,154,98); $b.Duration = [TimeSpan]::FromMilliseconds(155)
+                    $this.BorderBrush.BeginAnimation([System.Windows.Media.SolidColorBrush]::ColorProperty,$b)
+                }
+                if ($this.Background -is [System.Windows.Media.SolidColorBrush]) {
+                    $g = New-Object System.Windows.Media.Animation.ColorAnimation
+                    $g.To = [System.Windows.Media.Color]::FromRgb(39,43,48); $g.Duration = [TimeSpan]::FromMilliseconds(165)
+                    $this.Background.BeginAnimation([System.Windows.Media.SolidColorBrush]::ColorProperty,$g)
+                }
+                $m = New-Object System.Windows.Media.Animation.DoubleAnimation
+                $m.To = -1.25; $m.Duration = [TimeSpan]::FromMilliseconds(155)
+                $m.EasingFunction = New-Object System.Windows.Media.Animation.QuadraticEase
+                $m.EasingFunction.EasingMode = [System.Windows.Media.Animation.EasingMode]::EaseOut
+                $this.RenderTransform.BeginAnimation([System.Windows.Media.TranslateTransform]::YProperty,$m)
+            } catch {}
+        }.GetNewClosure())
+        $leave = {
+            try {
+                if ($this.BorderBrush -is [System.Windows.Media.SolidColorBrush]) {
+                    $b = New-Object System.Windows.Media.Animation.ColorAnimation
+                    $b.To = $restoreCardBorder; $b.Duration = [TimeSpan]::FromMilliseconds(170)
+                    $this.BorderBrush.BeginAnimation([System.Windows.Media.SolidColorBrush]::ColorProperty,$b)
+                }
+                if ($this.Background -is [System.Windows.Media.SolidColorBrush]) {
+                    $g = New-Object System.Windows.Media.Animation.ColorAnimation
+                    $g.To = $restoreCardBackground; $g.Duration = [TimeSpan]::FromMilliseconds(170)
+                    $this.Background.BeginAnimation([System.Windows.Media.SolidColorBrush]::ColorProperty,$g)
+                }
+                $m = New-Object System.Windows.Media.Animation.DoubleAnimation
+                $m.To = 0.0; $m.Duration = [TimeSpan]::FromMilliseconds(170)
+                $m.EasingFunction = New-Object System.Windows.Media.Animation.QuadraticEase
+                $m.EasingFunction.EasingMode = [System.Windows.Media.Animation.EasingMode]::EaseOut
+                $this.RenderTransform.BeginAnimation([System.Windows.Media.TranslateTransform]::YProperty,$m)
+            } catch {}
+        }.GetNewClosure()
+        $Card.Add_MouseLeave($leave)
+    } catch {}
+}
+
+function Add-AMRCleanupListMotion {
+    param([System.Windows.Controls.ListBox]$List)
+    if (-not $List) { return }
+    $key = [System.Runtime.CompilerServices.RuntimeHelpers]::GetHashCode($List)
+    if (-not $script:AMRCleanupHoverAttached.Add($key)) { return }
+    try {
+        $List.BorderBrush = New-Object System.Windows.Media.SolidColorBrush([System.Windows.Media.Color]::FromRgb(52,70,91))
+        $List.Add_MouseEnter({
+            try {
+                if ($this.BorderBrush -is [System.Windows.Media.SolidColorBrush]) {
+                    $a = New-Object System.Windows.Media.Animation.ColorAnimation
+                    $a.To = [System.Windows.Media.Color]::FromRgb(184,154,98); $a.Duration = [TimeSpan]::FromMilliseconds(145)
+                    $this.BorderBrush.BeginAnimation([System.Windows.Media.SolidColorBrush]::ColorProperty,$a)
+                }
+            } catch {}
+        }.GetNewClosure())
+        $List.Add_MouseLeave({
+            try {
+                if ($this.BorderBrush -is [System.Windows.Media.SolidColorBrush]) {
+                    $a = New-Object System.Windows.Media.Animation.ColorAnimation
+                    $a.To = [System.Windows.Media.Color]::FromRgb(52,70,91); $a.Duration = [TimeSpan]::FromMilliseconds(160)
+                    $this.BorderBrush.BeginAnimation([System.Windows.Media.SolidColorBrush]::ColorProperty,$a)
+                }
+            } catch {}
+        }.GetNewClosure())
+        if (-not $List.ItemContainerStyle) {
+            $style = New-Object System.Windows.Style([System.Windows.Controls.ListBoxItem])
+            $style.Setters.Add((New-Object System.Windows.Setter([System.Windows.Controls.Control]::PaddingProperty,[System.Windows.Thickness]::new(7,5,7,5))))
+            $style.Setters.Add((New-Object System.Windows.Setter([System.Windows.Controls.Control]::HorizontalContentAlignmentProperty,[System.Windows.HorizontalAlignment]::Stretch)))
+            $style.Setters.Add((New-Object System.Windows.Setter([System.Windows.Controls.Control]::BackgroundProperty,[System.Windows.Media.Brushes]::Transparent)))
+            $style.Setters.Add((New-Object System.Windows.Setter([System.Windows.Controls.Control]::BorderBrushProperty,[System.Windows.Media.Brushes]::Transparent)))
+            $style.Setters.Add((New-Object System.Windows.Setter([System.Windows.Controls.Control]::BorderThicknessProperty,[System.Windows.Thickness]::new(1))))
+            $hover = New-Object System.Windows.Trigger
+            $hover.Property = [System.Windows.UIElement]::IsMouseOverProperty; $hover.Value = $true
+            $hover.Setters.Add((New-Object System.Windows.Setter([System.Windows.Controls.Control]::BackgroundProperty,[System.Windows.Media.BrushConverter]::new().ConvertFromString('#293746'))))
+            $hover.Setters.Add((New-Object System.Windows.Setter([System.Windows.Controls.Control]::BorderBrushProperty,[System.Windows.Media.BrushConverter]::new().ConvertFromString('#B89A62'))))
+            $hover.Setters.Add((New-Object System.Windows.Setter([System.Windows.Controls.Control]::ForegroundProperty,[System.Windows.Media.BrushConverter]::new().ConvertFromString('#F3E8D2'))))
+            [void]$style.Triggers.Add($hover)
+            $selected = New-Object System.Windows.Trigger
+            $selected.Property = [System.Windows.Controls.ListBoxItem]::IsSelectedProperty; $selected.Value = $true
+            $selected.Setters.Add((New-Object System.Windows.Setter([System.Windows.Controls.Control]::BackgroundProperty,[System.Windows.Media.BrushConverter]::new().ConvertFromString('#3A342B'))))
+            $selected.Setters.Add((New-Object System.Windows.Setter([System.Windows.Controls.Control]::BorderBrushProperty,[System.Windows.Media.BrushConverter]::new().ConvertFromString('#B89A62'))))
+            [void]$style.Triggers.Add($selected)
+            $List.ItemContainerStyle = $style
+        }
+    } catch {}
+}
+
+function Add-AMRCleanupCheckMotion {
+    param([System.Windows.Controls.CheckBox]$Check)
+    if (-not $Check) { return }
+    $key = [System.Runtime.CompilerServices.RuntimeHelpers]::GetHashCode($Check)
+    if (-not $script:AMRCleanupHoverAttached.Add($key)) { return }
+    try {
+        $base = if ($Check.Foreground -is [System.Windows.Media.SolidColorBrush]) { $Check.Foreground.Color } else { [System.Windows.Media.Color]::FromRgb(241,245,249) }
+        $Check.Foreground = New-Object System.Windows.Media.SolidColorBrush($base)
+        $Check.Cursor = [System.Windows.Input.Cursors]::Hand
+        $restoreCheckForeground = $base
+        $Check.Add_MouseEnter({
+            try {
+                if ($this.Foreground -is [System.Windows.Media.SolidColorBrush]) {
+                    $a = New-Object System.Windows.Media.Animation.ColorAnimation
+                    $a.To = [System.Windows.Media.Color]::FromRgb(217,189,139); $a.Duration = [TimeSpan]::FromMilliseconds(125)
+                    $this.Foreground.BeginAnimation([System.Windows.Media.SolidColorBrush]::ColorProperty,$a)
+                }
+            } catch {}
+        }.GetNewClosure())
+        $Check.Add_MouseLeave({
+            try {
+                if ($this.Foreground -is [System.Windows.Media.SolidColorBrush]) {
+                    $a = New-Object System.Windows.Media.Animation.ColorAnimation
+                    $a.To = $restoreCheckForeground; $a.Duration = [TimeSpan]::FromMilliseconds(145)
+                    $this.Foreground.BeginAnimation([System.Windows.Media.SolidColorBrush]::ColorProperty,$a)
+                }
+            } catch {}
+        }.GetNewClosure())
+    } catch {}
+}
+
+function Add-AMRCleanupInteractionsToSelectedTab {
+    try {
+        $tabs = C 'CleanupSubTabs'
+        if (-not $tabs -or -not $tabs.SelectedContent) { return }
+        foreach ($element in (Get-AMRCleanupVisualDescendants -Parent $tabs.SelectedContent)) {
+            if ($element -is [System.Windows.Controls.Button]) { Add-AMRCleanupButtonMotion -Button $element }
+            elseif ($element -is [System.Windows.Controls.Border]) { Add-AMRCleanupCardMotion -Card $element }
+            elseif ($element -is [System.Windows.Controls.CheckBox]) { Add-AMRCleanupCheckMotion -Check $element }
+            elseif ($element -is [System.Windows.Controls.ListBox]) { Add-AMRCleanupListMotion -List $element }
+        }
+        # Explicitly include the main named action controls if a template has not
+        # exposed them through the selected tab's visual tree yet.
+        foreach ($name in @(
+            'CleanupScanBtn','CleanupSelectAllBtn','CleanupCancelSelectionBtn','CleanupRunBtn',
+            'CleanupRecycleBinRefreshBtn','CleanupRecycleBinEmptyBtn','CleanupDiscoveryScanBtn','CleanupLargeFilesScanBtn',
+            'CleanupDriveAnalyzeBtn','CleanupComponentAnalyzeBtn','CleanupComponentRunBtn',
+            'CleanupDiskOrganizerRefreshBtn','CleanupDiskOrganizerOpenBtn','CleanupDiskOrganizerStorageBtn','CleanupDiskOrganizerOptimizeBtn',
+            'CleanupBrowserGoToScanBtn','CleanupBrowserOpenBtn','CleanupOrphanScanBtn','CleanupOrphanQuarantineBtn',
+            'CleanupOrphanRefreshBtn','CleanupOrphanRestoreBtn','CleanupComponentAnalyzeNewBtn','CleanupComponentRunNewBtn'
+        )) {
+            $control = C $name
+            if ($control -and $control -is [System.Windows.Controls.Button]) { Add-AMRCleanupButtonMotion -Button $control }
+        }
+        foreach ($name in @('CleanupUserTempCheck','CleanupWindowsTempCheck','CleanupUpdateCheck','CleanupWerCheck','CleanupShaderCheck','CleanupAppCacheCheck','CleanupDeliveryCheck')) {
+            $control = C $name
+            if ($control) { Add-AMRCleanupCheckMotion -Check $control }
+        }
+    } catch {
+        try { Write-AMRLog ("Cleanup interaction layer warning: {0}" -f $_.Exception.Message) WARNING Cleanup } catch {}
+    }
+}
+
+$cleanupTabsForMotion = C 'CleanupSubTabs'
+if ($cleanupTabsForMotion) {
+    $cleanupTabsForMotion.Add_Loaded({
+        try {
+            $null = $this.Dispatcher.BeginInvoke([Action]{ Add-AMRCleanupInteractionsToSelectedTab },[System.Windows.Threading.DispatcherPriority]::Background)
+        } catch {}
+    }.GetNewClosure())
+    $cleanupTabsForMotion.Add_SelectionChanged({
+        try {
+            $null = $this.Dispatcher.BeginInvoke([Action]{ Add-AMRCleanupInteractionsToSelectedTab },[System.Windows.Threading.DispatcherPriority]::Background)
+        } catch {}
+    }.GetNewClosure())
+}
 
 # --- 9. Launch Suite ---
 Write-AMRLog ('Amr | windows_utility initialized. ' + $script:AMRReliabilityPhase) INFO System
