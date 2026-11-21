@@ -1,4 +1,4 @@
-#requires -Version 5.1
+﻿#requires -Version 5.1
 # AMR Tool-Pro | Premium animated bootstrap launcher
 # Windows PowerShell 5.1 | Public command: irm <raw-launcher-url> | iex
 
@@ -6,13 +6,23 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
 $repoRaw = 'https://raw.githubusercontent.com/3mr10aa/Tool-Pro/main'
-$installRoot = Join-Path $env:LOCALAPPDATA 'AMR-ToolPro\Runtime'
-$installParent = Split-Path -Parent $installRoot
-$stageRoot = Join-Path $installParent ('.AMR-ToolPro-stage-' + [guid]::NewGuid().ToString('N'))
+$runtimeRoot = Join-Path $env:LOCALAPPDATA 'AMR-ToolPro\Runtime'
+$installRoot = $runtimeRoot # Legacy fallback until a verified version pointer is available.
+$installParent = Split-Path -Parent $runtimeRoot
+$versionsRoot = Join-Path $runtimeRoot 'Versions'
+$sharedRoot = Join-Path $runtimeRoot 'Shared'
+$iconVersionsRoot = Join-Path $sharedRoot 'IconVersions'
+$localInstalledIconsRoot = Join-Path $sharedRoot 'LocalInstalled'
+$currentStatePath = Join-Path $runtimeRoot 'current.json'
+$currentState = $null
+$stageRoot = $null
+$pendingVersionCommit = $false
+$pendingVersionId = $null
+$pendingIconRelativePath = $null
 $logPath = Join-Path $env:TEMP 'AMR_ToolPro_Launcher.log'
 $telemetryRoot = Join-Path $env:LOCALAPPDATA 'AMR-ToolPro\Telemetry'
 $telemetryEndpointFileUrl = $repoRaw + '/telemetry-endpoint.txt'
-$launcherVersion = '2.4.2'
+$launcherVersion = '2.5.0'
 $script:LauncherForm = $null
 $script:ProgressTrack = $null
 $script:ProgressFill = $null
@@ -28,34 +38,12 @@ $expected = [ordered]@{
     'AMR_WebView2/Microsoft.Web.WebView2.Wpf.dll' = $true
     'AMR_WebView2/x64/WebView2Loader.dll' = $true
     'AMR_WebView2/x86/WebView2Loader.dll' = $true
-    'Icons.zip' = $true
 }
 
 function Write-AMRLauncherLog {
     param([string]$Message)
     try { Add-Content -LiteralPath $logPath -Value ('[{0}] {1}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'), $Message) -Encoding UTF8 } catch {}
 }
-
-function Move-AMRDirectoryWithRetry {
-    param([Parameter(Mandatory=$true)][string]$Source,[Parameter(Mandatory=$true)][string]$Destination,[int]$Attempts=10)
-    $lastError = $null
-    for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
-        try {
-            if (-not [System.IO.Directory]::Exists($Source)) { throw "Source directory does not exist: $Source" }
-            if ([System.IO.Directory]::Exists($Destination) -or [System.IO.File]::Exists($Destination)) { throw "Destination already exists: $Destination" }
-            [System.IO.Directory]::Move($Source, $Destination)
-            Write-AMRLauncherLog ("Directory publish move succeeded: $Source -> $Destination (attempt $attempt).")
-            return
-        } catch {
-            $lastError = $_
-            Write-AMRLauncherLog ("Directory publish move attempt $attempt/$Attempts failed: $Source -> $Destination | $($_.Exception.Message)")
-            if ($attempt -lt $Attempts) { Start-Sleep -Milliseconds ([Math]::Min(1500, 250 * $attempt)) }
-        }
-    }
-    throw "Could not safely move directory after $Attempts attempts. Source='$Source'; Destination='$Destination'. Last error: $($lastError.Exception.Message)"
-}
-
-
 
 function Get-AMRTelemetryConsent {
     param([string]$ConsentPath)
@@ -249,7 +237,13 @@ function Test-AMRIconCacheMatchesSource {
         $markerPath = Join-Path $IconDirectory '.amr-icons-source.json'
         if (-not (Test-Path -LiteralPath $markerPath -PathType Leaf)) { return $false }
         $marker = Get-Content -LiteralPath $markerPath -Raw -Encoding UTF8 | ConvertFrom-Json
-        return ([string]$marker.sourceGitBlobSha1).ToLowerInvariant() -eq ([string]$SourceBlob).ToLowerInvariant()
+        if (([string]$marker.sourceGitBlobSha1).ToLowerInvariant() -ne ([string]$SourceBlob).ToLowerInvariant()) { return $false }
+        $extensions = @(Get-AMRIconImageExtensions)
+        $actualCount = @(Get-ChildItem -LiteralPath $IconDirectory -File -ErrorAction Stop |
+            Where-Object { $extensions -contains $_.Extension.ToLowerInvariant() -and $_.Length -gt 128 }).Count
+        $recordedCount = 0
+        if (-not [int]::TryParse([string]$marker.imageCount,[ref]$recordedCount)) { return $false }
+        return ($recordedCount -ge $Minimum -and $actualCount -eq $recordedCount)
     } catch { return $false }
 }
 
@@ -371,19 +365,23 @@ function Test-AMRRuntimeAgainstManifest {
 }
 
 function Copy-AMRRuntimeToStage {
-    param([string]$Source, [string]$Destination, [switch]$SkipIconImages)
+    param([string]$Source, [string]$Destination)
     if (-not (Test-Path -LiteralPath $Source -PathType Container)) { return }
-    foreach ($item in (Get-ChildItem -LiteralPath $Source -Force -ErrorAction Stop)) {
-        if ($SkipIconImages -and $item.Name -eq 'Icons' -and $item.PSIsContainer) {
-            $stagedIcons = Join-Path $Destination 'Icons'
-            New-Item -ItemType Directory -Path $stagedIcons -Force | Out-Null
-            $localInstalled = Join-Path $item.FullName 'LocalInstalled'
-            if (Test-Path -LiteralPath $localInstalled -PathType Container) {
-                Copy-Item -LiteralPath $localInstalled -Destination $stagedIcons -Recurse -Force -ErrorAction Stop
-            }
-            continue
+    # Copy only the five manifest-controlled runtime files and the saved manifest.
+    # Never recurse through Runtime, Versions, Shared, Telemetry, or icon generations.
+    foreach ($relative in $expected.Keys) {
+        $sourcePath = Join-Path $Source ($relative -replace '/', '\\')
+        if (-not (Test-Path -LiteralPath $sourcePath -PathType Leaf)) { continue }
+        $destinationPath = Join-Path $Destination ($relative -replace '/', '\\')
+        $destinationParent = Split-Path -Parent $destinationPath
+        if (-not (Test-Path -LiteralPath $destinationParent -PathType Container)) {
+            New-Item -ItemType Directory -Path $destinationParent -Force | Out-Null
         }
-        Copy-Item -LiteralPath $item.FullName -Destination $Destination -Recurse -Force -ErrorAction Stop
+        Copy-Item -LiteralPath $sourcePath -Destination $destinationPath -Force -ErrorAction Stop
+    }
+    $manifestSource = Join-Path $Source '.amr-runtime-state.json'
+    if (Test-Path -LiteralPath $manifestSource -PathType Leaf) {
+        Copy-Item -LiteralPath $manifestSource -Destination (Join-Path $Destination '.amr-runtime-state.json') -Force -ErrorAction Stop
     }
 }
 
@@ -616,6 +614,23 @@ function Invoke-AMRParallelRuntimePreparation {
 
 try {
     if ([string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) { throw 'LOCALAPPDATA is not available.' }
+    New-Item -ItemType Directory -Path $versionsRoot,$sharedRoot,$iconVersionsRoot,$localInstalledIconsRoot -Force | Out-Null
+    if (Test-Path -LiteralPath $currentStatePath -PathType Leaf) {
+        try {
+            $currentState = Get-Content -LiteralPath $currentStatePath -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop
+            $candidateVersionId = [string]$currentState.versionId
+            if ($candidateVersionId -match '^[a-fA-F0-9]{40}(-[a-fA-F0-9]{8})?$') {
+                $candidateRoot = Join-Path $versionsRoot $candidateVersionId
+                if (Test-Path -LiteralPath (Join-Path $candidateRoot 'AMR_Windows_Utility_V1.ps1') -PathType Leaf) {
+                    $installRoot = $candidateRoot
+                    Write-AMRLauncherLog ('Selected previously committed immutable runtime version: ' + $candidateVersionId)
+                }
+            }
+        } catch {
+            $currentState = $null
+            Write-AMRLauncherLog ('Current-version pointer is invalid; retaining legacy runtime fallback. ' + $_.Exception.Message)
+        }
+    }
     [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
     Add-Type -AssemblyName System.Windows.Forms
     Add-Type -AssemblyName System.Drawing
@@ -859,6 +874,9 @@ namespace AMR {
                 $savedState = Get-Content -LiteralPath $savedManifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
                 $savedMap = @{}
                 foreach ($property in $savedState.files.PSObject.Properties) { $savedMap[$property.Name] = [string]$property.Value }
+                if ($savedState.iconGitBlobSha1 -match '^[a-fA-F0-9]{40}$') {
+                    $savedMap['Icons.zip'] = ([string]$savedState.iconGitBlobSha1).ToLowerInvariant()
+                }
                 $localMatchesSource = Test-AMRRuntimeAgainstManifest -Root $installRoot -Manifest $savedMap
                 if ($localMatchesSource) {
                     $remoteTree = [pscustomobject]@{ Commit=[string]$savedState.commit; Files=$savedMap }
@@ -871,42 +889,129 @@ namespace AMR {
         }
     }
 
-    $iconsPath = Join-Path $installRoot 'Icons'
-    # Preserve user-specific installed-app icons created by the previous ProgramData cache layout.
-    $legacyInstalledIcons = Join-Path $env:ProgramData 'AMR-Utility\Icons\LocalInstalled'
-    $runtimeInstalledIcons = Join-Path $iconsPath 'LocalInstalled'
-    if ((Test-Path -LiteralPath $legacyInstalledIcons -PathType Container) -and -not (Test-Path -LiteralPath $runtimeInstalledIcons -PathType Container)) {
-        New-Item -ItemType Directory -Path $iconsPath -Force | Out-Null
-        Copy-Item -LiteralPath $legacyInstalledIcons -Destination $runtimeInstalledIcons -Recurse -Force -ErrorAction Stop
-        Write-AMRLauncherLog 'Migrated the previous ProgramData LocalInstalled icon subcache into the launcher-managed runtime.'
-    }
     $remoteIconBlob = [string]$remoteTree.Files['Icons.zip']
-    $iconCacheMatchesSource = Test-AMRIconCacheMatchesSource -IconDirectory $iconsPath -SourceBlob $remoteIconBlob -Minimum 100
+    if ($remoteIconBlob -notmatch '^[a-f0-9]{40}$') { throw 'GitHub did not provide a valid Icons.zip Git blob fingerprint.' }
+
+    # Resolve the icon directory by its content fingerprint. Existing icon generations
+    # remain untouched; app versions point to the matching generation through a junction.
+    $iconsPath = $null
+    $priorIconsPath = $null
+    $iconCacheMatchesSource = $false
+    $iconCacheChecked = $false
+    if ($currentState -and $currentState.iconPath) {
+        $savedIconPath = [string]$currentState.iconPath
+        if ($savedIconPath -eq 'Icons' -or $savedIconPath -match '^Shared\\IconVersions\\[a-fA-F0-9]{40}(-[a-fA-F0-9]{8})?$') {
+            $savedCandidate = Join-Path $runtimeRoot ($savedIconPath -replace '/', '\')
+            if (Test-Path -LiteralPath $savedCandidate -PathType Container) {
+                $iconsPath = $savedCandidate
+                $priorIconsPath = $savedCandidate
+            }
+        }
+    }
+    if (-not $iconsPath) {
+        $legacyIconsCandidate = Join-Path $runtimeRoot 'Icons'
+        if (Test-AMRIconCacheMatchesSource -IconDirectory $legacyIconsCandidate -SourceBlob $remoteIconBlob -Minimum 100) {
+            $iconsPath = $legacyIconsCandidate
+            $priorIconsPath = $legacyIconsCandidate
+            $iconCacheMatchesSource = $true
+            $iconCacheChecked = $true
+            Write-AMRLauncherLog 'Reusing the existing verified legacy icon cache in place; no migration or extraction is required.'
+        } else {
+            $iconsPath = Join-Path $iconVersionsRoot $remoteIconBlob
+        }
+    }
+    if (-not $iconCacheChecked) {
+        $iconCacheMatchesSource = Test-AMRIconCacheMatchesSource -IconDirectory $iconsPath -SourceBlob $remoteIconBlob -Minimum 100
+    }
+    if (-not $iconCacheMatchesSource -and (Test-Path -LiteralPath $iconsPath -PathType Container)) {
+        # Preserve a damaged/incomplete generation instead of overwriting or deleting it.
+        if (-not $priorIconsPath) { $priorIconsPath = $iconsPath }
+        $iconsPath = Join-Path $iconVersionsRoot ($remoteIconBlob + '-' + [guid]::NewGuid().ToString('N').Substring(0,8))
+    }
+
+    # Migrate user-installed icon data only when switching from a legacy icon folder
+    # to a shared content-addressed generation, and only once after successful copying.
+    $legacyIconRoot = Join-Path $runtimeRoot 'Icons'
+    $usesSharedIconGeneration = -not [string]::Equals([IO.Path]::GetFullPath($iconsPath).TrimEnd('\'),[IO.Path]::GetFullPath($legacyIconRoot).TrimEnd('\'),[StringComparison]::OrdinalIgnoreCase)
+    $legacyProgramDataInstalledIcons = Join-Path $env:ProgramData 'AMR-Utility\Icons\LocalInstalled'
+    $legacyRuntimeInstalledIcons = Join-Path $legacyIconRoot 'LocalInstalled'
+    $needsProgramDataIconMigration = (-not (Test-Path -LiteralPath $legacyRuntimeInstalledIcons -PathType Container)) -and (Test-Path -LiteralPath $legacyProgramDataInstalledIcons -PathType Container)
+    $localInstalledMigrationMarker = Join-Path $sharedRoot '.local-installed-migrated'
+    if (($usesSharedIconGeneration -or $needsProgramDataIconMigration) -and -not (Test-Path -LiteralPath $localInstalledMigrationMarker -PathType Leaf)) {
+        $legacyInstalledCandidates = @(
+            $legacyProgramDataInstalledIcons,
+            $legacyRuntimeInstalledIcons
+        )
+        if ($priorIconsPath) { $legacyInstalledCandidates += (Join-Path $priorIconsPath 'LocalInstalled') }
+        $migrationSucceeded = $true
+        foreach ($legacyInstalled in $legacyInstalledCandidates) {
+            if (-not (Test-Path -LiteralPath $legacyInstalled -PathType Container)) { continue }
+            try {
+                $legacyAttributes = [System.IO.File]::GetAttributes($legacyInstalled)
+                if (($legacyAttributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { continue }
+                foreach ($entry in (Get-ChildItem -LiteralPath $legacyInstalled -Force -ErrorAction Stop)) {
+                    $targetEntry = Join-Path $localInstalledIconsRoot $entry.Name
+                    if (-not (Test-Path -LiteralPath $targetEntry)) {
+                        Copy-Item -LiteralPath $entry.FullName -Destination $localInstalledIconsRoot -Recurse -Force -ErrorAction Stop
+                    }
+                }
+                Write-AMRLauncherLog ('Preserved legacy LocalInstalled icon data from: ' + $legacyInstalled)
+            } catch {
+                $migrationSucceeded = $false
+                Write-AMRLauncherLog ('LocalInstalled icon migration warning: ' + $_.Exception.Message)
+            }
+        }
+        if ($migrationSucceeded) {
+            [System.IO.File]::WriteAllText($localInstalledMigrationMarker,[DateTime]::UtcNow.ToString('o'),(New-Object System.Text.UTF8Encoding($false)))
+        }
+    }
+
     $needsIconExtraction = -not $iconCacheMatchesSource
     if ($iconCacheMatchesSource) {
-        Write-AMRLauncherLog ('Icon cache fingerprint matches current GitHub Icons.zip (' + $remoteIconBlob + '); skipping extraction.')
+        Write-AMRLauncherLog ('Icon cache fingerprint and recorded file count match GitHub Icons.zip (' + $remoteIconBlob + '); skipping download and extraction.')
     } elseif (Test-AMRIconCacheUsable -IconDirectory $iconsPath -Minimum 100) {
-        Write-AMRLauncherLog 'Extracted icons exist, but their saved source fingerprint does not match GitHub; refreshing icon cache.'
+        Write-AMRLauncherLog 'An icon folder exists but its source fingerprint or recorded completeness check failed; preserving it and preparing a clean generation.'
     } else {
-        Write-AMRLauncherLog 'Extracted icon cache is missing or incomplete; extraction is required.'
+        Write-AMRLauncherLog 'The verified icon generation is missing or incomplete; extraction is required.'
     }
-    if ($localMatchesSource -and $needsIconExtraction) {
+    if ($localMatchesSource -and $needsIconExtraction) { $localMatchesSource = $false }
+    $expectedIconRelativePath = [string]$iconsPath
+    if ($expectedIconRelativePath.StartsWith($runtimeRoot,[StringComparison]::OrdinalIgnoreCase)) {
+        $expectedIconRelativePath = $expectedIconRelativePath.Substring($runtimeRoot.Length).TrimStart('\')
+    }
+    $pointerIconMatches = ($currentState -and [string]::Equals([string]$currentState.iconPath,$expectedIconRelativePath,[StringComparison]::OrdinalIgnoreCase))
+    $legacyRuntimeActive = [string]::Equals([IO.Path]::GetFullPath($installRoot).TrimEnd('\'),[IO.Path]::GetFullPath($runtimeRoot).TrimEnd('\'),[StringComparison]::OrdinalIgnoreCase)
+    $legacyIconLinkMatches = [string]::Equals([IO.Path]::GetFullPath((Join-Path $installRoot 'Icons')).TrimEnd('\'),[IO.Path]::GetFullPath($iconsPath).TrimEnd('\'),[StringComparison]::OrdinalIgnoreCase)
+    $needsIconLinkRepair = $false
+    if ($localMatchesSource -and $currentState -and -not $pointerIconMatches) {
         $localMatchesSource = $false
+        $needsIconLinkRepair = $true
+        Write-AMRLauncherLog 'The active runtime pointer does not reference the selected verified icon generation; preparing a new immutable runtime link.'
+    }
+    if ($localMatchesSource -and $legacyRuntimeActive -and -not $legacyIconLinkMatches) {
+        $localMatchesSource = $false
+        $needsIconLinkRepair = $true
+        Write-AMRLauncherLog 'The legacy runtime icon directory does not match the verified shared icon generation; preparing a version with the correct junction.'
     }
 
     if ($localMatchesSource) {
         $appPath = Join-Path $installRoot 'AMR_Windows_Utility_V1.ps1'
         $dllCoreLocal = Join-Path $installRoot 'AMR_WebView2\Microsoft.Web.WebView2.Core.dll'
         $dllWpfLocal = Join-Path $installRoot 'AMR_WebView2\Microsoft.Web.WebView2.Wpf.dll'
+        $iconLink = Join-Path $installRoot 'Icons'
         if (-not (Test-Path -LiteralPath $appPath -PathType Leaf) -or -not (Test-Path -LiteralPath $dllCoreLocal -PathType Leaf) -or -not (Test-Path -LiteralPath $dllWpfLocal -PathType Leaf)) {
             throw 'The local runtime passed source comparison but failed the required runtime layout check.'
+        }
+        if (-not (Test-Path -LiteralPath $iconLink -PathType Container)) {
+            throw 'The selected runtime has no local Icons directory/junction.'
         }
         Set-AMRLauncherProgress -Percent 92 -Status 'Your local AMR runtime is up to date...' -Detail 'All required files match GitHub. Launching without re-downloading.'
         Write-AMRLauncherLog 'All local runtime files match current GitHub source; skipping downloads, staging, and replacement.'
         $stageRoot = $null
     } else {
-        Set-AMRLauncherProgress -Percent 8 -Status 'A newer or different runtime was found...' -Detail 'Downloading only files that do not match the current GitHub source...'
-        New-Item -ItemType Directory -Path $installParent -Force | Out-Null
+        Set-AMRLauncherProgress -Percent 8 -Status 'A newer or different runtime was found...' -Detail 'Preparing an isolated version without touching the active runtime...'
+        New-Item -ItemType Directory -Path $versionsRoot,$sharedRoot,$iconVersionsRoot,$localInstalledIconsRoot -Force | Out-Null
+        $stageRoot = Join-Path $versionsRoot ('.staging-' + [guid]::NewGuid().ToString('N'))
         New-Item -ItemType Directory -Path $stageRoot -Force | Out-Null
 
         $changed = @()
@@ -923,23 +1028,50 @@ namespace AMR {
         }
         $fileCount = $changed.Count
         Write-AMRLauncherLog ('Runtime files requiring download: ' + ($changed -join ', '))
-        if ($fileCount -lt 1 -and -not $needsIconExtraction) { throw 'Runtime comparison returned an inconsistent update decision.' }
-        $archiveChanged = ($changed -contains 'Icons.zip')
-        $extractIconsNow = ($needsIconExtraction -or $archiveChanged)
-        # Do not copy thousands of stale icon files into staging when they will
-        # immediately be replaced. Preserve only LocalInstalled in that case.
-        Copy-AMRRuntimeToStage -Source $installRoot -Destination $stageRoot -SkipIconImages:$extractIconsNow
-        if ($extractIconsNow -and -not $archiveChanged) {
-            $stagedIconArchive = Join-Path $stageRoot 'Icons.zip'
-            if (-not (Test-Path -LiteralPath $stagedIconArchive -PathType Leaf)) { throw 'The previously verified Icons.zip archive is missing from the staged runtime.' }
-        }
-        Invoke-AMRParallelRuntimePreparation -RelativePaths $changed -StageRoot $stageRoot -ExpectedBlobs $remoteTree.Files -ExtractIcons $extractIconsNow
+        if ($fileCount -lt 1 -and -not $needsIconExtraction -and -not $needsIconLinkRepair) { throw 'Runtime comparison returned an inconsistent update decision.' }
+        $extractIconsNow = $needsIconExtraction
+        $downloadPaths = @($changed)
 
-        # Persist the exact source identities only after every changed download has
-        # passed Git blob verification. This also enables safe offline startup later.
+        # Copy only the five runtime components. The archive is considered only when
+        # extraction is actually needed, so ordinary launches never hash or download it.
+        Copy-AMRRuntimeToStage -Source $installRoot -Destination $stageRoot
+        if ($extractIconsNow) {
+            $archiveReused = $false
+            $archiveCandidates = @(
+                (Join-Path $installRoot 'Icons.zip'),
+                (Join-Path $runtimeRoot 'Icons.zip')
+            ) | Select-Object -Unique
+            foreach ($archiveCandidate in $archiveCandidates) {
+                if (-not (Test-Path -LiteralPath $archiveCandidate -PathType Leaf)) { continue }
+                try {
+                    $candidateBlob = Get-AMRGitBlobSha1 -Path $archiveCandidate
+                    if ($candidateBlob -eq $remoteIconBlob) {
+                        Copy-Item -LiteralPath $archiveCandidate -Destination (Join-Path $stageRoot 'Icons.zip') -Force -ErrorAction Stop
+                        $archiveReused = $true
+                        Write-AMRLauncherLog ('Reusing locally cached Icons.zip after Git blob verification: ' + $archiveCandidate)
+                        break
+                    }
+                    Write-AMRLauncherLog ('Ignoring a local Icons.zip whose Git blob does not match the current source: ' + $archiveCandidate)
+                } catch {
+                    Write-AMRLauncherLog ('Could not reuse local Icons.zip; a verified download will be used. ' + $_.Exception.Message)
+                }
+            }
+            if (-not $archiveReused) { $downloadPaths += 'Icons.zip' }
+        }
+        Invoke-AMRParallelRuntimePreparation -RelativePaths $downloadPaths -StageRoot $stageRoot -ExpectedBlobs $remoteTree.Files -ExtractIcons $extractIconsNow
+
+        # Persist source identities only after every downloaded component passed Git blob verification.
         $stateFiles = [ordered]@{}
         foreach ($relative in $expected.Keys) { $stateFiles[$relative] = [string]$remoteTree.Files[$relative] }
-        $state = [ordered]@{ schemaVersion = 1; repository = '3mr10aa/Tool-Pro'; branch = 'main'; commit = $remoteTree.Commit; verifiedAtUtc = [DateTime]::UtcNow.ToString('o'); files = $stateFiles }
+        $state = [ordered]@{
+            schemaVersion = 1
+            repository = '3mr10aa/Tool-Pro'
+            branch = 'main'
+            commit = $remoteTree.Commit
+            verifiedAtUtc = [DateTime]::UtcNow.ToString('o')
+            iconGitBlobSha1 = $remoteIconBlob
+            files = $stateFiles
+        }
         $statePath = Join-Path $stageRoot '.amr-runtime-state.json'
         [System.IO.File]::WriteAllText($statePath, ($state | ConvertTo-Json -Depth 5), (New-Object System.Text.UTF8Encoding($false)))
         if (-not (Test-AMRRuntimeAgainstManifest -Root $stageRoot -Manifest $remoteTree.Files)) {
@@ -962,9 +1094,8 @@ namespace AMR {
         if (-not (Test-Path -LiteralPath $dllCore -PathType Leaf) -or -not (Test-Path -LiteralPath $dllWpf -PathType Leaf)) {
             throw 'The verified WebView2 managed assemblies are missing from the staged runtime.'
         }
-        Set-AMRLauncherProgress -Percent 91 -Status 'Integrity and syntax checks passed...' -Detail 'Preparing the verified runtime without touching your existing files...'
 
-        # Pull the high-resolution AMR ICO frame from the verified main script.
+        # The launcher ICO extraction is optional and remains unchanged.
         try {
             $strictUtf8 = New-Object System.Text.UTF8Encoding($false, $true)
             $reader = New-Object System.IO.StreamReader($appStage, $strictUtf8, $true)
@@ -1009,38 +1140,49 @@ namespace AMR {
             }
         } catch { Write-AMRLauncherLog ('Optional launcher icon extraction failed: ' + $_.Exception.Message) }
 
-        # Publish from a same-volume staging directory. Never delete an existing
-        # backup in the critical path: security scanners or stale handles may hold it.
-        # A unique backup name preserves rollback data and avoids collisions with old backups.
-        New-Item -ItemType Directory -Path $installParent -Force | Out-Null
-        $backupRoot = $installRoot + '.previous-' + (Get-Date -Format 'yyyyMMddHHmmss') + '-' + ([guid]::NewGuid().ToString('N').Substring(0,8))
-        $hadPrevious = [System.IO.Directory]::Exists($installRoot)
-        $oldRuntimeMoved = $false
-        if ($hadPrevious) {
-            Move-AMRDirectoryWithRetry -Source $installRoot -Destination $backupRoot -Attempts 10
-            $oldRuntimeMoved = $true
-        }
-        try {
-            Move-AMRDirectoryWithRetry -Source $stageRoot -Destination $installRoot -Attempts 10
-            $stageRoot = $null
-            if ($oldRuntimeMoved) {
-                Write-AMRLauncherLog ("Previous verified runtime retained for safe rollback at: $backupRoot")
+        # Publish extracted icons into a new immutable content-addressed folder.
+        if ($extractIconsNow) {
+            $stagedIcons = Join-Path $stageRoot 'Icons'
+            if (-not (Test-AMRIconCacheMatchesSource -IconDirectory $stagedIcons -SourceBlob $remoteIconBlob -Minimum 100)) {
+                throw 'The extracted icon generation failed its source fingerprint/completeness validation.'
             }
-        } catch {
-            $publishError = $_
-            if ($oldRuntimeMoved -and -not [System.IO.Directory]::Exists($installRoot) -and [System.IO.Directory]::Exists($backupRoot)) {
-                try {
-                    Move-AMRDirectoryWithRetry -Source $backupRoot -Destination $installRoot -Attempts 10
-                    Write-AMRLauncherLog 'Previous runtime restored successfully after publish failure.'
-                } catch {
-                    Write-AMRLauncherLog ('CRITICAL: automatic runtime rollback failed: ' + $_.Exception.Message)
-                    throw ('New runtime publish failed and automatic rollback also failed. Previous runtime remains preserved at: ' + $backupRoot + '. Publish error: ' + $publishError.Exception.Message)
-                }
+            if (Test-Path -LiteralPath $iconsPath -PathType Container) {
+                $iconsPath = Join-Path $iconVersionsRoot ($remoteIconBlob + '-' + [guid]::NewGuid().ToString('N').Substring(0,8))
             }
-            throw $publishError
+            [System.IO.Directory]::Move($stagedIcons,$iconsPath)
+            $temporaryArchive = Join-Path $stageRoot 'Icons.zip'
+            if (Test-Path -LiteralPath $temporaryArchive -PathType Leaf) {
+                Remove-Item -LiteralPath $temporaryArchive -Force -ErrorAction Stop
+            }
+            Write-AMRLauncherLog ('Published a new immutable icon generation: ' + $iconsPath)
         }
+        if (-not (Test-Path -LiteralPath $iconsPath -PathType Container)) { throw 'The verified icon generation is unavailable.' }
 
+        # Preserve LocalInstalled independently of the downloaded archive. A junction
+        # lets every immutable icon generation share the same user-specific cache.
+        $localLink = Join-Path $iconsPath 'LocalInstalled'
+        if (-not (Test-Path -LiteralPath $localLink)) {
+            New-Item -ItemType Junction -Path $localLink -Target $localInstalledIconsRoot -ErrorAction Stop | Out-Null
         }
+        $stageIconLink = Join-Path $stageRoot 'Icons'
+        if (Test-Path -LiteralPath $stageIconLink) { Remove-Item -LiteralPath $stageIconLink -Force -Recurse -ErrorAction Stop }
+        New-Item -ItemType Junction -Path $stageIconLink -Target $iconsPath -ErrorAction Stop | Out-Null
+
+        # Each app version has a unique directory. Only this unused staging directory
+        # is renamed; the active Runtime and its loaded WebView2 files are never moved.
+        $versionId = ([string]$remoteTree.Commit).ToLowerInvariant() + '-' + [guid]::NewGuid().ToString('N').Substring(0,8)
+        $finalVersionRoot = Join-Path $versionsRoot $versionId
+        [System.IO.Directory]::Move($stageRoot,$finalVersionRoot)
+        $stageRoot = $null
+        $installRoot = $finalVersionRoot
+        $pendingVersionCommit = $true
+        $pendingVersionId = $versionId
+        $pendingIconRelativePath = [string]$iconsPath
+        if ($pendingIconRelativePath.StartsWith($runtimeRoot,[StringComparison]::OrdinalIgnoreCase)) {
+            $pendingIconRelativePath = $pendingIconRelativePath.Substring($runtimeRoot.Length).TrimStart('\')
+        }
+        Write-AMRLauncherLog ('Prepared isolated runtime version: ' + $versionId + '. Existing versions were not moved or deleted.')
+    }
 
     $appPath = Join-Path $installRoot 'AMR_Windows_Utility_V1.ps1'
     $powershellExe = Join-Path $PSHOME 'powershell.exe'
@@ -1083,6 +1225,31 @@ namespace AMR {
         Start-Sleep -Milliseconds 70
     }
     if ($appHandle -eq [IntPtr]::Zero) { throw 'The AMR main window did not become visible within 180 seconds.' }
+
+    if ($pendingVersionCommit) {
+        try {
+            $pointer = [ordered]@{
+                schemaVersion = 1
+                repository = '3mr10aa/Tool-Pro'
+                branch = 'main'
+                versionId = $pendingVersionId
+                commit = [string]$remoteTree.Commit
+                iconPath = $pendingIconRelativePath
+                committedAtUtc = [DateTime]::UtcNow.ToString('o')
+            }
+            $pointerTemp = $currentStatePath + '.' + [guid]::NewGuid().ToString('N') + '.tmp'
+            [System.IO.File]::WriteAllText($pointerTemp,($pointer | ConvertTo-Json -Depth 4),(New-Object System.Text.UTF8Encoding($false)))
+            if (Test-Path -LiteralPath $currentStatePath -PathType Leaf) {
+                [System.IO.File]::Replace($pointerTemp,$currentStatePath,$null)
+            } else {
+                [System.IO.File]::Move($pointerTemp,$currentStatePath)
+            }
+            Write-AMRLauncherLog ('Committed current runtime pointer after the new application window became visible: ' + $pendingVersionId)
+        } catch {
+            Write-AMRLauncherLog ('WARNING: new runtime started successfully, but current-version pointer could not be committed; previous pointer remains intact. ' + $_.Exception.Message)
+            try { if ($pointerTemp -and (Test-Path -LiteralPath $pointerTemp)) { Remove-Item -LiteralPath $pointerTemp -Force -ErrorAction SilentlyContinue } } catch {}
+        }
+    }
 
     $appRect = New-Object AMR.RECT
     if (-not [AMR.ToolProLauncherNative]::GetWindowRect($appHandle, [ref]$appRect)) { throw 'Could not read the AMR application window bounds for the transition.' }
