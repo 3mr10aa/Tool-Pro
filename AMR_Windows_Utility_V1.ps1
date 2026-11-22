@@ -1,4 +1,4 @@
-#
+﻿#
 # Amr | AMR Windows Utility - Cleanup Workspace & Isolated Root Scanner V16
 # Windows 10/11 | Windows PowerShell 5.1 | WPF | Administrator
 # Developer: عمرو أحمد عبد الفتاح | Phone: 01014716301 | Email: 3mr10aa@gmail.com
@@ -9018,7 +9018,7 @@ function Open-AMRProgramFilesFolder {
         $toolbar.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition -Property @{ Width='*' }))
         $toolbar.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition -Property @{ Width='Auto' }))
         $up = New-Object System.Windows.Controls.Button
-        $up.Content = '↑  Up'
+        $up.Content = 'Up'
         $up.Padding = New-Object System.Windows.Thickness(12,6,12,6)
         $up.Margin = New-Object System.Windows.Thickness(0,0,7,0)
         $up.Foreground = [System.Windows.Media.Brushes]::White
@@ -9026,7 +9026,7 @@ function Open-AMRProgramFilesFolder {
         $up.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#557DA4')
         [void]$toolbar.Children.Add($up)
         $refresh = New-Object System.Windows.Controls.Button
-        $refresh.Content = '↻  Refresh'
+        $refresh.Content = 'Refresh'
         $refresh.Padding = New-Object System.Windows.Thickness(12,6,12,6)
         $refresh.Margin = New-Object System.Windows.Thickness(0,0,10,0)
         $refresh.Foreground = [System.Windows.Media.Brushes]::White
@@ -11215,10 +11215,10 @@ function Apply-AMROverviewSnapshot {
         if($script:OverviewTelemetryState.History.Count -gt 0){
             $latestOverviewSample=$script:OverviewTelemetryState.History[$script:OverviewTelemetryState.History.Count-1]
             if($null -ne $latestOverviewSample.Download -and $null -ne $latestOverviewSample.Upload){
-                (C 'ovNetworkStatusDetail').Text=('↓ {0:N2} MB/s  ↑ {1:N2} MB/s' -f $latestOverviewSample.Download,$latestOverviewSample.Upload)
+                (C 'ovNetworkStatusDetail').Text=('Download {0:N2} MB/s  |  Upload {1:N2} MB/s' -f $latestOverviewSample.Download,$latestOverviewSample.Upload)
             }
         }
-        if($null -eq $Snapshot.CPUPercent){$cpuGaugeValue=C 'ovLiveCPUValue';if($cpuGaugeValue){$cpuGaugeValue.Text=if($Snapshot.CPUSensorError){'N/A'}else{'Sampling…'}}}
+        if($null -eq $Snapshot.CPUPercent){$cpuGaugeValue=C 'ovLiveCPUValue';if($cpuGaugeValue){$cpuGaugeValue.Text=if($Snapshot.CPUSensorError){'N/A'}else{'Sampling...'}}}
         $nowForLog=Get-Date
         $shouldLogSensors=(($nowForLog-$script:OverviewTelemetryState.LastSensorLog).TotalSeconds -ge 5)
         if($shouldLogSensors){
