@@ -2797,8 +2797,140 @@ function Get-AMRSoftwareCatalogIconImageSource {
 $script:SoftwareCatalog = New-Object 'System.Collections.ObjectModel.ObservableCollection[object]'
 $script:IconManifestLookup = @{}
 $script:IconManifestReady = $false
-$script:IconInitialSynchronousCount = 8
 $script:IconCacheUsableAtStartup = Test-AMRIconCacheUsable -Minimum $script:IconMinFileCount
+$script:IconStartupPreloadPowerShell = $null
+$script:IconStartupPreloadRunspace = $null
+$script:IconStartupPreloadAsync = $null
+$script:IconStartupPreloadRequestCount = 0
+
+function Start-AMRStartupIconPreload {
+    # Start decoding every catalog icon on a dedicated MTA runspace while the
+    # remainder of the application builds its WPF controls. The launcher remains
+    # visible until the real application window appears, so this preparation is
+    # completed before the animated handoff without blocking the WPF dispatcher.
+    if (-not $script:IconCacheUsableAtStartup -or -not $script:IconManifestReady) { return }
+    try {
+        $requests = New-Object 'System.Collections.Generic.List[object]'
+        for ($index = 0; $index -lt $RawApps.Count; $index++) {
+            $raw = $RawApps[$index]
+            $candidateIds = @()
+            if (-not [string]::IsNullOrWhiteSpace([string]$raw.Id)) { $candidateIds += [string]$raw.Id }
+            if ($raw.PSObject.Properties['IconAliases'] -and $raw.IconAliases) {
+                $candidateIds += @($raw.IconAliases | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | ForEach-Object { [string]$_ })
+            }
+            $imagePath = $null
+            foreach ($candidateId in $candidateIds) {
+                if ($script:IconManifestLookup.ContainsKey($candidateId)) {
+                    $candidatePath = Join-Path $script:IconDir ([string]$script:IconManifestLookup[$candidateId])
+                    if (Test-Path -LiteralPath $candidatePath -PathType Leaf) { $imagePath = $candidatePath; break }
+                }
+            }
+            if ($imagePath) {
+                [void]$requests.Add([pscustomobject]@{ Index=$index; Path=$imagePath })
+            }
+        }
+        if ($requests.Count -eq 0) {
+            Write-AMRLog 'Startup icon preload skipped: the manifest did not resolve any catalog images.' WARNING Software
+            return
+        }
+
+        $workerScript = {
+            param([object[]]$Requests)
+            try { Add-Type -AssemblyName PresentationCore -ErrorAction Stop } catch {}
+            try { [System.Threading.Thread]::CurrentThread.Priority = [System.Threading.ThreadPriority]::Normal } catch {}
+            foreach ($request in $Requests) {
+                $bitmap = $null
+                $stream = $null
+                try {
+                    $stream = [System.IO.File]::Open([string]$request.Path,[System.IO.FileMode]::Open,[System.IO.FileAccess]::Read,[System.IO.FileShare]::ReadWrite)
+                    $candidate = New-Object System.Windows.Media.Imaging.BitmapImage
+                    $candidate.BeginInit()
+                    $candidate.CacheOption = [System.Windows.Media.Imaging.BitmapCacheOption]::OnLoad
+                    $candidate.CreateOptions = [System.Windows.Media.Imaging.BitmapCreateOptions]::IgnoreImageCache
+                    $candidate.DecodePixelWidth = 96
+                    $candidate.StreamSource = $stream
+                    $candidate.EndInit()
+                    if ($candidate.CanFreeze) { $candidate.Freeze(); $bitmap = $candidate }
+                } catch { $bitmap = $null }
+                finally { if ($stream) { $stream.Dispose() } }
+
+                # Keep the original decoder fallback for any image the optimized
+                # BitmapImage thumbnail path cannot decode.
+                if ($null -eq $bitmap) {
+                    $fallbackStream = $null
+                    try {
+                        $fallbackStream = [System.IO.File]::Open([string]$request.Path,[System.IO.FileMode]::Open,[System.IO.FileAccess]::Read,[System.IO.FileShare]::ReadWrite)
+                        $decoder = [System.Windows.Media.Imaging.BitmapDecoder]::Create(
+                            $fallbackStream,
+                            [System.Windows.Media.Imaging.BitmapCreateOptions]::IgnoreImageCache,
+                            [System.Windows.Media.Imaging.BitmapCacheOption]::OnLoad
+                        )
+                        if ($null -ne $decoder -and $decoder.Frames.Count -gt 0 -and $decoder.Frames[0].CanFreeze) {
+                            $bitmap = $decoder.Frames[0]
+                            $bitmap.Freeze()
+                        }
+                    } catch { $bitmap = $null }
+                    finally { if ($fallbackStream) { $fallbackStream.Dispose() } }
+                }
+                if ($null -ne $bitmap) {
+                    [pscustomobject]@{ Index=[int]$request.Index; Source=$bitmap }
+                }
+            }
+        }
+
+        $runspace = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace()
+        $runspace.ApartmentState = [System.Threading.ApartmentState]::MTA
+        $runspace.ThreadOptions = [System.Management.Automation.Runspaces.PSThreadOptions]::ReuseThread
+        $runspace.Open()
+        $powerShell = [PowerShell]::Create()
+        $powerShell.Runspace = $runspace
+        [void]$powerShell.AddScript($workerScript.ToString())
+        [void]$powerShell.AddParameter('Requests',[object[]]$requests.ToArray())
+        $async = $powerShell.BeginInvoke()
+        if ($null -eq $async) { throw 'Startup icon preload BeginInvoke returned null.' }
+        $script:IconStartupPreloadRunspace = $runspace
+        $script:IconStartupPreloadPowerShell = $powerShell
+        $script:IconStartupPreloadAsync = $async
+        $script:IconStartupPreloadRequestCount = $requests.Count
+        Write-AMRLog ("Startup icon preload started off-thread: {0} catalog image files." -f $requests.Count) INFO Software
+    } catch {
+        Write-AMRLog ("Could not start startup icon preload: {0}" -f $_.Exception.Message) ERROR Software
+        try { if ($script:IconStartupPreloadPowerShell) { $script:IconStartupPreloadPowerShell.Dispose() } } catch {}
+        try { if ($script:IconStartupPreloadRunspace) { $script:IconStartupPreloadRunspace.Close(); $script:IconStartupPreloadRunspace.Dispose() } } catch {}
+        $script:IconStartupPreloadPowerShell = $null
+        $script:IconStartupPreloadRunspace = $null
+        $script:IconStartupPreloadAsync = $null
+    }
+}
+
+function Complete-AMRStartupIconPreload {
+    # The main WPF window is deliberately not shown until all decoded, frozen
+    # ImageSources are attached to their catalog records. This lets the launcher
+    # perform its existing morph only after cards and icons are ready together.
+    if ($null -eq $script:IconStartupPreloadAsync -or $null -eq $script:IconStartupPreloadPowerShell) { return }
+    $loaded = 0
+    try {
+        $results = $script:IconStartupPreloadPowerShell.EndInvoke($script:IconStartupPreloadAsync)
+        foreach ($result in $results) {
+            if ($null -ne $result -and $result.Index -ge 0 -and $result.Index -lt $script:SoftwareCatalog.Count -and $null -ne $result.Source) {
+                $script:SoftwareCatalog[[int]$result.Index].Icon = $result.Source
+                $loaded++
+            }
+        }
+        foreach ($workerError in $script:IconStartupPreloadPowerShell.Streams.Error) {
+            Write-AMRLog ("Startup icon preload worker error: {0}" -f $workerError) ERROR Software
+        }
+        Write-AMRLog ("Startup icon preload completed: {0}/{1} images decoded and ready before the main window was shown." -f $loaded,$script:SoftwareCatalog.Count) INFO Software
+    } catch {
+        Write-AMRLog ("Startup icon preload completion failed: {0}" -f $_.Exception.Message) ERROR Software
+    } finally {
+        try { $script:IconStartupPreloadPowerShell.Dispose() } catch {}
+        try { $script:IconStartupPreloadRunspace.Close(); $script:IconStartupPreloadRunspace.Dispose() } catch {}
+        $script:IconStartupPreloadPowerShell = $null
+        $script:IconStartupPreloadRunspace = $null
+        $script:IconStartupPreloadAsync = $null
+    }
+}
 
 function Import-AMRSoftwareIconManifest {
     try {
@@ -2833,30 +2965,15 @@ if ($script:IconCacheUsableAtStartup) {
     }
 }
 
+Start-AMRStartupIconPreload
+
 $RawApps | ForEach-Object {
     $initial  = if ($_.Name.Length -gt 0) { $_.Name.Substring(0,1).ToUpper() } else { 'A' }
 
-    # Hydrate only the first visible catalog page before WPF is shown. The
-    # manifest resolves each catalog ID directly to one PNG filename, avoiding
-    # repeated extension probing. Remaining icons are decoded by the existing
-    # bounded background worker after the window loads.
+    # Image decoding runs in the startup MTA preloader while the remaining WPF
+    # interface is constructed. Catalog records receive their frozen ImageSources
+    # immediately before the main window is shown.
     $iconSource = $null
-    if ($script:IconCacheUsableAtStartup -and $script:SoftwareCatalog.Count -lt $script:IconInitialSynchronousCount) {
-        $localIconIds = @([string]$_.Id)
-        if ($_.PSObject.Properties['IconAliases'] -and $_.IconAliases) {
-            $localIconIds += @($_.IconAliases | ForEach-Object { [string]$_ })
-        }
-        foreach ($localIconId in $localIconIds) {
-            if ([string]::IsNullOrWhiteSpace($localIconId)) { continue }
-            if ($script:IconManifestLookup.ContainsKey($localIconId)) {
-                $localIconPath = Join-Path $script:IconDir ([string]$script:IconManifestLookup[$localIconId])
-                if (Test-Path -LiteralPath $localIconPath -PathType Leaf) {
-                    $iconSource = Get-AMRSoftwareCatalogIconImageSource -Path $localIconPath
-                    if ($null -ne $iconSource) { break }
-                }
-            }
-        }
-    }
 
     $script:SoftwareCatalog.Add([pscustomobject]@{
         IsSelected    = $false
@@ -29932,6 +30049,13 @@ $script:Window.Add_ContentRendered({
     # also covers any unusual startup path where Loaded did not start it.
     Start-AMRBackgroundIconRefresh
 })
+
+# Complete all local icon decoding before exposing the main WPF window. The launcher
+# already waits for this real window before starting its existing animated handoff;
+# no launcher animation duration, delay, or transition code is changed here.
+Complete-AMRStartupIconPreload
+$startupIconCount = @($script:SoftwareCatalog | Where-Object { $null -ne $_.Icon }).Count
+Write-AMRLog ("Pre-window software catalog ready: icons={0}/{1}; cache='{2}'." -f $startupIconCount,$script:SoftwareCatalog.Count,$script:IconDir) INFO Software
 
 # Fix40: validated cached inventory can render immediately while an in-flight refresh continues;
 # intentional catalog/installed switches use a low-cost grid-level cross-fade + slide.
