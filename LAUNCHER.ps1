@@ -255,10 +255,26 @@ function Test-AMRIconCacheMatchesSource {
             ([string]$appMeta.sha).ToLowerInvariant() -ne ([string]$SourceBlob).ToLowerInvariant()) { return $false }
         if ((Get-AMRGitBlobSha1 -Path $archivePath) -ne ([string]$SourceBlob).ToLowerInvariant()) { return $false }
         $extensions = @(Get-AMRIconImageExtensions)
-        $actualCount = @(Get-ChildItem -LiteralPath $IconDirectory -File -ErrorAction Stop |
-            Where-Object { $extensions -contains $_.Extension.ToLowerInvariant() -and $_.Length -gt 128 }).Count
+        $actualFiles = @(Get-ChildItem -LiteralPath $IconDirectory -File -ErrorAction Stop |
+            Where-Object { $extensions -contains $_.Extension.ToLowerInvariant() -and $_.Length -gt 128 })
+        $actualCount = $actualFiles.Count
         $recordedCount = 0
         if (-not [int]::TryParse([string]$marker.imageCount,[ref]$recordedCount)) { return $false }
+        $manifestPath = Join-Path $IconDirectory 'manifest.json'
+        if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) { return $false }
+        $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop
+        if ([int]$manifest.schemaVersion -ne 1 -or [int]$manifest.iconCount -ne $recordedCount -or
+            $null -eq $manifest.entries) { return $false }
+        $manifestEntries = @($manifest.entries.PSObject.Properties)
+        if ($manifestEntries.Count -ne $recordedCount) { return $false }
+        $actualNames = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+        foreach ($file in $actualFiles) { [void]$actualNames.Add($file.Name) }
+        foreach ($record in $manifestEntries) {
+            $fileName = [string]$record.Value.file
+            if ([string]::IsNullOrWhiteSpace($fileName) -or [IO.Path]::GetFileName($fileName) -ne $fileName -or
+                [IO.Path]::GetExtension($fileName).ToLowerInvariant() -ne '.png' -or
+                -not $actualNames.Contains($fileName)) { return $false }
+        }
         return ($recordedCount -ge $Minimum -and $actualCount -eq $recordedCount)
     } catch { return $false }
 }
@@ -276,17 +292,46 @@ function Expand-AMRIconArchive {
             -not $name.EndsWith('/') -and $extensions -contains $extension -and $_.Length -gt 128
         })
         if ($entries.Count -lt $Minimum) { throw "Icons.zip contains only $($entries.Count) supported image entries; at least $Minimum are required." }
+
+        # The optimized archive has one authoritative manifest beside its image set.
+        $manifestEntries = @($zip.Entries | Where-Object { ([string]$_.FullName).Replace('\','/') -match '(^|/)Icons/manifest\.json$' })
+        if ($manifestEntries.Count -ne 1) { throw 'Icons.zip must contain exactly one Icons/manifest.json file.' }
+        $manifestStream = $manifestEntries[0].Open()
+        $manifestReader = New-Object System.IO.StreamReader($manifestStream,[System.Text.Encoding]::UTF8,$true)
+        try { $manifestText = $manifestReader.ReadToEnd() } finally { $manifestReader.Dispose(); $manifestStream.Dispose() }
+        $manifest = $manifestText | ConvertFrom-Json -ErrorAction Stop
+        if ([int]$manifest.schemaVersion -ne 1 -or [int]$manifest.iconCount -ne $entries.Count -or $null -eq $manifest.entries) {
+            throw 'Icons.zip manifest schema or icon count does not match the archive image entries.'
+        }
+        $manifestRecords = @($manifest.entries.PSObject.Properties)
+        if ($manifestRecords.Count -ne $entries.Count) { throw 'Icons.zip manifest entry count does not match the archive.' }
+        $archiveNames = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+        foreach ($entry in $entries) {
+            $leaf = [System.IO.Path]::GetFileName([string]$entry.FullName)
+            if ([string]::IsNullOrWhiteSpace($leaf) -or $leaf -match '[\\/:*?"<>|]' -or -not $archiveNames.Add($leaf)) {
+                throw 'Icons.zip contains an invalid or duplicate image filename.'
+            }
+        }
+        foreach ($record in $manifestRecords) {
+            $fileName = [string]$record.Value.file
+            if ([string]::IsNullOrWhiteSpace($fileName) -or [IO.Path]::GetFileName($fileName) -ne $fileName -or
+                [IO.Path]::GetExtension($fileName).ToLowerInvariant() -ne '.png' -or
+                -not $archiveNames.Contains($fileName)) {
+                throw ('Icons.zip manifest references a missing or invalid image: ' + $fileName)
+            }
+        }
+
         New-Item -ItemType Directory -Path $Destination -Force | Out-Null
-        # Replace only top-level archive images. Preserve app-owned subfolders such as LocalInstalled.
+        # Replace only top-level archive images and the archive-owned manifest.
+        # Preserve app-owned subfolders such as LocalInstalled.
         Get-ChildItem -LiteralPath $Destination -File -ErrorAction SilentlyContinue |
             Where-Object { $extensions -contains $_.Extension.ToLowerInvariant() } |
             Remove-Item -Force -ErrorAction Stop
-        $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+        $oldManifest = Join-Path $Destination 'manifest.json'
+        if (Test-Path -LiteralPath $oldManifest -PathType Leaf) { Remove-Item -LiteralPath $oldManifest -Force -ErrorAction Stop }
         $extracted = 0
         foreach ($entry in $entries) {
             $leaf = [System.IO.Path]::GetFileName([string]$entry.FullName)
-            if ([string]::IsNullOrWhiteSpace($leaf) -or $leaf -match '[\\/:*?"<>|]') { continue }
-            if (-not $seen.Add($leaf)) { continue }
             $destinationPath = Join-Path $Destination $leaf
             $inputStream = $null; $outputStream = $null
             try {
@@ -301,10 +346,10 @@ function Expand-AMRIconArchive {
             $extracted++
         }
         if ($extracted -lt $Minimum) { throw "Only $extracted image files were extracted from Icons.zip." }
+        [System.IO.File]::WriteAllText($oldManifest,$manifestText,(New-Object System.Text.UTF8Encoding($false)))
         return $extracted
     } finally { $zip.Dispose() }
 }
-
 function Invoke-AMRLauncherJsonRequest {
     param([Parameter(Mandatory=$true)][string]$Uri)
     $request = [System.Net.HttpWebRequest]::Create($Uri)
@@ -1214,7 +1259,8 @@ namespace AMR {
             } catch {}
         }
         $stagedIconsReady = $extractIconsNow -and
-            (Test-AMRIconCacheUsable -IconDirectory $stagedIcons -Minimum 100) -and $stagedMarkerValid
+            (Test-AMRIconCacheUsable -IconDirectory $stagedIcons -Minimum 100) -and
+            (Test-Path -LiteralPath (Join-Path $stagedIcons 'manifest.json') -PathType Leaf) -and $stagedMarkerValid
         if ($stagedIconsReady) {
             if (Test-Path -LiteralPath $iconsPath -PathType Container) {
                 $iconsPath = Join-Path $iconVersionsRoot ($remoteIconBlob + '-' + [guid]::NewGuid().ToString('N').Substring(0,8))
@@ -1234,6 +1280,8 @@ namespace AMR {
                 size = [long](Get-Item -LiteralPath (Join-Path $iconsPath 'icons.zip')).Length
                 sha = $remoteIconBlob
                 imageCount = $appImageCount
+                manifest = 'manifest.json'
+                manifestSchemaVersion = 1
                 updatedUtc = [DateTime]::UtcNow.ToString('o')
             }
             [System.IO.File]::WriteAllText((Join-Path $iconsPath 'icons.cache.json'),($appCache | ConvertTo-Json -Depth 4),(New-Object System.Text.UTF8Encoding($false)))
@@ -1364,9 +1412,18 @@ function Get-AMRLaunchBootstrapGitBlobSha1 {
 try {
     $sourceZip = Join-Path $sourceIcons 'icons.zip'
     $sourceMetaPath = Join-Path $sourceIcons 'icons.cache.json'
+    $sourceManifestPath = Join-Path $sourceIcons 'manifest.json'
     $sourceMeta = $null
-    if ((Test-Path -LiteralPath $sourceZip -PathType Leaf) -and (Test-Path -LiteralPath $sourceMetaPath -PathType Leaf)) {
+    if ((Test-Path -LiteralPath $sourceZip -PathType Leaf) -and
+        (Test-Path -LiteralPath $sourceMetaPath -PathType Leaf) -and
+        (Test-Path -LiteralPath $sourceManifestPath -PathType Leaf)) {
         $sourceMeta = Get-Content -LiteralPath $sourceMetaPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        $sourceManifest = Get-Content -LiteralPath $sourceManifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ([int]$sourceManifest.schemaVersion -ne 1 -or
+            [int]$sourceManifest.iconCount -ne [int]$sourceMeta.imageCount -or
+            @($sourceManifest.entries.PSObject.Properties).Count -ne [int]$sourceMeta.imageCount) {
+            throw 'The staged icon manifest is incomplete or does not match its cache metadata.'
+        }
     }
     if ($sourceMeta -and [int]$sourceMeta.schemaVersion -ge 2 -and
         [string]$sourceMeta.repository -eq '3mr10aa/Tool-Pro' -and
@@ -1382,15 +1439,22 @@ try {
         $destinationMetaPath = Join-Path $destinationIcons 'icons.cache.json'
         $destinationMatches = $false
         try {
-            if ((Test-Path -LiteralPath $destinationZip -PathType Leaf) -and (Test-Path -LiteralPath $destinationMetaPath -PathType Leaf)) {
+            $destinationManifestPath = Join-Path $destinationIcons 'manifest.json'
+            if ((Test-Path -LiteralPath $destinationZip -PathType Leaf) -and
+                (Test-Path -LiteralPath $destinationMetaPath -PathType Leaf) -and
+                (Test-Path -LiteralPath $destinationManifestPath -PathType Leaf)) {
                 $existingMeta = Get-Content -LiteralPath $destinationMetaPath -Raw -Encoding UTF8 | ConvertFrom-Json
+                $existingManifest = Get-Content -LiteralPath $destinationManifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
                 $existingCount = @(Get-ChildItem -LiteralPath $destinationIcons -File -ErrorAction Stop |
                     Where-Object { @('.png','.jpg','.jpeg','.jpe','.jfif','.bmp','.dib','.gif','.tif','.tiff','.ico','.webp','.wdp','.jxr','.hdp','.heic','.heif','.avif','.jp2','.j2k','.dds','.tga','.pcx','.ppm','.pgm','.pbm') -contains $_.Extension.ToLowerInvariant() -and $_.Length -gt 32 }).Count
                 $destinationMatches = ([string]$existingMeta.repository -eq '3mr10aa/Tool-Pro' -and
                     [string]$existingMeta.branch -eq 'main' -and [string]$existingMeta.file -eq 'Icons.zip' -and
                     ([string]$existingMeta.sha).ToLowerInvariant() -eq $expectedIconBlob -and
                     [long]$existingMeta.size -eq (Get-Item -LiteralPath $destinationZip).Length -and
-                    $existingCount -ge [int]$sourceMeta.imageCount -and
+                    $existingCount -eq [int]$sourceMeta.imageCount -and
+                    [int]$existingManifest.schemaVersion -eq 1 -and
+                    [int]$existingManifest.iconCount -eq [int]$sourceMeta.imageCount -and
+                    @($existingManifest.entries.PSObject.Properties).Count -eq [int]$sourceMeta.imageCount -and
                     (Get-AMRLaunchBootstrapGitBlobSha1 -Path $destinationZip) -eq $expectedIconBlob)
             }
         } catch { $destinationMatches = $false }
@@ -1404,13 +1468,22 @@ try {
             $supported = @('.png','.jpg','.jpeg','.jpe','.jfif','.bmp','.dib','.gif','.tif','.tiff','.ico','.webp','.wdp','.jxr','.hdp','.heic','.heif','.avif','.jp2','.j2k','.dds','.tga','.pcx','.ppm','.pgm','.pbm')
             $sourceImages = @(Get-ChildItem -LiteralPath $sourceIcons -File -ErrorAction Stop |
                 Where-Object { $supported -contains $_.Extension.ToLowerInvariant() -and $_.Length -gt 32 })
-            if ($sourceImages.Count -lt 100) { throw 'Launcher icon generation is incomplete; app fallback will be used.' }
+            if ($sourceImages.Count -lt [int]$sourceMeta.imageCount) { throw 'Launcher icon generation is incomplete; app fallback will be used.' }
+            # ProgramData\AMR-Utility\Icons is the archive-owned top-level cache.
+            # Remove stale archive images before publishing the new generation;
+            # LocalInstalled remains isolated in its own subfolder and is untouched.
+            Get-ChildItem -LiteralPath $destinationIcons -File -ErrorAction Stop |
+                Where-Object { $supported -contains $_.Extension.ToLowerInvariant() } |
+                Remove-Item -Force -ErrorAction Stop
             foreach ($imageFile in $sourceImages) {
                 $target = Join-Path $destinationIcons $imageFile.Name
                 $temporary = $target + '.amr-launcher-new'
                 Copy-Item -LiteralPath $imageFile.FullName -Destination $temporary -Force -ErrorAction Stop
                 Move-Item -LiteralPath $temporary -Destination $target -Force -ErrorAction Stop
             }
+            $manifestTemporary = $destinationManifestPath + '.amr-launcher-new'
+            Copy-Item -LiteralPath $sourceManifestPath -Destination $manifestTemporary -Force -ErrorAction Stop
+            Move-Item -LiteralPath $manifestTemporary -Destination $destinationManifestPath -Force -ErrorAction Stop
             $zipTemporary = $destinationZip + '.amr-launcher-new'
             Copy-Item -LiteralPath $sourceZip -Destination $zipTemporary -Force -ErrorAction Stop
             if ((Get-AMRLaunchBootstrapGitBlobSha1 -Path $zipTemporary) -ne $expectedIconBlob) {
