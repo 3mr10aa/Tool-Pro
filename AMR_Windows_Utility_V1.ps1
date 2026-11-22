@@ -2664,40 +2664,15 @@ function Test-AMRIconCacheUsable {
     param([int]$Minimum = 100)
     try {
         if (-not (Test-Path -LiteralPath $script:IconDir -PathType Container)) { return $false }
-
-        # Do not treat an arbitrary folder containing 100 image files as this
-        # application's icon cache. It must be the completed Tool-Pro/main archive
-        # cache that the isolated downloader itself recognizes.
-        $marker = Join-Path $script:IconDir 'icons.cache.json'
-        if (-not (Test-Path -LiteralPath $marker -PathType Leaf)) { return $false }
-
-        $identity = Get-Content -LiteralPath $marker -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
-        if ([int]$identity.schemaVersion -lt 2 -or
-            [string]$identity.repository -ne '3mr10aa/Tool-Pro' -or
-            [string]$identity.branch -ne 'main' -or
-            [string]$identity.file -ne 'Icons.zip') {
-            return $false
-        }
-
         $count = @(Get-ChildItem -LiteralPath $script:IconDir -File -ErrorAction SilentlyContinue |
             Where-Object { ($script:AMRIconImageExtensions -contains $_.Extension.ToLowerInvariant()) -and $_.Length -gt 32 }).Count
-
-        # The optimized archive is a PNG set with a manifest. A folder without
-        # that index is not considered a complete v1 optimized cache.
-        $expectedCount = 0
-        try { $expectedCount = [int]$identity.imageCount } catch {}
-        $manifestPath = Join-Path $script:IconDir 'manifest.json'
-        if ($expectedCount -lt $Minimum -or -not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) { return $false }
-        $manifest = Get-Content -LiteralPath $manifestPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
-        if ([int]$manifest.schemaVersion -ne 1 -or [int]$manifest.iconCount -ne $expectedCount -or
-            @($manifest.entries.PSObject.Properties).Count -ne $expectedCount) { return $false }
-        if ($count -lt $expectedCount) { return $false }
-
         return ($count -ge $Minimum)
     } catch { return $false }
 }
 
-# Convert icon files to frozen, size-bounded WPF ImageSource objects.
+# Icon synchronization is implemented only inside Start-AMRBackgroundIconRefresh worker runspace.
+
+# Convert icon files to frozen WPF ImageSource objects.
 # WPF Image.Source expects an ImageSource, not a plain filesystem path string.
 function Get-AMRIconImageSource {
     param(
@@ -2733,247 +2708,32 @@ function Get-AMRIconImageSource {
     }
 }
 
-
-# Dedicated bounded decoder for SoftwareCatalog thumbnails. The shared
-# Get-AMRIconImageSource helper above remains unchanged for every other engine.
-function Get-AMRSoftwareCatalogIconImageSource {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$Path
-    )
-
-    if ([string]::IsNullOrWhiteSpace($Path) -or
-        -not (Test-Path -LiteralPath $Path -PathType Leaf)) {
-        return $null
-    }
-
-    $fullPath = [System.IO.Path]::GetFullPath($Path)
-
-    # Preferred path: one WIC decode directly to the catalog thumbnail size.
-    # DecodePixelWidth preserves aspect ratio; OnLoad releases the file stream,
-    # and Freeze makes the ImageSource safe to bind to WPF controls.
-    try {
-        $fileStream = [System.IO.File]::Open($fullPath,[System.IO.FileMode]::Open,[System.IO.FileAccess]::Read,[System.IO.FileShare]::ReadWrite)
-        try {
-            $bitmap = New-Object System.Windows.Media.Imaging.BitmapImage
-            $bitmap.BeginInit()
-            $bitmap.CacheOption = [System.Windows.Media.Imaging.BitmapCacheOption]::OnLoad
-            $bitmap.CreateOptions = [System.Windows.Media.Imaging.BitmapCreateOptions]::IgnoreImageCache
-            $bitmap.DecodePixelWidth = 96
-            $bitmap.StreamSource = $fileStream
-            $bitmap.EndInit()
-            if ($bitmap.CanFreeze) {
-                $bitmap.Freeze()
-                return $bitmap
-            }
-        } finally { $fileStream.Dispose() }
-    } catch {
-        # Continue to the original decoder path for WIC formats that BitmapImage
-        # cannot thumbnail directly. This preserves compatibility with the
-        # application's existing icon archive without changing its source.
-    }
-
-    # Compatibility fallback: retain the original application's decoder behavior.
-    try {
-        $fileStream = [System.IO.File]::Open($fullPath,[System.IO.FileMode]::Open,[System.IO.FileAccess]::Read,[System.IO.FileShare]::ReadWrite)
-        try {
-            $decoder = [System.Windows.Media.Imaging.BitmapDecoder]::Create(
-                $fileStream,
-                [System.Windows.Media.Imaging.BitmapCreateOptions]::IgnoreImageCache,
-                [System.Windows.Media.Imaging.BitmapCacheOption]::OnLoad
-            )
-            if ($null -eq $decoder -or $decoder.Frames.Count -lt 1) { return $null }
-            $bitmap = $decoder.Frames[0]
-            if (-not $bitmap.CanFreeze) { return $null }
-            $bitmap.Freeze()
-            return $bitmap
-        } finally { $fileStream.Dispose() }
-    } catch {
-        Write-AMRLog "Could not load software catalog icon '$Path': $($_.Exception.Message)" WARNING Software
-        return $null
-    }
-}
-
 $script:SoftwareCatalog = New-Object 'System.Collections.ObjectModel.ObservableCollection[object]'
-$script:IconManifestLookup = @{}
-$script:IconManifestReady = $false
 $script:IconCacheUsableAtStartup = Test-AMRIconCacheUsable -Minimum $script:IconMinFileCount
-$script:IconStartupPreloadPowerShell = $null
-$script:IconStartupPreloadRunspace = $null
-$script:IconStartupPreloadAsync = $null
-$script:IconStartupPreloadRequestCount = 0
-
-function Start-AMRStartupIconPreload {
-    # Start decoding every catalog icon on a dedicated MTA runspace while the
-    # remainder of the application builds its WPF controls. The launcher remains
-    # visible until the real application window appears, so this preparation is
-    # completed before the animated handoff without blocking the WPF dispatcher.
-    if (-not $script:IconCacheUsableAtStartup -or -not $script:IconManifestReady) { return }
-    try {
-        $requests = New-Object 'System.Collections.Generic.List[object]'
-        for ($index = 0; $index -lt $RawApps.Count; $index++) {
-            $raw = $RawApps[$index]
-            $candidateIds = @()
-            if (-not [string]::IsNullOrWhiteSpace([string]$raw.Id)) { $candidateIds += [string]$raw.Id }
-            if ($raw.PSObject.Properties['IconAliases'] -and $raw.IconAliases) {
-                $candidateIds += @($raw.IconAliases | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | ForEach-Object { [string]$_ })
-            }
-            $imagePath = $null
-            foreach ($candidateId in $candidateIds) {
-                if ($script:IconManifestLookup.ContainsKey($candidateId)) {
-                    $candidatePath = Join-Path $script:IconDir ([string]$script:IconManifestLookup[$candidateId])
-                    if (Test-Path -LiteralPath $candidatePath -PathType Leaf) { $imagePath = $candidatePath; break }
-                }
-            }
-            if ($imagePath) {
-                [void]$requests.Add([pscustomobject]@{ Index=$index; Path=$imagePath })
-            }
-        }
-        if ($requests.Count -eq 0) {
-            Write-AMRLog 'Startup icon preload skipped: the manifest did not resolve any catalog images.' WARNING Software
-            return
-        }
-
-        $workerScript = {
-            param([object[]]$Requests)
-            try { Add-Type -AssemblyName PresentationCore -ErrorAction Stop } catch {}
-            try { [System.Threading.Thread]::CurrentThread.Priority = [System.Threading.ThreadPriority]::Normal } catch {}
-            foreach ($request in $Requests) {
-                $bitmap = $null
-                $stream = $null
-                try {
-                    $stream = [System.IO.File]::Open([string]$request.Path,[System.IO.FileMode]::Open,[System.IO.FileAccess]::Read,[System.IO.FileShare]::ReadWrite)
-                    $candidate = New-Object System.Windows.Media.Imaging.BitmapImage
-                    $candidate.BeginInit()
-                    $candidate.CacheOption = [System.Windows.Media.Imaging.BitmapCacheOption]::OnLoad
-                    $candidate.CreateOptions = [System.Windows.Media.Imaging.BitmapCreateOptions]::IgnoreImageCache
-                    $candidate.DecodePixelWidth = 96
-                    $candidate.StreamSource = $stream
-                    $candidate.EndInit()
-                    if ($candidate.CanFreeze) { $candidate.Freeze(); $bitmap = $candidate }
-                } catch { $bitmap = $null }
-                finally { if ($stream) { $stream.Dispose() } }
-
-                # Keep the original decoder fallback for any image the optimized
-                # BitmapImage thumbnail path cannot decode.
-                if ($null -eq $bitmap) {
-                    $fallbackStream = $null
-                    try {
-                        $fallbackStream = [System.IO.File]::Open([string]$request.Path,[System.IO.FileMode]::Open,[System.IO.FileAccess]::Read,[System.IO.FileShare]::ReadWrite)
-                        $decoder = [System.Windows.Media.Imaging.BitmapDecoder]::Create(
-                            $fallbackStream,
-                            [System.Windows.Media.Imaging.BitmapCreateOptions]::IgnoreImageCache,
-                            [System.Windows.Media.Imaging.BitmapCacheOption]::OnLoad
-                        )
-                        if ($null -ne $decoder -and $decoder.Frames.Count -gt 0 -and $decoder.Frames[0].CanFreeze) {
-                            $bitmap = $decoder.Frames[0]
-                            $bitmap.Freeze()
-                        }
-                    } catch { $bitmap = $null }
-                    finally { if ($fallbackStream) { $fallbackStream.Dispose() } }
-                }
-                if ($null -ne $bitmap) {
-                    [pscustomobject]@{ Index=[int]$request.Index; Source=$bitmap }
-                }
-            }
-        }
-
-        $runspace = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace()
-        $runspace.ApartmentState = [System.Threading.ApartmentState]::MTA
-        $runspace.ThreadOptions = [System.Management.Automation.Runspaces.PSThreadOptions]::ReuseThread
-        $runspace.Open()
-        $powerShell = [PowerShell]::Create()
-        $powerShell.Runspace = $runspace
-        [void]$powerShell.AddScript($workerScript.ToString())
-        [void]$powerShell.AddParameter('Requests',[object[]]$requests.ToArray())
-        $async = $powerShell.BeginInvoke()
-        if ($null -eq $async) { throw 'Startup icon preload BeginInvoke returned null.' }
-        $script:IconStartupPreloadRunspace = $runspace
-        $script:IconStartupPreloadPowerShell = $powerShell
-        $script:IconStartupPreloadAsync = $async
-        $script:IconStartupPreloadRequestCount = $requests.Count
-        Write-AMRLog ("Startup icon preload started off-thread: {0} catalog image files." -f $requests.Count) INFO Software
-    } catch {
-        Write-AMRLog ("Could not start startup icon preload: {0}" -f $_.Exception.Message) ERROR Software
-        try { if ($script:IconStartupPreloadPowerShell) { $script:IconStartupPreloadPowerShell.Dispose() } } catch {}
-        try { if ($script:IconStartupPreloadRunspace) { $script:IconStartupPreloadRunspace.Close(); $script:IconStartupPreloadRunspace.Dispose() } } catch {}
-        $script:IconStartupPreloadPowerShell = $null
-        $script:IconStartupPreloadRunspace = $null
-        $script:IconStartupPreloadAsync = $null
-    }
-}
-
-function Complete-AMRStartupIconPreload {
-    # The main WPF window is deliberately not shown until all decoded, frozen
-    # ImageSources are attached to their catalog records. This lets the launcher
-    # perform its existing morph only after cards and icons are ready together.
-    if ($null -eq $script:IconStartupPreloadAsync -or $null -eq $script:IconStartupPreloadPowerShell) { return }
-    $loaded = 0
-    try {
-        $results = $script:IconStartupPreloadPowerShell.EndInvoke($script:IconStartupPreloadAsync)
-        foreach ($result in $results) {
-            if ($null -ne $result -and $result.Index -ge 0 -and $result.Index -lt $script:SoftwareCatalog.Count -and $null -ne $result.Source) {
-                $script:SoftwareCatalog[[int]$result.Index].Icon = $result.Source
-                $loaded++
-            }
-        }
-        foreach ($workerError in $script:IconStartupPreloadPowerShell.Streams.Error) {
-            Write-AMRLog ("Startup icon preload worker error: {0}" -f $workerError) ERROR Software
-        }
-        Write-AMRLog ("Startup icon preload completed: {0}/{1} images decoded and ready before the main window was shown." -f $loaded,$script:SoftwareCatalog.Count) INFO Software
-    } catch {
-        Write-AMRLog ("Startup icon preload completion failed: {0}" -f $_.Exception.Message) ERROR Software
-    } finally {
-        try { $script:IconStartupPreloadPowerShell.Dispose() } catch {}
-        try { $script:IconStartupPreloadRunspace.Close(); $script:IconStartupPreloadRunspace.Dispose() } catch {}
-        $script:IconStartupPreloadPowerShell = $null
-        $script:IconStartupPreloadRunspace = $null
-        $script:IconStartupPreloadAsync = $null
-    }
-}
-
-function Import-AMRSoftwareIconManifest {
-    try {
-        $manifestPath = Join-Path $script:IconDir 'manifest.json'
-        if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) { return $false }
-        $manifest = Get-Content -LiteralPath $manifestPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
-        if ([int]$manifest.schemaVersion -ne 1 -or [int]$manifest.iconCount -lt $script:IconMinFileCount -or
-            $null -eq $manifest.entries) { return $false }
-        $records = @($manifest.entries.PSObject.Properties)
-        if ($records.Count -ne [int]$manifest.iconCount) { return $false }
-        $lookup = @{}
-        foreach ($record in $records) {
-            $fileName = [string]$record.Value.file
-            if ([string]::IsNullOrWhiteSpace($fileName) -or [IO.Path]::GetFileName($fileName) -ne $fileName -or
-                [IO.Path]::GetExtension($fileName).ToLowerInvariant() -ne '.png') { return $false }
-            $lookup[[string]$record.Name] = $fileName
-        }
-        $script:IconManifestLookup = $lookup
-        $script:IconManifestReady = $true
-        return $true
-    } catch {
-        Write-AMRLog ("Software icon manifest could not be loaded: $($_.Exception.Message)") WARNING Software
-        return $false
-    }
-}
-
-if ($script:IconCacheUsableAtStartup) {
-    $script:IconManifestReady = Import-AMRSoftwareIconManifest
-    if (-not $script:IconManifestReady) {
-        $script:IconCacheUsableAtStartup = $false
-        Write-AMRLog 'Optimized icon cache was rejected because its manifest could not be loaded.' WARNING Software
-    }
-}
-
-Start-AMRStartupIconPreload
 
 $RawApps | ForEach-Object {
     $initial  = if ($_.Name.Length -gt 0) { $_.Name.Substring(0,1).ToUpper() } else { 'A' }
 
-    # Image decoding runs in the startup MTA preloader while the remaining WPF
-    # interface is constructed. Catalog records receive their frozen ImageSources
-    # immediately before the main window is shown.
+    # A complete local cache is the runtime source of truth. Resolve each catalog
+    # icon before the WPF view is created, so scrolling/recycling never waits for
+    # a background worker to publish an image into the bound item.
     $iconSource = $null
+    if ($script:IconCacheUsableAtStartup) {
+        $localIconIds = @([string]$_.Id)
+        if ($_.PSObject.Properties['IconAliases'] -and $_.IconAliases) {
+            $localIconIds += @($_.IconAliases | ForEach-Object { [string]$_ })
+        }
+        foreach ($localIconId in $localIconIds) {
+            foreach ($localIconExtension in $script:AMRIconImageExtensions) {
+                $localIconPath = Join-Path $script:IconDir ($localIconId + $localIconExtension)
+                if (Test-Path -LiteralPath $localIconPath -PathType Leaf) {
+                    $iconSource = Get-AMRIconImageSource -Path $localIconPath
+                    if ($null -ne $iconSource) { break }
+                }
+            }
+            if ($null -ne $iconSource) { break }
+        }
+    }
 
     $script:SoftwareCatalog.Add([pscustomobject]@{
         IsSelected    = $false
@@ -2997,12 +2757,12 @@ $RawApps | ForEach-Object {
         AllowedHosts  = if ($_.PSObject.Properties['AllowedHosts'] -and $null -ne $_.PSObject.Properties['AllowedHosts'].Value) { @($_.PSObject.Properties['AllowedHosts'].Value) } else { @() }
         InstallTimeoutSeconds = if ($_.PSObject.Properties['InstallTimeoutSeconds'] -and $_.PSObject.Properties['InstallTimeoutSeconds'].Value) { [int]$_.PSObject.Properties['InstallTimeoutSeconds'].Value } else { 1800 }
         Initials      = $initial
-        Icon          = $iconSource
+        Icon          = [System.Windows.Media.ImageSource]$iconSource
     })
 }
 
-$startupIconCount = @($script:SoftwareCatalog | Where-Object { $null -ne $_.Icon }).Count
-Write-AMRLog ("Startup catalog entries initialized. Verified local icons ready={0}/{1}; Cache='{2}'." -f $startupIconCount,$script:SoftwareCatalog.Count,$script:IconDir) INFO Software
+$loadedIconCount = @($script:SoftwareCatalog | Where-Object { $null -ne $_.Icon }).Count
+Write-AMRLog ("Startup catalog ready: {0} preloaded icons from local cache. Cache='{1}'." -f $loadedIconCount,$script:IconDir) INFO Software
 
 # --- 4. FULL WPF XAML INTERFACE WITH PROGRESS BAR & 27 CUSTOMIZE TOOLS ---
 [xml]$xaml = @'
@@ -10552,9 +10312,6 @@ $script:Window.Add_Closed({
 
     # The icon worker is window-owned. Cancel an in-flight invocation and release
     # its PowerShell/runspace handles so closing the window cannot leave it running.
-    if ($script:IconRefreshCancellation) {
-        try { $script:IconRefreshCancellation.Cancel() } catch {}
-    }
     if ($script:IconRefreshPowerShell) {
         try { $script:IconRefreshPowerShell.Stop() } catch {}
         try { $script:IconRefreshPowerShell.Dispose() } catch {}
@@ -10566,9 +10323,7 @@ $script:Window.Add_Closed({
         $script:IconRefreshRunspace = $null
     }
     $script:IconRefreshAsync = $null
-    if ($script:IconRefreshReadyQueue) { try { $script:IconRefreshReadyQueue.Dispose() } catch {} }
     $script:IconRefreshReadyQueue = $null
-    if ($script:IconRefreshCancellation) { try { $script:IconRefreshCancellation.Dispose() } catch {}; $script:IconRefreshCancellation = $null }
     $script:IconRefreshStarted = $false
 
     # Stop the installed-inventory background runspace when the owning window closes.
@@ -29421,20 +29176,11 @@ function Get-AMRCatalogIconFromDisk {
         $ids += @($RawApp.IconAliases | ForEach-Object { [string]$_ })
     }
     foreach ($id in $ids) {
-        if ([string]::IsNullOrWhiteSpace($id)) { continue }
-        if ($script:IconManifestLookup.ContainsKey($id)) {
-            $path = Join-Path $script:IconDir ([string]$script:IconManifestLookup[$id])
+        foreach ($ext in $script:AMRIconImageExtensions) {
+            $path = Join-Path $script:IconDir ($id + $ext)
             if (Test-Path -LiteralPath $path -PathType Leaf) {
                 $source = Get-AMRIconImageSource -Path $path
                 if ($null -ne $source) { return $source }
-            }
-        } else {
-            foreach ($ext in $script:AMRIconImageExtensions) {
-                $path = Join-Path $script:IconDir ($id + $ext)
-                if (Test-Path -LiteralPath $path -PathType Leaf) {
-                    $source = Get-AMRIconImageSource -Path $path
-                    if ($null -ne $source) { return $source }
-                }
             }
         }
     }
@@ -29445,47 +29191,29 @@ function Start-AMRBackgroundIconRefresh {
     if ($script:IconRefreshStarted) { return }
     $script:IconRefreshStarted = $true
 
-    # Skip the worker only when every catalog item that can have an icon
-    # already received a decoded ImageSource. A valid folder alone is not proof
-    # that image names matched or that WIC successfully decoded those files.
-    $cachedCount = @($script:SoftwareCatalog | Where-Object { $null -ne $_.Icon }).Count
-    $iconCapableCount = @($RawApps | Where-Object {
-        (-not [string]::IsNullOrWhiteSpace([string]$_.Id)) -or
-        ($_.PSObject.Properties['IconAliases'] -and @($_.IconAliases).Count -gt 0)
-    }).Count
-    $missingCount = [Math]::Max(0,($iconCapableCount - $cachedCount))
-    if ($script:IconCacheUsableAtStartup -and $missingCount -eq 0) {
-        Write-AMRLog (("Local icon cache fully hydrated: {0}/{1}. Background icon worker skipped." -f $cachedCount,$script:SoftwareCatalog.Count)) INFO Software
+    # Cache validation, file reads and image decoding are intentionally deferred
+    # until after the window has rendered and run in the isolated worker below.
+    if ($script:IconCacheUsableAtStartup) {
+        $cachedCount = @($script:SoftwareCatalog | Where-Object { $null -ne $_.Icon }).Count
+        Write-AMRLog (("Local icon cache loaded synchronously: {0}/{1}. Background icon worker skipped." -f $cachedCount,$script:SoftwareCatalog.Count)) INFO Software
         return
     }
-    if ($script:IconCacheUsableAtStartup -and $missingCount -gt 0) {
-        Write-AMRLog (("Local icon cache is present but only {0}/{1} catalog icons decoded; retrying missing items through the isolated worker." -f $cachedCount,$script:SoftwareCatalog.Count)) WARNING Software
-    }
 
-    # Cold-cache download/extraction remains isolated in the existing worker.
+    # The isolated worker first hydrates any usable local cache, then performs
+    # the existing bounded archive refresh/download flow when required.
     try {
         $script:IconRefreshApps = @($RawApps)
         $script:IconRefreshStartedUtc = [DateTime]::UtcNow
         $script:IconRefreshLastHeartbeatUtc = [DateTime]::MinValue
         $script:IconRefreshScanIndex = 0
         $script:IconRefreshWorkerResult = $null
-        $script:IconRefreshCancellation = New-Object System.Threading.CancellationTokenSource
-        # Keep only a small number of decoded images waiting for UI publication.
-        $script:IconRefreshReadyQueue = [System.Collections.Concurrent.BlockingCollection[object]]::new(16)
+        $script:IconRefreshReadyQueue = New-Object 'System.Collections.Concurrent.ConcurrentQueue[object]'
         $catalogRequests = @()
         for ($requestIndex = 0; $requestIndex -lt $script:IconRefreshApps.Count; $requestIndex++) {
-            # Do not decode and enqueue icons already hydrated synchronously.
-            if ($requestIndex -lt $script:SoftwareCatalog.Count -and
-                $null -ne $script:SoftwareCatalog[$requestIndex].Icon) { continue }
             $raw = $script:IconRefreshApps[$requestIndex]
-            $ids = @()
-            if (-not [string]::IsNullOrWhiteSpace([string]$raw.Id)) { $ids += [string]$raw.Id }
-            if ($raw.PSObject.Properties['IconAliases'] -and $raw.IconAliases) {
-                $ids += @($raw.IconAliases | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | ForEach-Object { [string]$_ })
-            }
-            if ($ids.Count -gt 0) {
-                $catalogRequests += [pscustomobject]@{ Index=$requestIndex; Ids=$ids }
-            }
+            $ids = @([string]$raw.Id)
+            if ($raw.PSObject.Properties['IconAliases'] -and $raw.IconAliases) { $ids += @($raw.IconAliases | ForEach-Object { [string]$_ }) }
+            $catalogRequests += [pscustomobject]@{ Index=$requestIndex; Ids=$ids }
         }
 
         # Worker script: archive sync AND image decoding run away from the UI thread.
@@ -29496,8 +29224,7 @@ function Start-AMRBackgroundIconRefresh {
                 [int]$MinFileCount,
                 [int]$DownloadTimeoutSec,
                 [object[]]$CatalogIconRequests,
-                [object]$ReadyIconQueue,
-                [System.Threading.CancellationToken]$CancellationToken
+                [object]$ReadyIconQueue
             )
 
             # Keep background icon work below the UI thread's scheduling priority.
@@ -29521,99 +29248,50 @@ function Start-AMRBackgroundIconRefresh {
                         [string]$identity.file -ne 'Icons.zip') { return $false }
                     $count = @(Get-ChildItem -LiteralPath $IconDir -File -ErrorAction SilentlyContinue |
                         Where-Object { ($supportedImageExtensions -contains $_.Extension.ToLowerInvariant()) -and $_.Length -gt 32 }).Count
-                    $manifestPath = Join-Path $IconDir 'manifest.json'
-                    if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) { return $false }
-                    $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json -ErrorAction Stop
-                    if ([int]$manifest.schemaVersion -ne 1 -or [int]$manifest.iconCount -gt $count -or
-                        @($manifest.entries.PSObject.Properties).Count -ne [int]$manifest.iconCount) { return $false }
                     return ($count -ge $Minimum)
                 } catch { return $false }
             }
 
-            # Decode one local file on the isolated worker and publish only a frozen,
-            # size-bounded ImageSource. The dispatcher never opens files or decodes bitmaps.
+            # Decode one local file on the isolated worker and publish only a frozen
+            # ImageSource. The dispatcher never opens files or decodes bitmaps.
             function Publish-AMRIconFile {
-                param([int]$Index,[string]$Path,[object]$ReadyIconQueue,[System.Threading.CancellationToken]$CancellationToken)
+                param([int]$Index,[string]$Path,[object]$ReadyIconQueue)
                 if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $false }
-
-                $bitmap = $null
-
-                # Preferred path: a single WIC decode directly to a bounded thumbnail.
                 try {
+                    # Decode by content through WIC, not by filename extension. This
+                    # allows WEBP/HEIF/AVIF and future raster formats when a WIC codec
+                    # is installed on the host. OnLoad detaches the frame from the stream.
                     $fileStream = [System.IO.File]::Open($Path,[System.IO.FileMode]::Open,[System.IO.FileAccess]::Read,[System.IO.FileShare]::ReadWrite)
                     try {
-                        $candidate = New-Object System.Windows.Media.Imaging.BitmapImage
-                        $candidate.BeginInit()
-                        $candidate.CacheOption = [System.Windows.Media.Imaging.BitmapCacheOption]::OnLoad
-                        $candidate.CreateOptions = [System.Windows.Media.Imaging.BitmapCreateOptions]::IgnoreImageCache
-                        $candidate.DecodePixelWidth = 96
-                        $candidate.StreamSource = $fileStream
-                        $candidate.EndInit()
-                        if ($candidate.CanFreeze) {
-                            $candidate.Freeze()
-                            $bitmap = $candidate
-                        }
+                        $decoder = [System.Windows.Media.Imaging.BitmapDecoder]::Create(
+                            $fileStream,
+                            [System.Windows.Media.Imaging.BitmapCreateOptions]::IgnoreImageCache,
+                            [System.Windows.Media.Imaging.BitmapCacheOption]::OnLoad
+                        )
+                        if ($null -eq $decoder -or $decoder.Frames.Count -lt 1) { return $false }
+                        $bitmap = $decoder.Frames[0]
+                        if ($bitmap.CanFreeze) { $bitmap.Freeze() }
                     } finally { $fileStream.Dispose() }
-                } catch {
-                    $bitmap = $null
-                }
-
-                # Compatibility fallback matches the original app's BitmapDecoder
-                # behavior for image formats that do not support BitmapImage thumbnailing.
-                if ($null -eq $bitmap) {
-                    try {
-                        $fileStream = [System.IO.File]::Open($Path,[System.IO.FileMode]::Open,[System.IO.FileAccess]::Read,[System.IO.FileShare]::ReadWrite)
-                        try {
-                            $decoder = [System.Windows.Media.Imaging.BitmapDecoder]::Create(
-                                $fileStream,
-                                [System.Windows.Media.Imaging.BitmapCreateOptions]::IgnoreImageCache,
-                                [System.Windows.Media.Imaging.BitmapCacheOption]::OnLoad
-                            )
-                            if ($null -eq $decoder -or $decoder.Frames.Count -lt 1) { return $false }
-                            $candidate = $decoder.Frames[0]
-                            if (-not $candidate.CanFreeze) { return $false }
-                            $candidate.Freeze()
-                            $bitmap = $candidate
-                        } finally { $fileStream.Dispose() }
-                    } catch { return $false }
-                }
-
-                try {
-                    # The bounded queue limits retained decoded images while the UI
-                    # dispatcher applies them to the matching catalog items.
-                    $ReadyIconQueue.Add([pscustomobject]@{ Index=$Index; Source=$bitmap },$CancellationToken)
+                    # Do not throttle archive extraction/image preparation on UI delivery speed.
+                    # The DispatcherTimer drains this queue independently in small UI-safe batches.
+                    $ReadyIconQueue.Enqueue([pscustomobject]@{ Index=$Index; Source=$bitmap })
                     return $true
                 } catch { return $false }
             }
 
             function Publish-AMRIconsFromLocalCache {
-                param([object[]]$CatalogIconRequests,[string]$IconDir,[object]$ReadyIconQueue,[System.Threading.CancellationToken]$CancellationToken)
+                param([object[]]$CatalogIconRequests,[string]$IconDir,[object]$ReadyIconQueue)
                 $prepared = 0
-                $manifestLookup = @{}
-                try {
-                    $manifestPath = Join-Path $IconDir 'manifest.json'
-                    if (Test-Path -LiteralPath $manifestPath -PathType Leaf) {
-                        $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json -ErrorAction Stop
-                        foreach ($record in @($manifest.entries.PSObject.Properties)) {
-                            $manifestLookup[[string]$record.Name] = [string]$record.Value.file
-                        }
-                    }
-                } catch { $manifestLookup = @{} }
                 foreach ($request in $CatalogIconRequests) {
                     $found = $false
                     foreach ($candidateId in @($request.Ids)) {
-                        $imagePath = $null
-                        if ($manifestLookup.ContainsKey([string]$candidateId)) {
-                            $imagePath = Join-Path $IconDir ([string]$manifestLookup[[string]$candidateId])
-                        } else {
-                            foreach ($extension in $supportedImageExtensions) {
-                                $candidatePath = Join-Path $IconDir ([string]$candidateId + $extension)
-                                if (Test-Path -LiteralPath $candidatePath -PathType Leaf) { $imagePath = $candidatePath; break }
+                        foreach ($extension in $supportedImageExtensions) {
+                            $imagePath = Join-Path $IconDir ([string]$candidateId + $extension)
+                            if (Publish-AMRIconFile -Index ([int]$request.Index) -Path $imagePath -ReadyIconQueue $ReadyIconQueue) {
+                                $prepared++; $found = $true; break
                             }
                         }
-                        if ($imagePath -and (Publish-AMRIconFile -Index ([int]$request.Index) -Path $imagePath -ReadyIconQueue $ReadyIconQueue -CancellationToken $CancellationToken)) {
-                            $prepared++; $found = $true; break
-                        }
+                        if ($found) { break }
                     }
                 }
                 return $prepared
@@ -29623,8 +29301,7 @@ function Start-AMRBackgroundIconRefresh {
                 param(
                     [string]$IconDir,[string]$ArchiveUrl,
                     [int]$MinFileCount,[int]$DownloadTimeoutSec,
-                    [object[]]$CatalogIconRequests,[object]$CatalogIconIndexById,[object]$ReadyIconQueue,
-                    [System.Threading.CancellationToken]$CancellationToken
+                    [object[]]$CatalogIconRequests,[object]$CatalogIconIndexById,[object]$ReadyIconQueue
                 )
                 $ErrorActionPreference = 'Stop'
                 try {
@@ -29681,17 +29358,7 @@ function Start-AMRBackgroundIconRefresh {
                             }
                         } catch { $localValid = $false }
                     }
-                    $manifestCacheValid = $false
-                    try {
-                        $localManifestPath = Join-Path $IconDir 'manifest.json'
-                        if (Test-Path -LiteralPath $localManifestPath -PathType Leaf) {
-                            $localManifest = Get-Content -LiteralPath $localManifestPath -Raw | ConvertFrom-Json -ErrorAction Stop
-                            $manifestCacheValid = ([int]$localManifest.schemaVersion -eq 1 -and
-                                [int]$localManifest.iconCount -ge $MinFileCount -and
-                                @($localManifest.entries.PSObject.Properties).Count -eq [int]$localManifest.iconCount)
-                        }
-                    } catch { $manifestCacheValid = $false }
-                    $sameVersion = $localValid -and $manifestCacheValid -and $cacheBelongsToTarget -and $oldMeta -and
+                    $sameVersion = $localValid -and $cacheBelongsToTarget -and $oldMeta -and
                         $remoteSize -gt 0 -and [long]$oldMeta.size -eq $remoteSize
 
                     if ($sameVersion) {
@@ -29765,44 +29432,13 @@ function Start-AMRBackgroundIconRefresh {
                     # Extract image entries directly into the permanent Icons directory.
                     # Keep icons.zip and metadata alongside the extracted image files.
                     $zip = [IO.Compression.ZipFile]::OpenRead($localArchive)
-                    try {
                     $entries = @($zip.Entries | Where-Object {
                         $_.FullName -match $supportedImagePattern -and
                         $_.FullName -notmatch '(^/|^[a-zA-Z]:|(^|[\\/])\.\.([\\/]|$))'
                     })
-                    $manifestEntries = @($zip.Entries | Where-Object { ([string]$_.FullName).Replace('\','/') -eq 'Icons/manifest.json' })
-                    if ($manifestEntries.Count -ne 1) { throw 'Icons.zip does not contain exactly one Icons/manifest.json.' }
-                    $manifestStream = $manifestEntries[0].Open()
-                    $manifestReader = New-Object System.IO.StreamReader($manifestStream,[System.Text.Encoding]::UTF8,$true)
-                    try { $manifestText = $manifestReader.ReadToEnd() } finally { $manifestReader.Dispose(); $manifestStream.Dispose() }
-                    $manifestData = $manifestText | ConvertFrom-Json -ErrorAction Stop
-                    $manifestRecords = @($manifestData.entries.PSObject.Properties)
-                    if ([int]$manifestData.schemaVersion -ne 1 -or [int]$manifestData.iconCount -ne $entries.Count -or
-                        $manifestRecords.Count -ne $entries.Count) { throw 'Icons.zip manifest schema/count does not match its image entries.' }
-                    $archiveImageNames = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
-                    foreach ($archiveEntry in $entries) {
-                        $archiveLeaf = [IO.Path]::GetFileName([string]$archiveEntry.FullName)
-                        if ([string]::IsNullOrWhiteSpace($archiveLeaf) -or $archiveLeaf -match '[\\/:*?"<>|]' -or -not $archiveImageNames.Add($archiveLeaf)) {
-                            throw 'Icons.zip contains an invalid or duplicate image filename.'
-                        }
-                    }
-                    foreach ($manifestRecord in $manifestRecords) {
-                        $manifestFile = [string]$manifestRecord.Value.file
-                        if ([string]::IsNullOrWhiteSpace($manifestFile) -or [IO.Path]::GetFileName($manifestFile) -ne $manifestFile -or
-                            [IO.Path]::GetExtension($manifestFile).ToLowerInvariant() -ne '.png' -or
-                            -not $archiveImageNames.Contains($manifestFile)) {
-                            throw ('Icons.zip manifest references a missing/invalid image: ' + $manifestFile)
-                        }
-                    }
-                    # Invalidate the previous manifest before replacing any image.
-                    # If extraction is interrupted, the next launch cannot mistake a
-                    # partially updated directory for a complete warm cache.
-                    $previousManifest = Join-Path $IconDir 'manifest.json'
-                    if (Test-Path -LiteralPath $previousManifest -PathType Leaf) {
-                        Remove-Item -LiteralPath $previousManifest -Force -ErrorAction Stop
-                    }
                     $extracted = 0; $seen = @{}
-                    foreach ($entry in $entries) {
+                    try {
+                        foreach ($entry in $entries) {
                             $leaf = [IO.Path]::GetFileName($entry.FullName)
                             if ([string]::IsNullOrWhiteSpace($leaf) -or $leaf -match '[\\/:*?"<>|]') { continue }
                             $key = $leaf.ToLowerInvariant()
@@ -29822,18 +29458,14 @@ function Start-AMRBackgroundIconRefresh {
                             $entryId = [IO.Path]::GetFileNameWithoutExtension($leaf).ToLowerInvariant()
                             if ($CatalogIconIndexById.ContainsKey($entryId)) {
                                 foreach ($matchedIndex in $CatalogIconIndexById[$entryId]) {
-                                    [void](Publish-AMRIconFile -Index ([int]$matchedIndex) -Path $dest -ReadyIconQueue $ReadyIconQueue -CancellationToken $CancellationToken)
+                                    [void](Publish-AMRIconFile -Index ([int]$matchedIndex) -Path $dest -ReadyIconQueue $ReadyIconQueue)
                                 }
                             }
                         }
                     } finally { $zip.Dispose() }
-                    if ($extracted -lt $MinFileCount -or $extracted -ne [int]$manifestData.iconCount) { return "ExtractFailed:Image count mismatch; extracted=$extracted; manifest=$($manifestData.iconCount)" }
-                    $manifestDestination = Join-Path $IconDir 'manifest.json'
-                    $manifestStage = $manifestDestination + '.amr-new'
-                    [IO.File]::WriteAllText($manifestStage,$manifestText,(New-Object System.Text.UTF8Encoding($false)))
-                    Move-Item -LiteralPath $manifestStage -Destination $manifestDestination -Force -ErrorAction Stop
+                    if ($extracted -lt $MinFileCount) { return "ExtractFailed:Only $extracted images extracted" }
                     $finalCount = @(Get-ChildItem -LiteralPath $IconDir -File | Where-Object { ($supportedImageExtensions -contains $_.Extension.ToLowerInvariant()) -and $_.Length -gt 32 }).Count
-                    $metaOut = [pscustomobject]@{ schemaVersion=2; repository='3mr10aa/Tool-Pro'; branch='main'; file='Icons.zip'; source=$ArchiveUrl; size=[long](Get-Item -LiteralPath $localArchive).Length; sha=$remoteSha; imageCount=$finalCount; manifest='manifest.json'; manifestSchemaVersion=1; updatedUtc=[DateTime]::UtcNow.ToString('o') }
+                    $metaOut = [pscustomobject]@{ schemaVersion=2; repository='3mr10aa/Tool-Pro'; branch='main'; file='Icons.zip'; source=$ArchiveUrl; size=[long](Get-Item -LiteralPath $localArchive).Length; sha=$remoteSha; imageCount=$finalCount; updatedUtc=[DateTime]::UtcNow.ToString('o') }
                     $metaOut | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $metaFile -Encoding UTF8
                     return "ArchiveReady:DownloadedOrReused;Extracted=$extracted;CacheImages=$finalCount;Zip=$localArchive"
                 } catch {
@@ -29867,10 +29499,10 @@ function Start-AMRBackgroundIconRefresh {
             $cacheUsableAtStart = Test-AMRIconCacheUsable -IconDir $IconDir -Minimum $MinFileCount
             $prepared = 0
             if ($cacheUsableAtStart) {
-                $prepared += Publish-AMRIconsFromLocalCache -CatalogIconRequests $CatalogIconRequests -IconDir $IconDir -ReadyIconQueue $ReadyIconQueue -CancellationToken $CancellationToken
+                $prepared += Publish-AMRIconsFromLocalCache -CatalogIconRequests $CatalogIconRequests -IconDir $IconDir -ReadyIconQueue $ReadyIconQueue
             }
 
-            $syncResult = Initialize-AMRSoftwareIcons -IconDir $IconDir -ArchiveUrl $ArchiveUrl -MinFileCount $MinFileCount -DownloadTimeoutSec $DownloadTimeoutSec -CatalogIconRequests $CatalogIconRequests -CatalogIconIndexById $catalogIconIndexById -ReadyIconQueue $ReadyIconQueue -CancellationToken $CancellationToken
+            $syncResult = Initialize-AMRSoftwareIcons -IconDir $IconDir -ArchiveUrl $ArchiveUrl -MinFileCount $MinFileCount -DownloadTimeoutSec $DownloadTimeoutSec -CatalogIconRequests $CatalogIconRequests -CatalogIconIndexById $catalogIconIndexById -ReadyIconQueue $ReadyIconQueue
 
             return [pscustomobject]@{ Result=[string]$syncResult; Prepared=$prepared; LocalCacheFirst=$cacheUsableAtStart }
         }
@@ -29890,7 +29522,6 @@ function Start-AMRBackgroundIconRefresh {
         [void]$script:IconRefreshPowerShell.AddParameter('DownloadTimeoutSec', [int]$script:IconDownloadTimeoutSec)
         [void]$script:IconRefreshPowerShell.AddParameter('CatalogIconRequests', [object[]]$catalogRequests)
         [void]$script:IconRefreshPowerShell.AddParameter('ReadyIconQueue', $script:IconRefreshReadyQueue)
-        [void]$script:IconRefreshPowerShell.AddParameter('CancellationToken', $script:IconRefreshCancellation.Token)
 
         $script:IconRefreshAsync = $script:IconRefreshPowerShell.BeginInvoke()
         if ($null -eq $script:IconRefreshAsync) { throw 'BeginInvoke returned null IAsyncResult' }
@@ -29923,7 +29554,7 @@ function Start-AMRBackgroundIconRefresh {
                 # decoding remain on the worker; only frozen ImageSources are assigned here.
                 for ($delivery = 0; $delivery -lt 4; $delivery++) {
                     $ready = $null
-                    if (-not $workerReadyQueue.TryTake([ref]$ready)) { break }
+                    if (-not $workerReadyQueue.TryDequeue([ref]$ready)) { break }
                     if ($null -ne $ready -and $ready.Index -ge 0 -and $ready.Index -lt $script:SoftwareCatalog.Count) {
                         $catalogItem = $script:SoftwareCatalog[$ready.Index]
                         $catalogItem.Icon = $ready.Source
@@ -29982,38 +29613,29 @@ function Start-AMRBackgroundIconRefresh {
                     $script:IconRefreshRunspace = $null
                     $script:IconRefreshAsync = $null
                     $script:IconRefreshTimer = $null
-                    if ($script:IconRefreshReadyQueue) { try { $script:IconRefreshReadyQueue.Dispose() } catch {} }
                     $script:IconRefreshReadyQueue = $null
-                    if ($script:IconRefreshCancellation) { try { $script:IconRefreshCancellation.Dispose() } catch {}; $script:IconRefreshCancellation = $null }
                     $script:IconRefreshStarted = $false
                 }
             } catch {
                 Write-AMRLog ("Icon refresh failed: $($_.Exception.Message)") ERROR Software
                 if ($timer) { try { $timer.Stop() } catch {} }
-                if ($script:IconRefreshCancellation) { try { $script:IconRefreshCancellation.Cancel() } catch {} }
                 try { if ($script:IconRefreshPowerShell) { $script:IconRefreshPowerShell.Dispose() } } catch {}
                 try { if ($script:IconRefreshRunspace) { $script:IconRefreshRunspace.Close(); $script:IconRefreshRunspace.Dispose() } } catch {}
                 $script:IconRefreshPowerShell = $null
                 $script:IconRefreshRunspace = $null
                 $script:IconRefreshAsync = $null
                 $script:IconRefreshTimer = $null
-                if ($script:IconRefreshReadyQueue) { try { $script:IconRefreshReadyQueue.Dispose() } catch {} }
                 $script:IconRefreshReadyQueue = $null
-                if ($script:IconRefreshCancellation) { try { $script:IconRefreshCancellation.Cancel() } catch {}; try { $script:IconRefreshCancellation.Dispose() } catch {}; $script:IconRefreshCancellation = $null }
                 $script:IconRefreshStarted = $false
             }
         }.GetNewClosure())
         $script:IconRefreshTimer.Start()
     } catch {
         Write-AMRLog ("Could not start icon worker: $($_.Exception.Message)") ERROR Software
-        if ($script:IconRefreshCancellation) { try { $script:IconRefreshCancellation.Cancel() } catch {} }
         try { if ($script:IconRefreshPowerShell) { $script:IconRefreshPowerShell.Dispose() } } catch {}
         try { if ($script:IconRefreshRunspace) { $script:IconRefreshRunspace.Close(); $script:IconRefreshRunspace.Dispose() } } catch {}
         $script:IconRefreshPowerShell = $null
         $script:IconRefreshRunspace = $null
-        if ($script:IconRefreshReadyQueue) { try { $script:IconRefreshReadyQueue.Dispose() } catch {} }
-        $script:IconRefreshReadyQueue = $null
-        if ($script:IconRefreshCancellation) { try { $script:IconRefreshCancellation.Cancel() } catch {}; try { $script:IconRefreshCancellation.Dispose() } catch {}; $script:IconRefreshCancellation = $null }
         $script:IconRefreshStarted = $false
     }
 }
@@ -30032,8 +29654,6 @@ $script:Window.Add_Loaded({
             Write-AMRLog "Could not apply cached installed indicators: $($_.Exception.Message)" WARNING Software
         }
     }
-    # Start icon hydration as soon as the window is loaded, not after its first
-    # completed render. The worker decodes off-thread and publishes bounded images.
     Start-AMRBackgroundIconRefresh
     Start-AMRInstalledCatalogScan -Refresh
     try { Invoke-AMRSoftwarePremiumEntrance } catch {}
@@ -30045,17 +29665,8 @@ $script:Window.Add_ContentRendered({
             Write-AMRLog ("Startup first-render completed in {0:N2} seconds." -f $script:AMRStartupStopwatch.Elapsed.TotalSeconds) INFO System
         }
     } catch { }
-    # Idempotent fallback: Loaded normally starts the worker first. This call
-    # also covers any unusual startup path where Loaded did not start it.
     Start-AMRBackgroundIconRefresh
 })
-
-# Complete all local icon decoding before exposing the main WPF window. The launcher
-# already waits for this real window before starting its existing animated handoff;
-# no launcher animation duration, delay, or transition code is changed here.
-Complete-AMRStartupIconPreload
-$startupIconCount = @($script:SoftwareCatalog | Where-Object { $null -ne $_.Icon }).Count
-Write-AMRLog ("Pre-window software catalog ready: icons={0}/{1}; cache='{2}'." -f $startupIconCount,$script:SoftwareCatalog.Count,$script:IconDir) INFO Software
 
 # Fix40: validated cached inventory can render immediately while an in-flight refresh continues;
 # intentional catalog/installed switches use a low-cost grid-level cross-fade + slide.
