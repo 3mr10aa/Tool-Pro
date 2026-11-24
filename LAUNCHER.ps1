@@ -1,4 +1,4 @@
-﻿#requires -Version 5.1
+#requires -Version 5.1
 # AMR Tool-Pro | Premium animated bootstrap launcher | Parallel runtime + icon handoff
 # Windows PowerShell 5.1 | Public command: irm <raw-launcher-url> | iex
 
