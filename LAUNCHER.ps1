@@ -587,7 +587,7 @@ function Invoke-AMRParallelRuntimePreparation {
         $ps = [PowerShell]::Create(); $ps.RunspacePool = $pool
         [void]$ps.AddScript($downloadWorker.ToString()).AddArgument($url).AddArgument($destination).AddArgument($relative).AddArgument($progressMap)
         $async = $ps.BeginInvoke()
-        [void]$tasks.Add([pscustomobject]@{ Kind='Download'; Relative=$relative; Path=$destination; PowerShell=$ps; Async=$async })
+        [void]$tasks.Add([pscustomobject]@{ Kind='Download'; Relative=$relative; Path=$destination; PowerShell=$ps; Async=$async; StartedUtc=[DateTime]::UtcNow })
     }
     $startExtraction = {
         $archive = Join-Path $StageRoot 'Icons.zip'
@@ -595,7 +595,7 @@ function Invoke-AMRParallelRuntimePreparation {
         $ps = [PowerShell]::Create(); $ps.RunspacePool = $pool
         [void]$ps.AddScript($extractWorker).AddArgument($archive).AddArgument($destination).AddArgument(100)
         $async = $ps.BeginInvoke()
-        [void]$tasks.Add([pscustomobject]@{ Kind='Extract'; Relative='Icons.zip extraction'; Path=$destination; PowerShell=$ps; Async=$async })
+        [void]$tasks.Add([pscustomobject]@{ Kind='Extract'; Relative='Icons.zip extraction'; Path=$destination; PowerShell=$ps; Async=$async; StartedUtc=[DateTime]::UtcNow })
         Write-AMRLauncherLog 'Started icon extraction on a worker runspace while component downloads continue.'
     }
 
@@ -644,7 +644,7 @@ function Invoke-AMRParallelRuntimePreparation {
                     if ($actualBlob -ne $expectedBlob.ToLowerInvariant()) { throw "GitHub source verification failed for $relative. Expected $expectedBlob but received $actualBlob" }
                     $actualSha256 = (Get-FileHash -LiteralPath $task.Path -Algorithm SHA256).Hash
                     $item = Get-Item -LiteralPath $task.Path
-                    Write-AMRLauncherLog ("Verified {0} | {1} bytes | GitBlob={2} | SHA256={3}" -f $relative,$item.Length,$actualBlob,$actualSha256)
+                    Write-AMRLauncherLog ("Verified {0} | {1} bytes | GitBlob={2} | SHA256={3} | elapsed={4:N1}s" -f $relative,$item.Length,$actualBlob,$actualSha256,([DateTime]::UtcNow - $task.StartedUtc).TotalSeconds)
                     if ($relative -eq 'Icons.zip' -and $ExtractIcons -and -not $extractionStarted) { & $startExtraction; $extractionStarted = $true }
                 } else {
                     $iconCount = [int](@($output | Select-Object -Last 1)[0])
@@ -658,7 +658,7 @@ function Invoke-AMRParallelRuntimePreparation {
                     }
                     $markerPath = Join-Path $task.Path '.amr-icons-source.json'
                     [System.IO.File]::WriteAllText($markerPath,($iconMarker | ConvertTo-Json -Depth 3),(New-Object System.Text.UTF8Encoding($false)))
-                    Write-AMRLauncherLog ("Parallel extraction completed: $iconCount verified icon image(s); cache fingerprint saved: $sourceBlob")
+                    Write-AMRLauncherLog ("Parallel extraction completed: $iconCount verified icon image(s); elapsed={0:N1}s; cache fingerprint saved: {1}" -f ([DateTime]::UtcNow - $task.StartedUtc).TotalSeconds,$sourceBlob)
                 }
             }
             Start-Sleep -Milliseconds 25
@@ -1530,12 +1530,17 @@ try {
             Get-ChildItem -LiteralPath $destinationIcons -File -ErrorAction Stop |
                 Where-Object { $supported -contains $_.Extension.ToLowerInvariant() } |
                 Remove-Item -Force -ErrorAction Stop
-            foreach ($imageFile in $sourceImages) {
-                $target = Join-Path $destinationIcons $imageFile.Name
-                $temporary = $target + '.amr-launcher-new'
-                Copy-Item -LiteralPath $imageFile.FullName -Destination $temporary -Force -ErrorAction Stop
-                Move-Item -LiteralPath $temporary -Destination $target -Force -ErrorAction Stop
-            }
+            # Copy the large flat image set concurrently. The cache metadata marker
+            # was removed above and is published only after every file is copied and
+            # the ZIP is verified, so an interrupted copy is never treated as complete.
+            $copyStartedUtc = [DateTime]::UtcNow
+            $robocopyExe = Join-Path $env:SystemRoot 'System32\robocopy.exe'
+            if (-not (Test-Path -LiteralPath $robocopyExe -PathType Leaf)) { throw 'Robocopy is unavailable for the parallel ProgramData icon handoff.' }
+            $imageMasks = @('*.png','*.jpg','*.jpeg','*.jpe','*.jfif','*.bmp','*.dib','*.gif','*.tif','*.tiff','*.ico','*.webp','*.wdp','*.jxr','*.hdp','*.heic','*.heif','*.avif','*.jp2','*.j2k','*.dds','*.tga','*.pcx','*.ppm','*.pgm','*.pbm')
+            & $robocopyExe $sourceIcons $destinationIcons $imageMasks '/MT:8' '/R:1' '/W:1' '/COPY:DAT' '/NFL' '/NDL' '/NJH' '/NJS' '/NP' | Out-Null
+            $robocopyExitCode = $LASTEXITCODE
+            if ($robocopyExitCode -ge 8) { throw ('Parallel ProgramData icon copy failed; Robocopy exit code: ' + $robocopyExitCode) }
+            Write-AMRLaunchBootstrapLog ("Parallel ProgramData icon copy completed: {0} images; elapsed={1:N1}s; RobocopyExit={2}." -f $sourceImages.Count,([DateTime]::UtcNow - $copyStartedUtc).TotalSeconds,$robocopyExitCode)
             $manifestTemporary = $destinationManifestPath + '.amr-launcher-new'
             Copy-Item -LiteralPath $sourceManifestPath -Destination $manifestTemporary -Force -ErrorAction Stop
             Move-Item -LiteralPath $manifestTemporary -Destination $destinationManifestPath -Force -ErrorAction Stop
