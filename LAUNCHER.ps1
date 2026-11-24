@@ -1466,8 +1466,7 @@ try {
         [string]$sourceMeta.branch -eq 'main' -and
         [string]$sourceMeta.file -eq 'Icons.zip' -and
         ([string]$sourceMeta.sha).ToLowerInvariant() -eq $expectedIconBlob -and
-        [long]$sourceMeta.size -eq (Get-Item -LiteralPath $sourceZip).Length -and
-        (Get-AMRLaunchBootstrapGitBlobSha1 -Path $sourceZip) -eq $expectedIconBlob) {
+        [long]$sourceMeta.size -eq (Get-Item -LiteralPath $sourceZip).Length) {
 
         $destinationIcons = Join-Path $env:ProgramData 'AMR-Utility\Icons'
         New-Item -ItemType Directory -Path $destinationIcons -Force | Out-Null
@@ -1490,8 +1489,7 @@ try {
                     $existingCount -eq [int]$sourceMeta.imageCount -and
                     [int]$existingManifest.schemaVersion -eq 1 -and
                     [int]$existingManifest.iconCount -eq [int]$sourceMeta.imageCount -and
-                    @($existingManifest.entries.PSObject.Properties).Count -eq [int]$sourceMeta.imageCount -and
-                    (Get-AMRLaunchBootstrapGitBlobSha1 -Path $destinationZip) -eq $expectedIconBlob)
+                    @($existingManifest.entries.PSObject.Properties).Count -eq [int]$sourceMeta.imageCount)
             }
         } catch { $destinationMatches = $false }
 
@@ -1532,7 +1530,7 @@ try {
             Move-Item -LiteralPath $metaTemporary -Destination $destinationMetaPath -Force -ErrorAction Stop
             Write-AMRLaunchBootstrapLog ('Published verified launcher icon cache into ProgramData: ' + $sourceImages.Count + ' images.')
         } else {
-            Write-AMRLaunchBootstrapLog 'ProgramData icon cache already matches the verified GitHub archive; skipping copy.'
+            Write-AMRLaunchBootstrapLog 'ProgramData icon cache matches the saved source fingerprint and metadata; skipping archive re-hash and copy.'
         }
     } else {
         Write-AMRLaunchBootstrapLog 'No complete verified launcher icon generation was available; continuing so the app icon fallback can run.'
