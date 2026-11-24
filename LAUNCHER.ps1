@@ -382,13 +382,26 @@ function Invoke-AMRLauncherJsonRequest {
     }
 }
 
-function Get-AMRRemoteTree {
-    # Resolve the branch to a commit first, then request that commit's tree.
-    # GitHub's Git Trees endpoint expects a tree SHA, not a branch name.
+function Get-AMRRemoteCommit {
+    # Ask GitHub for the current main commit first. This small request lets an
+    # already-installed runtime stay on the fast path when no update exists.
     $commitUri = 'https://api.github.com/repos/3mr10aa/Tool-Pro/commits/main'
     $commitResult = Invoke-AMRLauncherJsonRequest -Uri $commitUri
     $commitSha = ([string]$commitResult.sha).ToLowerInvariant()
     $treeSha = ([string]$commitResult.commit.tree.sha).ToLowerInvariant()
+    if ($commitSha -notmatch '^[a-f0-9]{40}$' -or $treeSha -notmatch '^[a-f0-9]{40}$') {
+        throw 'GitHub returned an invalid commit or tree identity.'
+    }
+    return [pscustomobject]@{ Commit = $commitSha; Tree = $treeSha }
+}
+
+function Get-AMRRemoteTree {
+    param([object]$CommitInfo)
+    # Fetch the recursive tree only when the remote commit differs from the
+    # locally committed version, or when no trusted local version is available.
+    if (-not $CommitInfo) { $CommitInfo = Get-AMRRemoteCommit }
+    $commitSha = ([string]$CommitInfo.Commit).ToLowerInvariant()
+    $treeSha = ([string]$CommitInfo.Tree).ToLowerInvariant()
     if ($commitSha -notmatch '^[a-f0-9]{40}$' -or $treeSha -notmatch '^[a-f0-9]{40}$') {
         throw 'GitHub returned an invalid commit or tree identity.'
     }
@@ -927,17 +940,31 @@ namespace AMR {
     Set-AMRLauncherProgress -Percent 0 -Status 'Getting everything ready for you...' -Detail 'Connecting securely to GitHub...'
     # Telemetry consent is intentionally deferred until after the main app is visible.
     # Nothing related to consent, collection, or networking can delay the app launch.
-    # Local-first startup: a previously committed immutable version is trusted
-    # from its locally saved GitHub-verified manifest. Do not contact GitHub or
-    # re-hash the full application/DLL payload before opening an already verified
-    # installation. A separate source check is intentionally not on this path.
+    # Local-first startup with a lightweight freshness check: compare the saved
+    # commit with the latest main commit, and fetch the full tree only when it changes.
     $remoteTree = $null
+    $remoteCommitInfo = $null
+    $remoteCommitAvailable = $false
     $sourceComparisonAvailable = $false
     $sourceComparisonError = $null
     $localMatchesSource = $false
     $script:AMRLocalFastPath = $false
     $savedManifestPath = Join-Path $installRoot '.amr-runtime-state.json'
-    if ($currentState -and (Test-Path -LiteralPath $savedManifestPath -PathType Leaf)) {
+
+    # Always perform one lightweight commit check. If the installed commit is
+    # still current, open the verified local runtime without downloading files,
+    # fetching the full repository tree, hashing the app payload, or extracting icons.
+    try {
+        Set-AMRLauncherProgress -Percent 3 -Status 'Checking for a newer AMR version...' -Detail 'Verifying the latest main-branch commit...'
+        $remoteCommitInfo = Get-AMRRemoteCommit
+        $remoteCommitAvailable = $true
+        Write-AMRLauncherLog ('GitHub main commit check completed. Commit=' + $remoteCommitInfo.Commit)
+    } catch {
+        $sourceComparisonError = $_.Exception.Message
+        Write-AMRLauncherLog ('GitHub commit check unavailable; offline verification will be attempted. ' + $sourceComparisonError)
+    }
+
+    if ($currentState -and $remoteCommitAvailable -and (Test-Path -LiteralPath $savedManifestPath -PathType Leaf)) {
         try {
             $savedState = Get-Content -LiteralPath $savedManifestPath -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop
             $savedMap = @{}
@@ -945,6 +972,7 @@ namespace AMR {
             $validLocalState = ([string]$savedState.repository -eq '3mr10aa/Tool-Pro' -and [string]$savedState.branch -eq 'main' -and
                 [string]$currentState.repository -eq '3mr10aa/Tool-Pro' -and [string]$currentState.branch -eq 'main' -and
                 [string]$savedState.commit -eq [string]$currentState.commit -and
+                [string]$currentState.commit -eq [string]$remoteCommitInfo.Commit -and
                 [string]$currentState.versionId -match '^[a-fA-F0-9]{40}(-[a-fA-F0-9]{8})?$')
             foreach ($relative in $expected.Keys) {
                 $candidate = Join-Path $installRoot ($relative -replace '/', '\')
@@ -957,7 +985,7 @@ namespace AMR {
                 $remoteTree = [pscustomobject]@{ Commit=[string]$savedState.commit; Files=$savedMap }
                 $localMatchesSource = $true
                 $script:AMRLocalFastPath = $true
-                Write-AMRLauncherLog ('Local-first mode: selected committed runtime ' + [string]$currentState.versionId + '; skipped live GitHub requests and full runtime hashing.')
+                Write-AMRLauncherLog ('Local-first mode: selected committed runtime ' + [string]$currentState.versionId + '; latest GitHub commit matches, so full tree fetch, payload hashing, downloads, and extraction were skipped.')
                 Set-AMRLauncherProgress -Percent 78 -Status 'Opening your installed AMR runtime...' -Detail 'Using your previously verified local version.'
             }
         } catch {
@@ -967,15 +995,16 @@ namespace AMR {
         }
     }
 
-    if (-not $localMatchesSource) {
+    if (-not $localMatchesSource -and $remoteCommitAvailable) {
         try {
-            Set-AMRLauncherProgress -Percent 3 -Status 'Checking your local AMR runtime...' -Detail 'Verifying the installed version against GitHub...'
-            $remoteTree = Get-AMRRemoteTree
+            Set-AMRLauncherProgress -Percent 5 -Status 'A newer AMR version was detected...' -Detail 'Checking the exact files that need updating...'
+            $remoteTree = Get-AMRRemoteTree -CommitInfo $remoteCommitInfo
             $sourceComparisonAvailable = $true
             Write-AMRLauncherLog ('GitHub source tree fetched. Commit=' + $remoteTree.Commit)
         } catch {
             $sourceComparisonError = $_.Exception.Message
-            Write-AMRLauncherLog ('GitHub source comparison unavailable: ' + $sourceComparisonError)
+            $sourceComparisonAvailable = $false
+            Write-AMRLauncherLog ('GitHub source tree comparison unavailable: ' + $sourceComparisonError)
         }
     }
 
@@ -1142,8 +1171,8 @@ namespace AMR {
         if (-not (Test-Path -LiteralPath $iconLink -PathType Container)) {
             throw 'The selected runtime has no local Icons directory/junction.'
         }
-        Set-AMRLauncherProgress -Percent 92 -Status 'Your local AMR runtime is ready...' -Detail 'Launching the previously verified local version without waiting for GitHub.'
-        Write-AMRLauncherLog 'Local runtime accepted from its saved verified manifest; skipping GitHub comparison, downloads, staging, and replacement for this launch.'
+        Set-AMRLauncherProgress -Percent 92 -Status 'Your local AMR runtime is ready...' -Detail 'No newer commit was found. Launching the verified local version.'
+        Write-AMRLauncherLog 'Local runtime accepted after latest-main commit comparison; skipping full tree fetch, payload hashing, downloads, staging, and replacement.'
         $stageRoot = $null
     } else {
         Set-AMRLauncherProgress -Percent 8 -Status 'A newer or different runtime was found...' -Detail 'Preparing an isolated version without touching the active runtime...'
