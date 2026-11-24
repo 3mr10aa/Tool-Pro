@@ -414,7 +414,7 @@ function Test-AMRRuntimeAgainstManifest {
     param([string]$Root, [System.Collections.IDictionary]$Manifest)
     if (-not (Test-Path -LiteralPath $Root -PathType Container)) { return $false }
     foreach ($relative in $expected.Keys) {
-        $localPath = Join-Path $Root ($relative -replace '/', '\\')
+        $localPath = Join-Path $Root ($relative -replace '/', '\')
         if (-not (Test-Path -LiteralPath $localPath -PathType Leaf)) { return $false }
         $expectedBlob = [string]$Manifest[$relative]
         if ($expectedBlob -notmatch '^[a-f0-9]{40}$') { return $false }
@@ -431,9 +431,9 @@ function Copy-AMRRuntimeToStage {
     # Copy only the five manifest-controlled runtime files and the saved manifest.
     # Never recurse through Runtime, Versions, Shared, Telemetry, or icon generations.
     foreach ($relative in $expected.Keys) {
-        $sourcePath = Join-Path $Source ($relative -replace '/', '\\')
+        $sourcePath = Join-Path $Source ($relative -replace '/', '\')
         if (-not (Test-Path -LiteralPath $sourcePath -PathType Leaf)) { continue }
-        $destinationPath = Join-Path $Destination ($relative -replace '/', '\\')
+        $destinationPath = Join-Path $Destination ($relative -replace '/', '\')
         $destinationParent = Split-Path -Parent $destinationPath
         if (-not (Test-Path -LiteralPath $destinationParent -PathType Container)) {
             New-Item -ItemType Directory -Path $destinationParent -Force | Out-Null
@@ -947,7 +947,7 @@ namespace AMR {
                 [string]$savedState.commit -eq [string]$currentState.commit -and
                 [string]$currentState.versionId -match '^[a-fA-F0-9]{40}(-[a-fA-F0-9]{8})?$')
             foreach ($relative in $expected.Keys) {
-                $candidate = Join-Path $installRoot ($relative -replace '/', '\\')
+                $candidate = Join-Path $installRoot ($relative -replace '/', '\')
                 if (-not (Test-Path -LiteralPath $candidate -PathType Leaf) -or $savedMap[$relative] -notmatch '^[a-f0-9]{40}$') { $validLocalState = $false; break }
             }
             $savedIconBlob = ([string]$savedState.iconGitBlobSha1).ToLowerInvariant()
@@ -1014,7 +1014,28 @@ namespace AMR {
     $priorIconsPath = $null
     $iconCacheMatchesSource = $false
     $iconCacheChecked = $false
-    if ($currentState -and $currentState.iconPath) {
+    # On an already committed local runtime, its icon generation is part of the
+    # previously verified installation. Reuse that exact generation immediately;
+    # do not compare it with a potentially newer/stale ZIP fingerprint or trigger
+    # a 1,000-file extraction during an ordinary application launch.
+    if ($script:AMRLocalFastPath -and $currentState -and $currentState.iconPath) {
+        $savedIconPath = [string]$currentState.iconPath
+        if ($savedIconPath -eq 'Icons' -or $savedIconPath -match '^Shared\\IconVersions\\[a-fA-F0-9]{40}(-[a-fA-F0-9]{8})?$') {
+            $savedCandidate = Join-Path $runtimeRoot ($savedIconPath -replace '/', '\')
+            $savedMarker = Join-Path $savedCandidate '.amr-icons-source.json'
+            $savedManifest = Join-Path $savedCandidate 'manifest.json'
+            if ((Test-Path -LiteralPath $savedCandidate -PathType Container) -and
+                (Test-Path -LiteralPath $savedMarker -PathType Leaf) -and
+                (Test-Path -LiteralPath $savedManifest -PathType Leaf)) {
+                $iconsPath = $savedCandidate
+                $priorIconsPath = $savedCandidate
+                $iconCacheMatchesSource = $true
+                $iconCacheChecked = $true
+                Write-AMRLauncherLog ('Local-first icon reuse: using the committed icon generation without ZIP fingerprint comparison, image recount, download, or extraction: ' + $iconsPath)
+            }
+        }
+    }
+    if (-not $iconsPath -and $currentState -and $currentState.iconPath) {
         $savedIconPath = [string]$currentState.iconPath
         if ($savedIconPath -eq 'Icons' -or $savedIconPath -match '^Shared\\IconVersions\\[a-fA-F0-9]{40}(-[a-fA-F0-9]{8})?$') {
             $savedCandidate = Join-Path $runtimeRoot ($savedIconPath -replace '/', '\')
@@ -1628,7 +1649,13 @@ try {
             $pointerTemp = $currentStatePath + '.' + [guid]::NewGuid().ToString('N') + '.tmp'
             [System.IO.File]::WriteAllText($pointerTemp,($pointer | ConvertTo-Json -Depth 4),(New-Object System.Text.UTF8Encoding($false)))
             if (Test-Path -LiteralPath $currentStatePath -PathType Leaf) {
-                [System.IO.File]::Replace($pointerTemp,$currentStatePath,$null)
+                # .NET Framework on Windows PowerShell 5.1 requires a valid backup
+                # path here; passing $null can throw "The path is not of a legal form."
+                $pointerBackup = $currentStatePath + '.' + [guid]::NewGuid().ToString('N') + '.bak'
+                [System.IO.File]::Replace($pointerTemp,$currentStatePath,$pointerBackup)
+                if (Test-Path -LiteralPath $pointerBackup -PathType Leaf) {
+                    Remove-Item -LiteralPath $pointerBackup -Force -ErrorAction SilentlyContinue
+                }
             } else {
                 [System.IO.File]::Move($pointerTemp,$currentStatePath)
             }
