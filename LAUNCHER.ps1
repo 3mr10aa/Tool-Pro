@@ -1,4 +1,4 @@
-#requires -Version 5.1
+﻿#requires -Version 5.1
 # AMR Tool-Pro | Premium animated bootstrap launcher | Parallel runtime + icon handoff
 # Windows PowerShell 5.1 | Public command: irm <raw-launcher-url> | iex
 
@@ -235,7 +235,7 @@ function Test-AMRIconCacheUsable {
 }
 
 function Test-AMRIconCacheMatchesSource {
-    param([string]$IconDirectory,[string]$SourceBlob,[int]$Minimum = 100)
+    param([string]$IconDirectory,[string]$SourceBlob,[int]$Minimum = 100,[switch]$TrustRecordedFingerprint)
     try {
         if (-not (Test-AMRIconCacheUsable -IconDirectory $IconDirectory -Minimum $Minimum)) { return $false }
         $markerPath = Join-Path $IconDirectory '.amr-icons-source.json'
@@ -253,7 +253,7 @@ function Test-AMRIconCacheMatchesSource {
             [string]$appMeta.file -ne 'Icons.zip' -or
             [long]$appMeta.size -ne (Get-Item -LiteralPath $archivePath).Length -or
             ([string]$appMeta.sha).ToLowerInvariant() -ne ([string]$SourceBlob).ToLowerInvariant()) { return $false }
-        if ((Get-AMRGitBlobSha1 -Path $archivePath) -ne ([string]$SourceBlob).ToLowerInvariant()) { return $false }
+        if (-not $TrustRecordedFingerprint -and (Get-AMRGitBlobSha1 -Path $archivePath) -ne ([string]$SourceBlob).ToLowerInvariant()) { return $false }
         $extensions = @(Get-AMRIconImageExtensions)
         $actualFiles = @(Get-ChildItem -LiteralPath $IconDirectory -File -ErrorAction Stop |
             Where-Object { $extensions -contains $_.Extension.ToLowerInvariant() -and $_.Length -gt 128 })
@@ -927,25 +927,61 @@ namespace AMR {
     Set-AMRLauncherProgress -Percent 0 -Status 'Getting everything ready for you...' -Detail 'Connecting securely to GitHub...'
     # Telemetry consent is intentionally deferred until after the main app is visible.
     # Nothing related to consent, collection, or networking can delay the app launch.
-    # Compare the installed runtime with the exact Git blob identities currently
-    # published on the repository's main branch before deciding whether to download.
+    # Local-first startup: a previously committed immutable version is trusted
+    # from its locally saved GitHub-verified manifest. Do not contact GitHub or
+    # re-hash the full application/DLL payload before opening an already verified
+    # installation. A separate source check is intentionally not on this path.
     $remoteTree = $null
     $sourceComparisonAvailable = $false
     $sourceComparisonError = $null
-    try {
-        Set-AMRLauncherProgress -Percent 3 -Status 'Checking your local AMR runtime...' -Detail 'Comparing installed files with the current GitHub source...'
-        $remoteTree = Get-AMRRemoteTree
-        $sourceComparisonAvailable = $true
-        Write-AMRLauncherLog ('GitHub source tree fetched. Commit=' + $remoteTree.Commit)
-    } catch {
-        $sourceComparisonError = $_.Exception.Message
-        Write-AMRLauncherLog ('GitHub source comparison unavailable: ' + $sourceComparisonError)
+    $localMatchesSource = $false
+    $script:AMRLocalFastPath = $false
+    $savedManifestPath = Join-Path $installRoot '.amr-runtime-state.json'
+    if ($currentState -and (Test-Path -LiteralPath $savedManifestPath -PathType Leaf)) {
+        try {
+            $savedState = Get-Content -LiteralPath $savedManifestPath -Raw -Encoding UTF8 | ConvertFrom-Json -ErrorAction Stop
+            $savedMap = @{}
+            foreach ($property in $savedState.files.PSObject.Properties) { $savedMap[$property.Name] = ([string]$property.Value).ToLowerInvariant() }
+            $validLocalState = ([string]$savedState.repository -eq '3mr10aa/Tool-Pro' -and [string]$savedState.branch -eq 'main' -and
+                [string]$currentState.repository -eq '3mr10aa/Tool-Pro' -and [string]$currentState.branch -eq 'main' -and
+                [string]$savedState.commit -eq [string]$currentState.commit -and
+                [string]$currentState.versionId -match '^[a-fA-F0-9]{40}(-[a-fA-F0-9]{8})?$')
+            foreach ($relative in $expected.Keys) {
+                $candidate = Join-Path $installRoot ($relative -replace '/', '\\')
+                if (-not (Test-Path -LiteralPath $candidate -PathType Leaf) -or $savedMap[$relative] -notmatch '^[a-f0-9]{40}$') { $validLocalState = $false; break }
+            }
+            $savedIconBlob = ([string]$savedState.iconGitBlobSha1).ToLowerInvariant()
+            if ($savedIconBlob -notmatch '^[a-f0-9]{40}$') { $validLocalState = $false }
+            if ($validLocalState) {
+                $savedMap['Icons.zip'] = $savedIconBlob
+                $remoteTree = [pscustomobject]@{ Commit=[string]$savedState.commit; Files=$savedMap }
+                $localMatchesSource = $true
+                $script:AMRLocalFastPath = $true
+                Write-AMRLauncherLog ('Local-first mode: selected committed runtime ' + [string]$currentState.versionId + '; skipped live GitHub requests and full runtime hashing.')
+                Set-AMRLauncherProgress -Percent 78 -Status 'Opening your installed AMR runtime...' -Detail 'Using your previously verified local version.'
+            }
+        } catch {
+            $localMatchesSource = $false
+            $script:AMRLocalFastPath = $false
+            Write-AMRLauncherLog ('Local runtime state could not be trusted; falling back to full source verification. ' + $_.Exception.Message)
+        }
     }
 
-    $localMatchesSource = $false
-    if ($sourceComparisonAvailable) {
+    if (-not $localMatchesSource) {
+        try {
+            Set-AMRLauncherProgress -Percent 3 -Status 'Checking your local AMR runtime...' -Detail 'Verifying the installed version against GitHub...'
+            $remoteTree = Get-AMRRemoteTree
+            $sourceComparisonAvailable = $true
+            Write-AMRLauncherLog ('GitHub source tree fetched. Commit=' + $remoteTree.Commit)
+        } catch {
+            $sourceComparisonError = $_.Exception.Message
+            Write-AMRLauncherLog ('GitHub source comparison unavailable: ' + $sourceComparisonError)
+        }
+    }
+
+    if (-not $localMatchesSource -and $sourceComparisonAvailable) {
         $localMatchesSource = Test-AMRRuntimeAgainstManifest -Root $installRoot -Manifest $remoteTree.Files
-    } else {
+    } elseif (-not $localMatchesSource) {
         # Offline fallback: only run a runtime that was previously verified against
         # GitHub and whose current bytes still match that saved source manifest.
         $savedManifestPath = Join-Path $installRoot '.amr-runtime-state.json'
@@ -990,7 +1026,7 @@ namespace AMR {
     }
     if (-not $iconsPath) {
         $legacyIconsCandidate = Join-Path $runtimeRoot 'Icons'
-        if (Test-AMRIconCacheMatchesSource -IconDirectory $legacyIconsCandidate -SourceBlob $remoteIconBlob -Minimum 100) {
+        if (Test-AMRIconCacheMatchesSource -IconDirectory $legacyIconsCandidate -SourceBlob $remoteIconBlob -Minimum 100 -TrustRecordedFingerprint:$script:AMRLocalFastPath) {
             $iconsPath = $legacyIconsCandidate
             $priorIconsPath = $legacyIconsCandidate
             $iconCacheMatchesSource = $true
@@ -1001,7 +1037,7 @@ namespace AMR {
         }
     }
     if (-not $iconCacheChecked) {
-        $iconCacheMatchesSource = Test-AMRIconCacheMatchesSource -IconDirectory $iconsPath -SourceBlob $remoteIconBlob -Minimum 100
+        $iconCacheMatchesSource = Test-AMRIconCacheMatchesSource -IconDirectory $iconsPath -SourceBlob $remoteIconBlob -Minimum 100 -TrustRecordedFingerprint:$script:AMRLocalFastPath
     }
     if (-not $iconCacheMatchesSource -and (Test-Path -LiteralPath $iconsPath -PathType Container)) {
         # Preserve a damaged/incomplete generation instead of overwriting or deleting it.
@@ -1085,8 +1121,8 @@ namespace AMR {
         if (-not (Test-Path -LiteralPath $iconLink -PathType Container)) {
             throw 'The selected runtime has no local Icons directory/junction.'
         }
-        Set-AMRLauncherProgress -Percent 92 -Status 'Your local AMR runtime is up to date...' -Detail 'All required files match GitHub. Launching without re-downloading.'
-        Write-AMRLauncherLog 'All local runtime files match current GitHub source; skipping downloads, staging, and replacement.'
+        Set-AMRLauncherProgress -Percent 92 -Status 'Your local AMR runtime is ready...' -Detail 'Launching the previously verified local version without waiting for GitHub.'
+        Write-AMRLauncherLog 'Local runtime accepted from its saved verified manifest; skipping GitHub comparison, downloads, staging, and replacement for this launch.'
         $stageRoot = $null
     } else {
         Set-AMRLauncherProgress -Percent 8 -Status 'A newer or different runtime was found...' -Detail 'Preparing an isolated version without touching the active runtime...'
