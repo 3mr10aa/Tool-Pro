@@ -508,7 +508,7 @@ function Write-AMRLog {
     param(
         [string]$Message,
         [ValidateSet('INFO','SUCCESS','WARNING','ERROR','DEBUG')][string]$Level='INFO',
-        [ValidateSet('System','Overview','Software','Customize','Tweaks','Cleanup','Network','Security','Optimize','Backup','Activation')][string]$Area='System'
+        [ValidateSet('System','Overview','Software','Customize','Tweaks','Cleanup','Network','Security','Optimize','Backup','Activation','Startup')][string]$Area='System'
     )
     $time = Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'
     $logLine = "[$time] [$Level] [$Area] $Message"
@@ -2654,6 +2654,9 @@ $RawApps = @(
 $script:IconArchiveUrl = 'https://raw.githubusercontent.com/3mr10aa/Tool-Pro/main/Icons.zip'
 # Keep the source ZIP and extracted images together in ProgramData\AMR-Utility\Icons.
 $script:IconMinFileCount = 100
+# Keep the approved image formats shared by the Software Catalog and Startup Apps.
+# WIC decodes formats when a matching Windows Imaging Component codec is available.
+$script:AMRIconImageExtensions = @('.png','.jpg','.jpeg','.jpe','.jfif','.bmp','.dib','.gif','.tif','.tiff','.ico','.webp','.wdp','.jxr','.hdp','.heic','.heif','.avif','.jp2','.j2k','.dds','.tga','.pcx','.ppm','.pgm','.pbm')
 $script:IconDownloadTimeoutSec = 45 # retained for worker compatibility; individual requests now use explicit bounded timeouts
 
 function Test-AMRIconCacheUsable {
@@ -2661,7 +2664,7 @@ function Test-AMRIconCacheUsable {
     try {
         if (-not (Test-Path -LiteralPath $script:IconDir -PathType Container)) { return $false }
         $count = @(Get-ChildItem -LiteralPath $script:IconDir -File -ErrorAction SilentlyContinue |
-            Where-Object { $_.Extension -match '^\.(png|jpe?g)$' -and $_.Length -gt 128 }).Count
+            Where-Object { ($script:AMRIconImageExtensions -contains $_.Extension.ToLowerInvariant()) -and $_.Length -gt 32 }).Count
         return ($count -ge $Minimum)
     } catch { return $false }
 }
@@ -2683,18 +2686,20 @@ function Get-AMRIconImageSource {
 
     try {
         $fullPath = [System.IO.Path]::GetFullPath($Path)
-        $bitmap = New-Object System.Windows.Media.Imaging.BitmapImage
-        $bitmap.BeginInit()
-        $bitmap.CacheOption = [System.Windows.Media.Imaging.BitmapCacheOption]::OnLoad
-        $bitmap.CreateOptions = [System.Windows.Media.Imaging.BitmapCreateOptions]::IgnoreImageCache
-        $bitmap.UriSource = New-Object System.Uri($fullPath, [System.UriKind]::Absolute)
-        $bitmap.EndInit()
-
-        if ($bitmap.CanFreeze) {
-            $bitmap.Freeze()
-        }
-
-        return $bitmap
+        # WIC selects a decoder from the file signature/content, not only its suffix.
+        # Optional formats work when the corresponding Windows WIC codec is installed.
+        $fileStream = [System.IO.File]::Open($fullPath,[System.IO.FileMode]::Open,[System.IO.FileAccess]::Read,[System.IO.FileShare]::ReadWrite)
+        try {
+            $decoder = [System.Windows.Media.Imaging.BitmapDecoder]::Create(
+                $fileStream,
+                [System.Windows.Media.Imaging.BitmapCreateOptions]::IgnoreImageCache,
+                [System.Windows.Media.Imaging.BitmapCacheOption]::OnLoad
+            )
+            if ($null -eq $decoder -or $decoder.Frames.Count -lt 1) { return $null }
+            $bitmap = $decoder.Frames[0]
+            if ($bitmap.CanFreeze) { $bitmap.Freeze() }
+            return $bitmap
+        } finally { $fileStream.Dispose() }
     }
     catch {
         Write-AMRLog "Could not load app icon '$Path': $($_.Exception.Message)" WARNING Software
@@ -2718,7 +2723,7 @@ $RawApps | ForEach-Object {
             $localIconIds += @($_.IconAliases | ForEach-Object { [string]$_ })
         }
         foreach ($localIconId in $localIconIds) {
-            foreach ($localIconExtension in @('.png','.jpg','.jpeg')) {
+            foreach ($localIconExtension in $script:AMRIconImageExtensions) {
                 $localIconPath = Join-Path $script:IconDir ($localIconId + $localIconExtension)
                 if (Test-Path -LiteralPath $localIconPath -PathType Leaf) {
                     $iconSource = Get-AMRIconImageSource -Path $localIconPath
@@ -2756,6 +2761,7 @@ $RawApps | ForEach-Object {
 }
 
 $loadedIconCount = @($script:SoftwareCatalog | Where-Object { $null -ne $_.Icon }).Count
+$script:AMRStartupPhaseTimings['IconCatalogReadyMs'] = [int]$script:AMRStartupStopwatch.ElapsedMilliseconds
 Write-AMRLog ("Startup catalog ready: {0} preloaded icons from local cache. Cache='{1}'." -f $loadedIconCount,$script:IconDir) INFO Software
 
 # --- 4. FULL WPF XAML INTERFACE WITH PROGRESS BAR & 27 CUSTOMIZE TOOLS ---
@@ -10004,6 +10010,19 @@ $kitTabs = C 'ToolKitSubTabs'
     $script:StartupEntryWorkQueued = $false
     $script:StartupAutoFirstRefreshDone = $false
     $script:StartupRenderState = $null
+
+    # StrictMode-safe state for the approved deferred Startup discovery pipeline.
+    $script:StartupAppxState = $null
+    $script:StartupTaskState = $null
+    $script:StartupCimState = $null
+    $script:StartupAppxTimer = $null
+    $script:StartupTaskTimer = $null
+    $script:StartupCimTimer = $null
+    $script:StartupRenderTimer = $null
+    $script:StartupIconTimer = $null
+    $script:StartupIconQueue = $null
+    $script:StartupPackageIconIndex = @{}
+    $script:StartupBrowserShortcutIconIndex = @{}
 
     $overviewTabs = C 'OverviewSubTabs'
     if ($overviewTabs) {
@@ -28061,28 +28080,86 @@ $overviewTabsForRefresh.Add_SelectionChanged({
 # ----------------------------------------------------------
 function Get-AMRStartupApprovalState {
     param([string]$ApprovalPath,[string]$ValueName)
-    try {
-        $key=Get-Item -LiteralPath $ApprovalPath -ErrorAction Stop
-        $bytes=$key.GetValue($ValueName,$null,[Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
-        if($bytes -is [byte[]] -and $bytes.Length -ge 4){
-            if($bytes[0] -eq 3 -or $bytes[0] -eq 6){return $false}
-            if($bytes[0] -eq 2){return $true}
+    if([string]::IsNullOrWhiteSpace($ApprovalPath) -or [string]::IsNullOrWhiteSpace($ValueName)){return $null}
+    $hiveName='CurrentUser';$relative=''
+    if($ApprovalPath -match '^(HKLM|HKEY_LOCAL_MACHINE):?\\?(.*)$'){$hiveName='LocalMachine';$relative=$Matches[2]}
+    elseif($ApprovalPath -match '^(HKCU|HKEY_CURRENT_USER):?\\?(.*)$'){$hiveName='CurrentUser';$relative=$Matches[2]}
+    else{return $null}
+    $relative=$relative -replace '^[\\]+','' -replace '/','\'
+    $base=$null;$key=$null
+    try{
+        $hive=if($hiveName -eq 'CurrentUser'){[Microsoft.Win32.RegistryHive]::CurrentUser}else{[Microsoft.Win32.RegistryHive]::LocalMachine}
+        $view=if([Environment]::Is64BitOperatingSystem){[Microsoft.Win32.RegistryView]::Registry64}else{[Microsoft.Win32.RegistryView]::Registry32}
+        $base=[Microsoft.Win32.RegistryKey]::OpenBaseKey($hive,$view)
+        $key=$base.OpenSubKey($relative,$false)
+        if(-not $key){return $null}
+        $data=$key.GetValue($ValueName,$null,[Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+        if($null -eq $data){return $null}
+        if($data -is [byte[]] -and $data.Length -ge 1){
+            if($data[0] -eq 3 -or $data[0] -eq 6){return $false}
+            if($data[0] -eq 2 -or $data[0] -eq 7){return $true}
         }
-    } catch {}
+        return $null
+    }catch{
+        try{Write-AMRLog ('Startup approval read warning: '+$ApprovalPath+'\\'+$ValueName+' · '+$_.Exception.Message) WARNING System}catch{}
+        return $null
+    }finally{if($key){try{$key.Dispose()}catch{}};if($base){try{$base.Dispose()}catch{}}}
+}
+
+function Set-AMRStartupApprovalValue {
+    param([string]$ApprovalPath,[string]$ValueName,[bool]$Enabled)
+    if([string]::IsNullOrWhiteSpace($ApprovalPath) -or [string]::IsNullOrWhiteSpace($ValueName)){throw 'Startup approval registration is incomplete.'}
+    $hiveName='CurrentUser';$relative=''
+    if($ApprovalPath -match '^(HKLM|HKEY_LOCAL_MACHINE):?\\?(.*)$'){$hiveName='LocalMachine';$relative=$Matches[2]}
+    elseif($ApprovalPath -match '^(HKCU|HKEY_CURRENT_USER):?\\?(.*)$'){$hiveName='CurrentUser';$relative=$Matches[2]}
+    else{throw 'Unsupported StartupApproved registry hive.'}
+    $relative=$relative -replace '^[\\]+','' -replace '/','\'
+    $base=$null;$key=$null
+    try{
+        $hive=if($hiveName -eq 'CurrentUser'){[Microsoft.Win32.RegistryHive]::CurrentUser}else{[Microsoft.Win32.RegistryHive]::LocalMachine}
+        $view=if([Environment]::Is64BitOperatingSystem){[Microsoft.Win32.RegistryView]::Registry64}else{[Microsoft.Win32.RegistryView]::Registry32}
+        $base=[Microsoft.Win32.RegistryKey]::OpenBaseKey($hive,$view)
+        $key=$base.CreateSubKey($relative)
+        if(-not $key){throw 'Windows did not open the StartupApproved registry key.'}
+        $stateByte=if($Enabled){[byte]2}else{[byte]3}
+        $data=[byte[]]@($stateByte,0,0,0,0,0,0,0,0,0,0,0)
+        $key.SetValue($ValueName,$data,[Microsoft.Win32.RegistryValueKind]::Binary)
+    }finally{if($key){try{$key.Dispose()}catch{}};if($base){try{$base.Dispose()}catch{}}}
+    $verified=Get-AMRStartupApprovalState -ApprovalPath $ApprovalPath -ValueName $ValueName
+    if($null -eq $verified -or [bool]$verified -ne [bool]$Enabled){throw 'Windows did not confirm the requested startup state.'}
     return $true
 }
 
 function Set-AMRStartupEntryEnabled {
     param([Parameter(Mandatory=$true)][object]$Entry,[Parameter(Mandatory=$true)][bool]$Enabled)
     if(-not $Entry.CanToggle){throw 'Windows does not expose a supported StartupApproved control for this entry.'}
-    $approvalPath=[string]$Entry.ApprovalPath
-    if([string]::IsNullOrWhiteSpace($approvalPath)){throw 'Startup approval registry path is unavailable.'}
-    if(-not (Test-Path -LiteralPath $approvalPath)){New-Item -Path $approvalPath -Force -ErrorAction Stop | Out-Null}
-    $stateByte=if($Enabled){[byte]2}else{[byte]3}
-    $data=[byte[]]@($stateByte,0,0,0,0,0,0,0,0,0,0,0)
-    New-ItemProperty -LiteralPath $approvalPath -Name ([string]$Entry.ApprovalValueName) -Value $data -PropertyType Binary -Force -ErrorAction Stop | Out-Null
-    $verified=Get-AMRStartupApprovalState -ApprovalPath $approvalPath -ValueName ([string]$Entry.ApprovalValueName)
-    if([bool]$verified -ne [bool]$Enabled){throw 'Windows did not confirm the requested startup state.'}
+    $registrations=@()
+    if($Entry.PSObject.Properties['Registrations'] -and $Entry.Registrations){$registrations=@($Entry.Registrations)}else{$registrations=@($Entry)}
+    foreach($registration in $registrations){if(-not $registration.CanToggle){throw 'At least one grouped registration has no supported StartupApproved control.'}}
+    $primary=$null
+    $primaryIdentity=''
+    if($Entry.PSObject.Properties['PrimaryRegistrationIdentity']){$primaryIdentity=[string]$Entry.PrimaryRegistrationIdentity}
+    if($primaryIdentity){$primary=$registrations | Where-Object {([string]$_.RegistrationIdentity -eq $primaryIdentity) -or ([string]$_.Identity -eq $primaryIdentity)} | Select-Object -First 1}
+    if(-not $primary){$primary=$registrations | Select-Object -First 1}
+    $oldStates=@()
+    foreach($registration in $registrations){
+        $oldEnabled=if($registration.PSObject.Properties['RegistrationEnabled']){[bool]$registration.RegistrationEnabled}else{[bool]$registration.Enabled}
+        $oldStates+=,[pscustomobject]@{Entry=$registration;Enabled=$oldEnabled}
+    }
+    try{
+        foreach($registration in $registrations){
+            # A duplicate 32/64 registration is represented by one card. Turning
+            # it on selects one valid canonical registration; turning it off
+            # disables every registration in the group.
+            $targetEnabled=($Enabled -and [object]::ReferenceEquals($registration,$primary))
+            [void](Set-AMRStartupApprovalValue -ApprovalPath ([string]$registration.ApprovalPath) -ValueName ([string]$registration.ApprovalValueName) -Enabled $targetEnabled)
+            $registration.Enabled=[bool]$targetEnabled
+            $registration | Add-Member -NotePropertyName RegistrationEnabled -NotePropertyValue ([bool]$targetEnabled) -Force
+        }
+    }catch{
+        foreach($old in $oldStates){try{[void](Set-AMRStartupApprovalValue -ApprovalPath ([string]$old.Entry.ApprovalPath) -ValueName ([string]$old.Entry.ApprovalValueName) -Enabled ([bool]$old.Enabled));$old.Entry.Enabled=[bool]$old.Enabled;$old.Entry | Add-Member -NotePropertyName RegistrationEnabled -NotePropertyValue ([bool]$old.Enabled) -Force}catch{}}
+        throw
+    }
     $Entry.Enabled=[bool]$Enabled
     return $true
 }
@@ -28110,8 +28187,8 @@ function Get-AMRStartupInstalledMatch {
     $exeNorm=if($exe){($exe -replace '[^a-zA-Z0-9]','').ToLowerInvariant()}else{''}
     foreach($record in $inventory){
         $recordNorm=([string]$record.Name -replace '[^a-zA-Z0-9]','').ToLowerInvariant()
-        if($norm -and ($recordNorm -eq $norm -or ($recordNorm.Length -ge 4 -and $norm.Contains($recordNorm)) -or ($norm.Length -ge 4 -and $recordNorm.Contains($norm)))){return $record}
-        if($exeNorm -and ($recordNorm -eq $exeNorm -or ($recordNorm.Length -ge 4 -and $exeNorm.Contains($recordNorm)))){return $record}
+        if($norm -and $recordNorm -and $recordNorm -eq $norm){return $record}
+        if($exeNorm -and $recordNorm -and $recordNorm -eq $exeNorm){return $record}
     }
     return $null
 }
@@ -28121,12 +28198,199 @@ function Get-AMRStartupExecutablePath {
     if ([string]::IsNullOrWhiteSpace($CommandText)) { return '' }
     try {
         $expanded=[Environment]::ExpandEnvironmentVariables($CommandText.Trim())
-        $m=[regex]::Match($expanded,'(?i)"(?<quoted>[^\"]+\.exe)"|(?<plain>[A-Z]:\\[^\s,]+?\.exe)')
-        if($m.Success){$candidate=if($m.Groups['quoted'].Success){$m.Groups['quoted'].Value}else{$m.Groups['plain'].Value};return $candidate.Trim('"')}
+        $m=[regex]::Match($expanded,'(?i)^\s*"(?<quoted>[^"]+\.exe)"')
+        if($m.Success){return $m.Groups['quoted'].Value.Trim('"')}
+        $m=[regex]::Match($expanded,'(?i)^\s*(?<plain>(?:[A-Z]:\\|\\\\).+?\.exe)(?:\s|$)')
+        if($m.Success){return $m.Groups['plain'].Value.Trim('"')}
         $m=[regex]::Match($expanded,'(?i)(?<plain>[^\s]+\.exe)')
         if($m.Success){return $m.Groups['plain'].Value.Trim('"')}
     } catch {}
     return ''
+}
+
+function Get-AMRStartupPwaDisplayName {
+    param([string]$CommandText)
+    if([string]::IsNullOrWhiteSpace($CommandText) -or $CommandText -notmatch '(?i)--app-id'){return ''}
+    $expanded=[Environment]::ExpandEnvironmentVariables($CommandText)
+    $idMatch=[regex]::Match($expanded,'(?i)--app-id(?:=|\s+)(?<id>[a-z0-9_-]{8,})')
+    if(-not $idMatch.Success){return ''}
+    $appId=$idMatch.Groups['id'].Value.ToLowerInvariant()
+    $cacheVariable=Get-Variable -Name StartupBrowserShortcutIndex -Scope Script -ErrorAction SilentlyContinue
+    if(-not $cacheVariable -or $cacheVariable.Value -isnot [hashtable]){$script:StartupBrowserShortcutIndex=@{}}
+    if(-not $script:StartupBrowserShortcutIndex.ContainsKey('__loaded')){
+        $index=@{}
+        $iconIndex=@{}
+        $shell=$null
+        try{
+            $shell=New-Object -ComObject WScript.Shell
+            $roots=@((Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs'),(Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs'))
+            foreach($root in $roots){
+                if(-not(Test-Path -LiteralPath $root -PathType Container)){continue}
+                foreach($shortcutFile in @(Get-ChildItem -LiteralPath $root -Filter '*.lnk' -File -Recurse -ErrorAction SilentlyContinue)){
+                    try{
+                        $shortcut=$shell.CreateShortcut($shortcutFile.FullName)
+                        $shortcutArgs=[string]$shortcut.Arguments
+                        if($shortcutArgs -notmatch '(?i)--app-id'){continue}
+                        $shortcutId=[regex]::Match($shortcutArgs,'(?i)--app-id(?:=|\s+)(?<id>[a-z0-9_-]{8,})')
+                        if($shortcutId.Success){
+                            $shortcutAppId=$shortcutId.Groups['id'].Value.ToLowerInvariant()
+                            if(-not $index.ContainsKey($shortcutAppId)){$index[$shortcutAppId]=$shortcutFile.BaseName}
+                            if(-not $iconIndex.ContainsKey($shortcutAppId)){
+                                $iconIndex[$shortcutAppId]=[pscustomobject]@{IconLocation=[string]$shortcut.IconLocation;TargetPath=[string]$shortcut.TargetPath;ShortcutPath=[string]$shortcutFile.FullName}
+                            }
+                        }
+                    }catch{}
+                }
+            }
+        }catch{}
+        finally{if($shell){try{[void][Runtime.InteropServices.Marshal]::ReleaseComObject($shell)}catch{}}}
+        $index['__loaded']=$true
+        $script:StartupBrowserShortcutIndex=$index
+        $script:StartupBrowserShortcutIconIndex=$iconIndex
+    }
+    if($script:StartupBrowserShortcutIndex.ContainsKey($appId)){return [string]$script:StartupBrowserShortcutIndex[$appId]}
+    return ''
+}
+
+function Get-AMRStartupFriendlyName {
+    param([string]$FallbackName,[string]$CommandText)
+    $pwaName=Get-AMRStartupPwaDisplayName -CommandText $CommandText
+    if($pwaName){return $pwaName}
+    return [string]$FallbackName
+}
+
+function Get-AMRStartupLogicalIdentity {
+    param([object]$Entry)
+    if(-not $Entry){return ''}
+    $command=[string]$Entry.Command
+    $exe=Get-AMRStartupExecutablePath -CommandText $command
+    $arguments=''
+    if($exe){
+        $expanded=[Environment]::ExpandEnvironmentVariables($command)
+        $at=$expanded.IndexOf($exe,[StringComparison]::OrdinalIgnoreCase)
+        if($at -ge 0){$arguments=$expanded.Substring($at+$exe.Length)}
+    }
+    $arguments=($arguments -replace '\s+',' ').Trim().Trim('"').ToLowerInvariant()
+    $company='';$product='';$original='';$exeName=''
+    if($exe){
+        $exeName=[IO.Path]::GetFileNameWithoutExtension($exe).ToLowerInvariant()
+        $cacheVariable=Get-Variable -Name StartupFileIdentityCache -Scope Script -ErrorAction SilentlyContinue
+        if(-not $cacheVariable -or $cacheVariable.Value -isnot [hashtable]){$script:StartupFileIdentityCache=@{}}
+        $cacheKey=$exe.ToLowerInvariant()
+        if($script:StartupFileIdentityCache.ContainsKey($cacheKey)){$metadata=$script:StartupFileIdentityCache[$cacheKey]}
+        else{
+            $metadata=[pscustomobject]@{Company='';Product='';Original=''}
+            try{
+                if(Test-Path -LiteralPath $exe -PathType Leaf){
+                    $info=[Diagnostics.FileVersionInfo]::GetVersionInfo($exe)
+                    $metadata.Company=([string]$info.CompanyName).Trim().ToLowerInvariant()
+                    $metadata.Product=([string]$info.ProductName).Trim().ToLowerInvariant()
+                    $metadata.Original=([string]$info.OriginalFilename).Trim().ToLowerInvariant()
+                    if(-not $metadata.Product){$metadata.Product=([string]$info.FileDescription).Trim().ToLowerInvariant()}
+                }
+            }catch{}
+            $script:StartupFileIdentityCache[$cacheKey]=$metadata
+        }
+        $company=[string]$metadata.Company;$product=[string]$metadata.Product;$original=[string]$metadata.Original
+    }
+    if($company -and $product){$fileIdentity=if($original){$original}else{$exeName};return ('PRODUCT|'+$company+'|'+$product+'|'+$fileIdentity+'|'+$arguments)}
+    $name=([string]$Entry.Name -replace '[^a-zA-Z0-9]','').ToLowerInvariant()
+    if(-not $name){$name=([string]$Entry.EntryName -replace '[^a-zA-Z0-9]','').ToLowerInvariant()}
+    $raw=([Environment]::ExpandEnvironmentVariables($command) -replace '\s+',' ').Trim().ToLowerInvariant()
+    if(-not $exe){if($raw){return ('COMMAND|'+$name+'|'+$raw)};return ''}
+    if($name -or $exeName){return ('APP|'+$name+'|'+$exeName+'|'+$arguments)}
+    if($raw){return ('COMMAND|'+$name+'|'+$raw)}
+    return ''
+}
+
+function Merge-AMRStartupEntries {
+    param([object[]]$Entries)
+    $groups=@{}
+    $order=New-Object 'System.Collections.Generic.List[string]'
+    foreach($entry in @($Entries)){
+        if(-not $entry){continue}
+        $logical=Get-AMRStartupLogicalIdentity -Entry $entry
+        if([string]::IsNullOrWhiteSpace($logical)){$logical='UNIQUE|'+[string]$entry.Identity}
+        if(-not $groups.ContainsKey($logical)){$groups[$logical]=New-Object 'System.Collections.Generic.List[object]';$order.Add($logical)}
+        $groups[$logical].Add($entry)
+    }
+    $merged=New-Object 'System.Collections.Generic.List[object]'
+    foreach($logical in $order){
+        $members=@($groups[$logical].ToArray())
+        foreach($member in $members){
+            if(-not $member.PSObject.Properties['RegistrationIdentity']){$member | Add-Member -NotePropertyName RegistrationIdentity -NotePropertyValue ([string]$member.Identity) -Force}
+            if(-not $member.PSObject.Properties['RegistrationEnabled']){$member | Add-Member -NotePropertyName RegistrationEnabled -NotePropertyValue ([bool]$member.Enabled) -Force}
+        }
+        if($members.Count -eq 1){
+            $members[0] | Add-Member -NotePropertyName LogicalIdentity -NotePropertyValue $logical -Force
+            [void]$merged.Add($members[0]);continue
+        }
+        # Collapse only exact logical-app duplicates with a supported state control.
+        # Different executable products or different command arguments stay separate.
+        if(@($members | Where-Object {-not $_.CanToggle}).Count -gt 0){
+            foreach($member in $members){$member | Add-Member -NotePropertyName LogicalIdentity -NotePropertyValue ($logical+'|'+[string]$member.Identity) -Force;[void]$merged.Add($member)}
+            continue
+        }
+        $knownMembers=@($members | Where-Object {$_.StateKnown})
+        $groupStateKnown=($knownMembers.Count -eq $members.Count)
+        $enabledMembers=@($members | Where-Object {$_.StateKnown -and $_.RegistrationEnabled})
+        $preferred=$enabledMembers | Where-Object {$_.Source -match '64-bit'} | Select-Object -First 1
+        if(-not $preferred -and $enabledMembers.Count -gt 0){$preferred=$enabledMembers | Select-Object -First 1}
+        if(-not $preferred){
+            $preferred=$members | Where-Object {$_.Source -match '64-bit'} | Where-Object { $p=Get-AMRStartupExecutablePath -CommandText ([string]$_.Command); $p -and (Test-Path -LiteralPath $p -PathType Leaf) } | Select-Object -First 1
+        }
+        if(-not $preferred){$preferred=$members | Where-Object { $p=Get-AMRStartupExecutablePath -CommandText ([string]$_.Command); $p -and (Test-Path -LiteralPath $p -PathType Leaf) } | Select-Object -First 1}
+        if(-not $preferred){$preferred=$members | Select-Object -First 1}
+        $sourceParts=New-Object 'System.Collections.Generic.List[string]'
+        foreach($member in $members){
+            $label=([string]$member.Source -replace ' · 32-bit','' -replace ' · 64-bit','')
+            if(-not $sourceParts.Contains($label)){$sourceParts.Add($label)}
+        }
+        $detailParts=@($members | ForEach-Object {([string]$_.Source)+' ['+$(if($_.RegistrationEnabled){'ON'}else{'OFF'})+'] => '+[string]$_.Command})
+        $groupEntry=[pscustomobject]@{
+            Name=[string]$preferred.Name;EntryName=[string]$preferred.EntryName
+            Command=[string]$preferred.Command;Source=($sourceParts -join ' + ')
+            Kind='LogicalGroup';ApprovalPath=[string]$preferred.ApprovalPath
+            ApprovalValueName=[string]$preferred.ApprovalValueName
+            Enabled=($enabledMembers.Count -gt 0);StateKnown=$groupStateKnown;CanToggle=$true
+            InstalledMatch=[bool]$preferred.InstalledMatch;InstalledRecord=$preferred.InstalledRecord
+            Identity=('LogicalApp|'+$logical);LogicalIdentity=$logical
+            Registrations=$members;PrimaryRegistrationIdentity=[string]$preferred.RegistrationIdentity
+            RegistrationDetails=$detailParts;ToolTipCommand=([string]$preferred.Command+"`n`nConsolidated registrations:`n"+($detailParts -join "`n"))
+            IconSource=$preferred.IconSource;IconLocation=$preferred.IconLocation
+        }
+        [void]$merged.Add($groupEntry)
+        try{Write-AMRLog ('Startup deduplication · Consolidated '+$members.Count+' registry registrations into one logical app: '+[string]$preferred.Name+'.') INFO System}catch{}
+    }
+    return @($merged.ToArray() | Sort-Object @{Expression={if($_.Enabled){0}else{1}}},Name)
+}
+
+function Get-AMRStartupIconFromPath {
+    param([string]$IconPath)
+    if([string]::IsNullOrWhiteSpace($IconPath)){return $null}
+    try {
+        $path=[Environment]::ExpandEnvironmentVariables(($IconPath -replace ',\s*-?\d+\s*$','').Trim().Trim('"'))
+        if(-not(Test-Path -LiteralPath $path -PathType Leaf)){return $null}
+        $extension=[IO.Path]::GetExtension($path).ToLowerInvariant()
+        if($script:AMRIconImageExtensions -contains $extension){
+            $image=Get-AMRIconImageSource -Path $path
+            if($image){return $image}
+        }
+        if($extension -eq '.exe'){
+            try {
+                Add-Type -AssemblyName System.Drawing -ErrorAction SilentlyContinue
+                $icon=[System.Drawing.Icon]::ExtractAssociatedIcon($path)
+                if($icon){
+                    try {
+                        $bitmap=[System.Windows.Interop.Imaging]::CreateBitmapSourceFromHIcon($icon.Handle,[System.Windows.Int32Rect]::Empty,[System.Windows.Media.Imaging.BitmapSizeOptions]::FromWidthAndHeight(32,32))
+                        if($bitmap.CanFreeze){$bitmap.Freeze()}
+                        return $bitmap
+                    } finally {$icon.Dispose()}
+                }
+            } catch {}
+        }
+    } catch {}
+    return $null
 }
 
 function Get-AMRStartupIconSource {
@@ -28134,44 +28398,97 @@ function Get-AMRStartupIconSource {
     try {
         $candidateIds=New-Object 'System.Collections.Generic.List[string]'
         if($Entry.InstalledMatch -and $Entry.InstalledRecord){
-            foreach($prop in @('Id','AppId','PackageId')){try{$v=[string]$Entry.InstalledRecord.$prop;if($v){$candidateIds.Add($v)}}catch{}}
+            foreach($prop in @('Id','AppId','PackageId','Name')){try{$v=[string]$Entry.InstalledRecord.$prop;if($v){$candidateIds.Add($v)}}catch{}}
         }
-        foreach($v in @([string]$Entry.EntryName,[string]$Entry.Name)){
+        $entryPackageFamily='';if($Entry.PSObject.Properties['PackageFamilyName']){$entryPackageFamily=[string]$Entry.PackageFamilyName}
+        foreach($v in @([string]$Entry.EntryName,[string]$Entry.Name,$entryPackageFamily)){
             if($v){$safe=($v -replace '[\\/:*?"<>|]','_').Trim();if($safe){$candidateIds.Add($safe)}}
         }
+        # Known product aliases bridge Task Manager labels and the canonical
+        # Software Catalog icon names used by the local archive.
+        $aliasRules=@(
+            @{Pattern='(?i)(microsoft\s*edge|edge\s*auto|msedge)';Ids=@('Microsoft.Edge','MicrosoftEdge','Edge','msedge')},
+            @{Pattern='(?i)(onedrive|one\s*drive)';Ids=@('Microsoft.OneDrive','OneDrive','OneDriveSetup')},
+            @{Pattern='(?i)linkedin';Ids=@('LinkedIn','LinkedInDesktop')},
+            @{Pattern='(?i)(chatgpt|openai)';Ids=@('OpenAI.ChatGPT','ChatGPT','OpenAI')},
+            @{Pattern='(?i)(cross\s*device|crossdevice|phoneexperiencehost)';Ids=@('Microsoft.CrossDevice','CrossDevice','CrossDeviceExperienceHost','PhoneExperienceHost')},
+            @{Pattern='(?i)(windows\s*terminal|terminal|windowsterminal|\bwt\.exe\b)';Ids=@('Microsoft.WindowsTerminal','WindowsTerminal','Terminal','wt')},
+            @{Pattern='(?i)(xbox|gamingapp)';Ids=@('Microsoft.XboxApp','Microsoft.GamingApp','Xbox','GamingApp')},
+            @{Pattern='(?i)instagram';Ids=@('Instagram','Facebook.Instagram')},
+            @{Pattern='(?i)whatsapp';Ids=@('WhatsApp','5319275A.WhatsAppDesktop','WhatsAppDesktop')},
+            @{Pattern='(?i)(phone\s*link|yourphone)';Ids=@('Microsoft.YourPhone','YourPhone','PhoneLink')},
+            @{Pattern='(?i)copilot';Ids=@('Microsoft.Copilot','Copilot')},
+            @{Pattern='(?i)(localsend|local\s*send)';Ids=@('LocalSend','LocalSend.LocalSend')}
+        )
+        $identityText=([string]$Entry.Name+' '+[string]$Entry.EntryName+' '+[string]$Entry.Command+' '+$entryPackageFamily)
+        foreach($rule in $aliasRules){if($identityText -match $rule.Pattern){foreach($alias in $rule.Ids){$candidateIds.Add($alias)}}}
+        $iconRoots=@($script:IconDir)
+        # Startup Apps may keep a dedicated cache beside the shared Software Catalog cache.
+        $startupCacheRoot=Join-Path $script:IconDir 'StartupApps'
+        if(Test-Path -LiteralPath $startupCacheRoot -PathType Container){$iconRoots+= $startupCacheRoot}
         foreach($id in @($candidateIds | Select-Object -Unique)){
-            foreach($ext in @('.png','.jpg','.jpeg','.ico')){
-                $iconPath=Join-Path $script:IconDir ($id+$ext)
-                if(Test-Path -LiteralPath $iconPath -PathType Leaf){
-                    $source=Get-AMRIconImageSource -Path $iconPath
-                    if($source){return $source}
+            foreach($iconRoot in $iconRoots){
+                foreach($ext in $script:AMRIconImageExtensions){
+                    $iconPath=Join-Path $iconRoot ($id+$ext)
+                    if(Test-Path -LiteralPath $iconPath -PathType Leaf){
+                        $source=Get-AMRIconImageSource -Path $iconPath
+                        if($source){return $source}
+                    }
                 }
             }
         }
-        $iconHint=[string]$Entry.IconLocation
-        if($iconHint){
-            $iconHint=[Environment]::ExpandEnvironmentVariables(($iconHint -replace ',\s*-?\d+\s*$','').Trim('"'))
-            if(Test-Path -LiteralPath $iconHint -PathType Leaf){
-                $hintSource=Get-AMRIconImageSource -Path $iconHint
-                if($hintSource){return $hintSource}
+        # Packaged-app logos are indexed by package family and Start-menu name
+        # by the deferred AppX worker, so apps without StartupTask manifests can
+        # still reuse their real package artwork here.
+        if($script:StartupPackageIconIndex -is [hashtable]){
+            foreach($lookupName in @([string]$Entry.Name,[string]$Entry.EntryName,$entryPackageFamily)){
+                $lookupKey=($lookupName -replace '[^a-zA-Z0-9]','').ToLowerInvariant()
+                if($lookupKey -and $script:StartupPackageIconIndex.ContainsKey($lookupKey)){
+                    $packageIcon=Get-AMRStartupIconFromPath -IconPath ([string]$script:StartupPackageIconIndex[$lookupKey])
+                    if($packageIcon){return $packageIcon}
+                }
             }
         }
-        $exe=Get-AMRStartupExecutablePath -CommandText ([string]$Entry.Command)
-        if($exe){
-            $exe=[Environment]::ExpandEnvironmentVariables($exe)
-            if(Test-Path -LiteralPath $exe -PathType Leaf){
-                try {
-                    Add-Type -AssemblyName System.Drawing -ErrorAction SilentlyContinue
-                    $icon=[System.Drawing.Icon]::ExtractAssociatedIcon($exe)
-                    if($icon){
-                        try {
-                            $bitmap=[System.Windows.Interop.Imaging]::CreateBitmapSourceFromHIcon($icon.Handle,[System.Windows.Int32Rect]::Empty,[System.Windows.Media.Imaging.BitmapSizeOptions]::FromWidthAndHeight(32,32))
-                            if($bitmap.CanFreeze){$bitmap.Freeze()}
-                            return $bitmap
-                        } finally {$icon.Dispose()}
-                    }
-                } catch {}
+        # Registry-installed desktop applications expose their canonical icon
+        # in the uninstall record. Read it before trying a command-line guess.
+        if($Entry.InstalledRecord){
+            foreach($prop in @('DisplayIcon','IconLocation')){
+                try{$registeredIcon=[string]$Entry.InstalledRecord.$prop;if($registeredIcon){$source=Get-AMRStartupIconFromPath -IconPath $registeredIcon;if($source){return $source}}}catch{}
             }
+        }
+        $entryDisplayIcon='';if($Entry.PSObject.Properties['DisplayIcon']){$entryDisplayIcon=[string]$Entry.DisplayIcon}
+        foreach($iconHint in @([string]$Entry.IconLocation,$entryDisplayIcon)){
+            if($iconHint){$hintSource=Get-AMRStartupIconFromPath -IconPath $iconHint;if($hintSource){return $hintSource}}
+        }
+        # Chromium/Edge PWAs launch through the browser EXE, but their actual
+        # artwork lives in the matching Start-menu shortcut's IconLocation.
+        $pwaIdMatch=[regex]::Match([string]$Entry.Command,'(?i)--app-id(?:=|\s+)(?<id>[a-z0-9_-]{8,})')
+        $isPwaEntry=$pwaIdMatch.Success
+        if($isPwaEntry){[void](Get-AMRStartupPwaDisplayName -CommandText ([string]$Entry.Command))}
+        if($pwaIdMatch.Success -and $script:StartupBrowserShortcutIconIndex -is [hashtable]){
+            $pwaId=$pwaIdMatch.Groups['id'].Value.ToLowerInvariant()
+            if($script:StartupBrowserShortcutIconIndex.ContainsKey($pwaId)){
+                $pwaShortcutInfo=$script:StartupBrowserShortcutIconIndex[$pwaId]
+                foreach($pwaIconPath in @([string]$pwaShortcutInfo.IconLocation,[string]$pwaShortcutInfo.TargetPath)){
+                    if($pwaIconPath){$pwaIcon=Get-AMRStartupIconFromPath -IconPath $pwaIconPath;if($pwaIcon){return $pwaIcon}}
+                }
+            }
+        }
+        # Some startup registrations point at a shortcut rather than an EXE.
+        $entryShortcutPath='';if($Entry.PSObject.Properties['ShortcutPath']){$entryShortcutPath=[string]$Entry.ShortcutPath}
+        $installedShortcutPath='';if($Entry.InstalledRecord -and $Entry.InstalledRecord.PSObject.Properties['ShortcutPath']){$installedShortcutPath=[string]$Entry.InstalledRecord.ShortcutPath}
+        foreach($shortcutPath in @($entryShortcutPath,$installedShortcutPath)){
+            if($shortcutPath -and (Test-Path -LiteralPath $shortcutPath -PathType Leaf) -and [IO.Path]::GetExtension($shortcutPath) -ieq '.lnk'){
+                $shell=$null
+                try{$shell=New-Object -ComObject WScript.Shell;$shortcut=$shell.CreateShortcut($shortcutPath);$shortcutIcon=[string]$shortcut.IconLocation;if($shortcutIcon){$source=Get-AMRStartupIconFromPath -IconPath $shortcutIcon;if($source){return $source}};if($shortcut.TargetPath){$source=Get-AMRStartupIconFromPath -IconPath ([string]$shortcut.TargetPath);if($source){return $source}}}catch{}finally{if($shell){try{[void][Runtime.InteropServices.Marshal]::ReleaseComObject($shell)}catch{}}}
+            }
+        }
+        $isPackagedShellCommand=([string]$Entry.Command -match '(?i)(shell:AppsFolder|^Appx:)')
+        # Do not substitute the browser shell or Explorer icon for a PWA/Store app.
+        # Keep the slot empty until its own shortcut or package artwork is indexed.
+        if(-not $isPwaEntry -and -not $isPackagedShellCommand){
+            $exe=Get-AMRStartupExecutablePath -CommandText ([string]$Entry.Command)
+            if($exe){$source=Get-AMRStartupIconFromPath -IconPath $exe;if($source){return $source}}
         }
     } catch {}
     return $null
@@ -28181,37 +28498,62 @@ function Get-AMRStartupEntries {
     param([switch]$SkipCim,[switch]$SkipIcons)
     $entries=New-Object 'System.Collections.Generic.List[object]'
     $seen=New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
-    $seenCommands=New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
-    $runSources=@(
-        [pscustomobject]@{Path='HKCU:\Software\Microsoft\Windows\CurrentVersion\Run';Approval='HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run';Source='Current user · Run'},
-        [pscustomobject]@{Path='HKLM:\Software\Microsoft\Windows\CurrentVersion\Run';Approval='HKLM:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run';Source='All users · Run'},
-        [pscustomobject]@{Path='HKLM:\Software\Wow6432Node\Microsoft\Windows\CurrentVersion\Run';Approval='HKLM:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run32';Source='All users · Run32'},
-        [pscustomobject]@{Path='HKCU:\Software\Wow6432Node\Microsoft\Windows\CurrentVersion\Run';Approval='HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run32';Source='Current user · Run32'},
-        [pscustomobject]@{Path='HKCU:\Software\Microsoft\Windows\CurrentVersion\RunOnce';Approval='HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run';Source='Current user · RunOnce'},
-        [pscustomobject]@{Path='HKLM:\Software\Microsoft\Windows\CurrentVersion\RunOnce';Approval='HKLM:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run';Source='All users · RunOnce'},
-        [pscustomobject]@{Path='HKLM:\Software\Wow6432Node\Microsoft\Windows\CurrentVersion\RunOnce';Approval='HKLM:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run32';Source='All users · RunOnce32'},
-        [pscustomobject]@{Path='HKCU:\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\Run';Approval='HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run';Source='Current user · Policy Run'},
-        [pscustomobject]@{Path='HKLM:\Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\Run';Approval='HKLM:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run';Source='All users · Policy Run'}
-    )
-    foreach($source in $runSources){
-        try{
-            if(-not(Test-Path -LiteralPath $source.Path)){continue}
-            $key=Get-Item -LiteralPath $source.Path -ErrorAction Stop
-            foreach($valueName in @($key.GetValueNames())){
-                if([string]::IsNullOrWhiteSpace([string]$valueName)){continue}
-                $command=[string]$key.GetValue($valueName,$null,[Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
-                if([string]::IsNullOrWhiteSpace($command)){continue}
-                $identity=$source.Path+'|'+$valueName
-                if(-not $seen.Add($identity)){continue}
-                $commandKey=([Environment]::ExpandEnvironmentVariables($command) -replace '\s+',' ').Trim().ToLowerInvariant()
-                [void]$seenCommands.Add($commandKey)
-                $match=Get-AMRStartupInstalledMatch -DisplayName ([string]$valueName) -CommandText $command
-                $display=if($match){[string]$match.Name}else{[string]$valueName}
-                $enabled=Get-AMRStartupApprovalState -ApprovalPath $source.Approval -ValueName ([string]$valueName)
-                [void]$entries.Add([pscustomobject]@{Name=$display;EntryName=[string]$valueName;Command=$command;Source=$source.Source;Kind='Registry';ApprovalPath=$source.Approval;ApprovalValueName=[string]$valueName;Enabled=[bool]$enabled;CanToggle=($source.Source -notmatch 'RunOnce');InstalledMatch=($null -ne $match);InstalledRecord=$match;Identity=$identity;IconSource=$null;IconLocation=''})
+    $registryEntryCount=0
+    $startupFolderCount=0
+    # Use the explicit .NET registry views below as the single registry source.
+    # The older PowerShell-provider pass duplicated the same Run keys and used
+    # command-text deduplication, which could hide distinct applications.
+    # Explicitly inspect both Windows registry views. The PowerShell registry
+    # provider follows the process bitness, which can hide 32-bit startup entries
+    # (or the reverse) when AMR is launched from a different host.
+    try {
+        $registryViews=@([Microsoft.Win32.RegistryView]::Registry32)
+        if([Environment]::Is64BitOperatingSystem){$registryViews+= [Microsoft.Win32.RegistryView]::Registry64}
+        foreach($hiveName in @('CurrentUser','LocalMachine')){
+            foreach($view in $registryViews){
+                $baseKey=$null;$subKey=$null;$viewEntryCount=0
+                try {
+                    $hive=if($hiveName -eq 'CurrentUser'){[Microsoft.Win32.RegistryHive]::CurrentUser}else{[Microsoft.Win32.RegistryHive]::LocalMachine}
+                    $baseKey=[Microsoft.Win32.RegistryKey]::OpenBaseKey($hive,$view)
+                    foreach($relativePath in @('Software\Microsoft\Windows\CurrentVersion\Run','Software\Microsoft\Windows\CurrentVersion\RunOnce','Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\Run')){
+                        $subKey=$baseKey.OpenSubKey($relativePath,$false)
+                        if(-not $subKey){continue}
+                        $isRunOnce=($relativePath -match '\\RunOnce$')
+                        $isPolicy=($relativePath -match '\\Policies\\Explorer\\Run$')
+                        $is32=($view -eq [Microsoft.Win32.RegistryView]::Registry32)
+                        $approvalHive=if($hiveName -eq 'CurrentUser'){'HKCU:'}else{'HKLM:'}
+                        $approvalBranch=if($is32){'Run32'}else{'Run'}
+                        $approvalPath=$approvalHive+'\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\'+$approvalBranch
+                        foreach($valueName in @($subKey.GetValueNames())){
+                            if([string]::IsNullOrWhiteSpace([string]$valueName)){continue}
+                            $command=[string]$subKey.GetValue($valueName,$null,[Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+                            if([string]::IsNullOrWhiteSpace($command)){continue}
+                            $identity='RegistryView|'+$hiveName+'|'+$view.ToString()+'|'+$relativePath+'|'+$valueName
+                            if(-not $seen.Add($identity)){continue}
+                            $sourcePrefix=if($hiveName -eq 'CurrentUser'){'Current user'}else{'All users'}
+                            $viewLabel=if($is32){'32-bit'}else{'64-bit'}
+                            $sourceSuffix=if($isRunOnce){'RunOnce'}elseif($isPolicy){'Policy Run'}else{'Run'}
+                            $match=Get-AMRStartupInstalledMatch -DisplayName ([string]$valueName) -CommandText $command
+                            $display=if($match){[string]$match.Name}else{[string]$valueName}
+                            $approvalState=Get-AMRStartupApprovalState -ApprovalPath $approvalPath -ValueName ([string]$valueName)
+                            $enabled=if($null -eq $approvalState){$true}else{[bool]$approvalState}
+                            [void]$entries.Add([pscustomobject]@{Name=$display;EntryName=[string]$valueName;Command=$command;Source=($sourcePrefix+' · '+$viewLabel+' '+$sourceSuffix);Kind='RegistryView';ApprovalPath=$approvalPath;ApprovalValueName=[string]$valueName;Enabled=[bool]$enabled;CanToggle=(-not $isRunOnce);InstalledMatch=($null -ne $match);InstalledRecord=$match;Identity=$identity;StateKnown=($null -ne $approvalState -and -not $isRunOnce);IconSource=$null;IconLocation=''})
+                            $registryEntryCount++;$viewEntryCount++
+                        }
+                        $subKey.Dispose();$subKey=$null
+                    }
+                    Write-AMRLog ('Startup discovery · Registry '+$hiveName+' '+$view.ToString()+' returned '+$viewEntryCount+' item(s).') INFO System
+                } catch {
+                    Write-AMRLog ('Startup registry-view discovery warning: '+$hiveName+' · '+$view.ToString()+' · '+$_.Exception.Message) WARNING System
+                } finally {
+                    if($subKey){try{$subKey.Dispose()}catch{}}
+                    if($baseKey){try{$baseKey.Dispose()}catch{}}
+                }
             }
-        }catch{Write-AMRLog ('Startup registry discovery warning: '+$source.Path+' · '+$_.Exception.Message) WARNING System}
-    }
+        }
+    } catch { Write-AMRLog ('Startup registry-view enumeration warning: '+$_.Exception.Message) WARNING System }
+    try{Write-AMRLog ('Startup discovery · Registry views returned '+$registryEntryCount+' item(s).') INFO System}catch{}
+
     $startupFolders=@(
         [pscustomobject]@{Path=(Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Startup');Source='Current user · Startup folder'},
         [pscustomobject]@{Path=(Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs\Startup');Source='All users · Startup folder'}
@@ -28228,55 +28570,29 @@ function Get-AMRStartupEntries {
                 }
                 $entryName=[IO.Path]::GetFileNameWithoutExtension($file.Name)
                 $match=Get-AMRStartupInstalledMatch -DisplayName $entryName -CommandText $command
-                $display=if($match){[string]$match.Name}else{$entryName}
+                $display=if($match){[string]$match.Name}else{Get-AMRStartupFriendlyName -FallbackName $entryName -CommandText $command}
                 $approval='HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\StartupFolder'
-                $enabled=Get-AMRStartupApprovalState -ApprovalPath $approval -ValueName $file.Name
-                $commandKey=([Environment]::ExpandEnvironmentVariables($command) -replace '\s+',' ').Trim().ToLowerInvariant()
-                [void]$seenCommands.Add($commandKey)
-                [void]$entries.Add([pscustomobject]@{Name=$display;EntryName=$file.Name;Command=$command;Source=$folder.Source;Kind='StartupFolder';ApprovalPath=$approval;ApprovalValueName=$file.Name;Enabled=[bool]$enabled;CanToggle=$true;InstalledMatch=($null -ne $match);InstalledRecord=$match;Identity=$identity;IconSource=$null;IconLocation=$iconLocation})
+                $approvalState=Get-AMRStartupApprovalState -ApprovalPath $approval -ValueName $file.Name
+                $enabled=if($null -eq $approvalState){$true}else{[bool]$approvalState}
+                [void]$entries.Add([pscustomobject]@{Name=$display;EntryName=$file.Name;Command=$command;Source=$folder.Source;Kind='StartupFolder';ApprovalPath=$approval;ApprovalValueName=$file.Name;Enabled=[bool]$enabled;CanToggle=$true;InstalledMatch=($null -ne $match);InstalledRecord=$match;Identity=$identity;StateKnown=($null -ne $approvalState);IconSource=$null;IconLocation=$iconLocation})
+                $startupFolderCount++
             }
         }catch{Write-AMRLog ('Startup folder discovery warning: '+$folder.Path+' · '+$_.Exception.Message) WARNING System}
     }
+    try{Write-AMRLog ('Startup discovery · Startup folders returned '+$startupFolderCount+' item(s).') INFO System}catch{}
 
-    # Windows' own startup inventory is collected separately after the first UI render.
-    if(-not $SkipCim){
-    try {
-        foreach($item in @(Get-CimInstance -ClassName Win32_StartupCommand -ErrorAction Stop)){
-            $name=[string]$item.Name; $command=[string]$item.Command; $location=[string]$item.Location
-            if([string]::IsNullOrWhiteSpace($name) -and [string]::IsNullOrWhiteSpace($command)){continue}
-            $expanded=[Environment]::ExpandEnvironmentVariables($command)
-            $commandKey=($expanded -replace '\s+',' ').Trim().ToLowerInvariant()
-            $identity='CIM|'+$location+'|'+$name+'|'+$commandKey
-            if($seen.Contains($identity) -or ($commandKey -and $seenCommands.Contains($commandKey))){continue}
-            $approvalPath=$null; $approvalName=$name; $sourceLabel='Windows startup inventory'
-            if($location -match '(?i)(HKCU|HKEY_CURRENT_USER).*(CurrentVersion\\Run|CurrentVersion/Run)'){
-                if($location -match '(?i)Run32|Wow6432Node'){$approvalPath='HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run32'}
-                else{$approvalPath='HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run'}
-                $sourceLabel='Current user · Windows startup inventory'
-            } elseif($location -match '(?i)(HKLM|HKEY_LOCAL_MACHINE).*(CurrentVersion\\Run|CurrentVersion/Run)'){
-                if($location -match '(?i)Run32|Wow6432Node'){$approvalPath='HKLM:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run32'}
-                else{$approvalPath='HKLM:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run'}
-                $sourceLabel='All users · Windows startup inventory'
-            } elseif($location -match '(?i)Startup'){
-                $approvalPath='HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\StartupFolder'
-                $sourceLabel='Startup folder · Windows inventory'
-            }
-            $match=Get-AMRStartupInstalledMatch -DisplayName $name -CommandText $command
-            $display=if($match){[string]$match.Name}else{$name}
-            $canToggle=($null -ne $approvalPath)
-            $enabled=if($canToggle){Get-AMRStartupApprovalState -ApprovalPath $approvalPath -ValueName $approvalName}else{$true}
-            [void]$entries.Add([pscustomobject]@{Name=$display;EntryName=$name;Command=$command;Source=$sourceLabel;Kind='WindowsInventory';ApprovalPath=$approvalPath;ApprovalValueName=$approvalName;Enabled=[bool]$enabled;CanToggle=$canToggle;InstalledMatch=($null -ne $match);InstalledRecord=$match;Identity=$identity;IconSource=$null;IconLocation=''})
-            [void]$seen.Add($identity); if($commandKey){[void]$seenCommands.Add($commandKey)}
-        }
-    } catch { Write-AMRLog ('Windows startup inventory (Win32_StartupCommand) warning: '+$_.Exception.Message) WARNING System }
-    }
+    # WMI is always deferred through Start-AMRStartupCimScan after the first
+    # card render. Never execute the provider synchronously in the UI workflow.
+    if(-not $SkipCim){try{Write-AMRLog 'Win32_StartupCommand scan is deferred until after the initial Startup UI render.' INFO System}catch{}}
 
     if(-not $SkipIcons){
         foreach($entry in $entries){
             if(-not $entry.IconSource){$entry.IconSource=Get-AMRStartupIconSource -Entry $entry}
         }
     }
-    return @($entries | Sort-Object @{Expression={if($_.Enabled){0}else{1}}},Name)
+    $mergedEntries=@(Merge-AMRStartupEntries -Entries @($entries.ToArray()))
+    try{Write-AMRLog ('Startup discovery · Logical app entries after duplicate consolidation: '+$mergedEntries.Count+' (raw registry/folder records: '+$entries.Count+').') INFO System}catch{}
+    return $mergedEntries
 }
 
 function Set-AMRStartupSwitchVisual {
@@ -28299,27 +28615,32 @@ function Set-AMRStartupSwitchVisual {
 }
 
 function Refresh-AMRStartupManager {
-    param([object[]]$Entries,[switch]$RefreshInventory,[switch]$SkipDeferredCim)
+    param([object[]]$Entries,[switch]$RefreshInventory,[switch]$SkipDeferredCim,[switch]$AppendEntries)
     $hostPanel=C 'AMRStartupAppsHost';if(-not $hostPanel){return}
     # Re-entering Startups must reuse the existing cards. Only an explicit refresh
     # or a supplied replacement entry set is allowed to rebuild the visual tree.
     if(-not $PSBoundParameters.ContainsKey('Entries') -and -not $RefreshInventory -and
        ($script:StartupManagerLoaded -or $script:StartupRenderState)){return}
-    try { if($script:StartupRenderTimer){$script:StartupRenderTimer.Stop()} } catch {}
-    $hostPanel.Children.Clear()
+    if(-not ($AppendEntries -and $script:StartupRenderState)){try { if($script:StartupRenderTimer){$script:StartupRenderTimer.Stop()} } catch {}}
+    if(-not $AppendEntries){$hostPanel.Children.Clear()}
     if($PSBoundParameters.ContainsKey('Entries')){$entries=@($Entries)}else{
         Update-AMRStartupInstalledMatchIndex
         # Registry and Startup-folder discovery is fast; CIM and icons are deferred.
         $entries=@(Get-AMRStartupEntries -SkipCim -SkipIcons)
     }
-    $script:StartupManagerEntries=@($entries)
-    $enabledCount=@($entries|Where-Object {$_.Enabled}).Count
-    $summary=C 'AMRStartupSummary';if($summary){$summary.Text=('{0} startup item(s) detected  ·  {1} enabled  ·  {2} disabled' -f $entries.Count,$enabledCount,($entries.Count-$enabledCount))}
-    $empty=C 'AMRStartupEmptyState';if($empty){$empty.Visibility=if($entries.Count -eq 0){'Visible'}else{'Collapsed'}}
-    if($entries.Count -eq 0){$title=C 'AMRStartupEmptyTitle';$detail=C 'AMRStartupEmptyDetail';if($title){$title.Text='No startup applications detected'};if($detail){$detail.Text='No entries were found in the Windows startup inventory, Run keys, or Startup folders.'}}
+    if(-not $AppendEntries){$script:StartupManagerEntries=@($entries)}
+    $summaryEntries=@($script:StartupManagerEntries)
+    $enabledCount=@($summaryEntries|Where-Object {$_.Enabled}).Count
+    $summary=C 'AMRStartupSummary';if($summary){$summary.Text=('{0} startup item(s) detected  ·  {1} enabled  ·  {2} disabled' -f $summaryEntries.Count,$enabledCount,($summaryEntries.Count-$enabledCount))}
+    if($AppendEntries -and $script:StartupRenderState -and $script:StartupRenderState.Queue){
+        foreach($pendingEntry in $entries){$script:StartupRenderState.Queue.Enqueue($pendingEntry)}
+        return
+    }
+    $empty=C 'AMRStartupEmptyState';if($empty){$empty.Visibility=if($summaryEntries.Count -eq 0){'Visible'}else{'Collapsed'}}
+    if($summaryEntries.Count -eq 0){$title=C 'AMRStartupEmptyTitle';$detail=C 'AMRStartupEmptyDetail';if($title){$title.Text='No startup applications detected'};if($detail){$detail.Text='No entries were found in Windows startup registry locations, Startup folders, packaged startup tasks, or the Windows startup inventory.'}}
     $queue=New-Object 'System.Collections.Generic.Queue[object]'
     foreach($queuedEntry in $entries){$queue.Enqueue($queuedEntry)}
-    $script:StartupRenderState=@{Queue=$queue;Index=0;RenderedEntries=(New-Object 'System.Collections.Generic.List[object]');RefreshInventory=[bool]$RefreshInventory;SkipDeferredCim=[bool]$SkipDeferredCim}
+    $script:StartupRenderState=@{Queue=$queue;Index=if($AppendEntries){$hostPanel.Children.Count}else{0};RenderedEntries=(New-Object 'System.Collections.Generic.List[object]');RefreshInventory=[bool]$RefreshInventory;SkipDeferredCim=[bool]$SkipDeferredCim;AppendEntries=[bool]$AppendEntries}
     $timer=New-Object System.Windows.Threading.DispatcherTimer
     $timer.Interval=[TimeSpan]::FromMilliseconds(24)
     $script:StartupRenderHostPanel=$hostPanel
@@ -28344,14 +28665,14 @@ function Refresh-AMRStartupManager {
         $card.Padding=[System.Windows.Thickness]::new(16,13,16,13)
         $card.Margin=[System.Windows.Thickness]::new(3,5,3,8)
         $card.MinHeight=76
-        $card.ToolTip=[string]$entry.Command
+        $card.ToolTip=if($entry.PSObject.Properties['ToolTipCommand'] -and $entry.ToolTipCommand){[string]$entry.ToolTipCommand}else{[string]$entry.Command}
         $card.Opacity=0
         $card.RenderTransform=[System.Windows.Media.TranslateTransform]::new(0,10)
         $card.Effect=[System.Windows.Media.Effects.DropShadowEffect]::new()
         $card.Effect.Color=[System.Windows.Media.ColorConverter]::ConvertFromString('#000000')
-        $card.Effect.BlurRadius=19
-        $card.Effect.ShadowDepth=4
-        $card.Effect.Opacity=0.30
+        $card.Effect.BlurRadius=9
+        $card.Effect.ShadowDepth=1
+        $card.Effect.Opacity=0.16
         $grid=New-Object System.Windows.Controls.Grid
         $grid.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition -Property @{Width=[System.Windows.GridLength]::new(54)}))
         $grid.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition -Property @{Width=[System.Windows.GridLength]::new(1,[System.Windows.GridUnitType]::Star)}))
@@ -28409,7 +28730,11 @@ function Refresh-AMRStartupManager {
             $eventArgs.Handled=$true
         }.GetNewClosure())
         $switch.ToolTip=if($entry.CanToggle){'Smooth ON/OFF control · Windows StartupApproved'}else{'Detected by Windows; no safe StartupApproved switch was exposed for this item.'}
-        if(-not $entry.CanToggle){$switch.Opacity=0.45;$status.Text='INFO';$status.Foreground=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#A3B2C1')}
+        if(-not $entry.CanToggle){
+            $switch.Opacity=0.45
+            if($entry.PSObject.Properties['StateKnown'] -and -not $entry.StateKnown){$status.Text='INFO';$status.Foreground=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#A3B2C1')}
+            else{$status.Text=if($entry.Enabled){'●  ON'}else{'○  OFF'};$status.Foreground=[System.Windows.Media.BrushConverter]::new().ConvertFromString($(if($entry.Enabled){'#9BE8D0'}else{'#C0CCD8'}))}
+        }
         [System.Windows.Controls.Grid]::SetColumn($switch,3)
         $card.Child=$grid
 
@@ -28429,7 +28754,7 @@ function Refresh-AMRStartupManager {
                     $cardRef.Background.GradientStops[1].BeginAnimation([System.Windows.Media.GradientStop]::ColorProperty,$g1)
                 }
                 if($cardRef.BorderBrush -is [System.Windows.Media.SolidColorBrush]){$cardRef.BorderBrush.BeginAnimation([System.Windows.Media.SolidColorBrush]::ColorProperty,$hoverEdge)}
-                if($cardRef.Effect -is [System.Windows.Media.Effects.DropShadowEffect]){$cardRef.Effect.Opacity=0.48;$cardRef.Effect.BlurRadius=24;$cardRef.Effect.Color=[System.Windows.Media.ColorConverter]::ConvertFromString('#B88D4D')}
+                if($cardRef.Effect -is [System.Windows.Media.Effects.DropShadowEffect]){$cardRef.Effect.Opacity=0.30;$cardRef.Effect.BlurRadius=12;$cardRef.Effect.Color=[System.Windows.Media.ColorConverter]::ConvertFromString('#B88D4D')}
                 $hoverLift=[System.Windows.Media.Animation.DoubleAnimation]::new(0,-2.5,[TimeSpan]::FromMilliseconds(160))
                 $hoverLift.EasingFunction=$hoverEase
                 $cardRef.RenderTransform.BeginAnimation([System.Windows.Media.TranslateTransform]::YProperty,$hoverLift)
@@ -28449,7 +28774,7 @@ function Refresh-AMRStartupManager {
                     $cardRef.Background.GradientStops[1].BeginAnimation([System.Windows.Media.GradientStop]::ColorProperty,$g1)
                 }
                 if($cardRef.BorderBrush -is [System.Windows.Media.SolidColorBrush]){$cardRef.BorderBrush.BeginAnimation([System.Windows.Media.SolidColorBrush]::ColorProperty,$leaveEdge)}
-                if($cardRef.Effect -is [System.Windows.Media.Effects.DropShadowEffect]){$cardRef.Effect.Opacity=0.30;$cardRef.Effect.BlurRadius=19;$cardRef.Effect.Color=[System.Windows.Media.Colors]::Black}
+                if($cardRef.Effect -is [System.Windows.Media.Effects.DropShadowEffect]){$cardRef.Effect.Opacity=0.16;$cardRef.Effect.BlurRadius=9;$cardRef.Effect.Color=[System.Windows.Media.Colors]::Black}
                 $leaveLift=[System.Windows.Media.Animation.DoubleAnimation]::new(-2.5,0,[TimeSpan]::FromMilliseconds(210))
                 $leaveLift.EasingFunction=$leaveEase
                 $cardRef.RenderTransform.BeginAnimation([System.Windows.Media.TranslateTransform]::YProperty,$leaveLift)
@@ -28476,7 +28801,7 @@ function Refresh-AMRStartupManager {
             $script:StartupManagerLoaded=$true
             $rendered=@($state.RenderedEntries.ToArray())
             Start-AMRStartupIconHydration -Entries $rendered
-            if(-not $state.SkipDeferredCim){Start-AMRStartupCimScan}
+            if(-not $state.SkipDeferredCim){Start-AMRStartupAppxScan}
             if($state.RefreshInventory -and $script:InstalledScanState -and -not $script:InstalledScanState.Current){
                 try{Start-AMRInstalledCatalogScan -Refresh}catch{Write-AMRLog ('Startup manager inventory refresh could not start: '+$_.Exception.Message) WARNING System}
             }
@@ -28506,7 +28831,12 @@ function Start-AMRStartupIconHydration {
         try {
             if(-not $script:StartupIconQueue -or $script:StartupIconQueue.Count -eq 0){$script:StartupIconTimer.Stop();return}
             $entry=$script:StartupIconQueue.Dequeue()
-            $source=Get-AMRStartupIconSource -Entry $entry
+            $source=$null
+            if($entry.PSObject.Properties['IconSource']){$source=$entry.IconSource}
+            if(-not $source){
+                $source=Get-AMRStartupIconSource -Entry $entry
+                if($source){$entry.IconSource=$source}
+            }
             if($source){$entry.IconControl.Source=$source;$entry.GlyphControl.Child=$entry.IconControl}
         } catch { try{Write-AMRLog ('Deferred startup icon warning: '+$_.Exception.Message) WARNING System}catch{} }
     })
@@ -28516,37 +28846,483 @@ function Start-AMRStartupIconHydration {
 
 function Add-AMRStartupCimEntries {
     param([object[]]$Items)
+    $itemsArray=@($Items | Where-Object {$_ -and -not $_.PSObject.Properties['AMRStartupWarning']})
+    try{Write-AMRLog ('Startup discovery · Win32_StartupCommand returned '+$itemsArray.Count+' item(s).') INFO System}catch{}
     $entries=@($script:StartupManagerEntries)
-    if($entries.Count -eq 0 -and @($Items).Count -eq 0){return}
-    $seenCommands=New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    $addedItems=New-Object 'System.Collections.Generic.List[object]'
+    $seenExact=New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
     foreach($entry in $entries){
-        $key=([Environment]::ExpandEnvironmentVariables([string]$entry.Command) -replace '\s+',' ').Trim().ToLowerInvariant()
-        if($key){[void]$seenCommands.Add($key)}
+        $entryName=[string]$entry.EntryName
+        $entryCommand=([Environment]::ExpandEnvironmentVariables([string]$entry.Command) -replace '\s+',' ').Trim()
+        if($entryName -and $entryCommand){[void]$seenExact.Add(($entryName+'|'+$entryCommand))}
     }
-    $added=0
-    foreach($item in @($Items)){
-        $name=[string]$item.Name;$command=[string]$item.Command;$location=[string]$item.Location
+    $currentSid='';try{$currentSid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value}catch{}
+    $logicalSeen=New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    foreach($existing in $entries){
+        $logical=if($existing.PSObject.Properties['LogicalIdentity']){[string]$existing.LogicalIdentity}else{Get-AMRStartupLogicalIdentity -Entry $existing}
+        if($logical){[void]$logicalSeen.Add($logical)}
+    }
+    foreach($item in $itemsArray){
+        $name=[string]$item.Name;$command=[string]$item.Command;$location=[string]$item.Location;$itemSid=[string]$item.UserSID
         if([string]::IsNullOrWhiteSpace($name) -and [string]::IsNullOrWhiteSpace($command)){continue}
-        $expanded=[Environment]::ExpandEnvironmentVariables($command);$commandKey=($expanded -replace '\s+',' ').Trim().ToLowerInvariant()
-        if($commandKey -and $seenCommands.Contains($commandKey)){continue}
+        if($itemSid -and $currentSid -and $itemSid -ne $currentSid -and $location -notmatch '(?i)(HKLM|HKEY_LOCAL_MACHINE|Common Startup)'){continue}
+        if($location -match '(?i)(HKU|HKEY_USERS)' -and $currentSid -and $location -notmatch ('(?i)(HKU|HKEY_USERS)[\\/]'+[regex]::Escape($currentSid))){continue}
+        if($location -match '(?i)RunOnce'){continue}
+        $expanded=[Environment]::ExpandEnvironmentVariables($command)
+        $normalizedCommand=($expanded -replace '\s+',' ').Trim()
+        # Win32_StartupCommand repeats Run and Startup-folder registrations already
+        # collected through the explicit registry/folder scans. Match those by
+        # registration location + value/file name, not by command text.
+        $alreadyRegistered=$false
+        if($location -match '(?i)(HKCU|HKEY_CURRENT_USER|HKLM|HKEY_LOCAL_MACHINE|HKU|HKEY_USERS)'){
+            $isCurrentUser=($location -match '(?i)HKCU|HKEY_CURRENT_USER') -or ($currentSid -and $location -match ('(?i)(HKU|HKEY_USERS)[\\/]'+[regex]::Escape($currentSid)))
+            $is32=($location -match '(?i)Wow6432Node|Run32|32-bit')
+            $hiveLabel=if($isCurrentUser){'Current user'}else{'All users'}
+            $branchLabel=if($location -match '(?i)RunOnce'){'RunOnce'}elseif($location -match '(?i)Policies[/\\]+Explorer[/\\]+Run'){'Policy Run'}else{'Run'}
+            foreach($existing in $entries){
+                $existingRegistrations=if($existing.PSObject.Properties['Registrations'] -and $existing.Registrations){@($existing.Registrations)}else{@($existing)}
+                foreach($existingRegistration in $existingRegistrations){
+                    if($existingRegistration.Kind -ne 'RegistryView'){continue}
+                    if([string]$existingRegistration.EntryName -ine $name){continue}
+                    if([string]$existingRegistration.Source -notlike ($hiveLabel+'*')){continue}
+                    if($is32 -and [string]$existingRegistration.Source -notmatch '32-bit'){continue}
+                    if(-not $is32 -and [string]$existingRegistration.Source -match '32-bit'){continue}
+                    $existingBranch=if([string]$existingRegistration.Source -match 'RunOnce'){'RunOnce'}elseif([string]$existingRegistration.Source -match 'Policy Run'){'Policy Run'}else{'Run'}
+                    if($existingBranch -ne $branchLabel){continue}
+                    $alreadyRegistered=$true;break
+                }
+                if($alreadyRegistered){break}
+            }
+        } elseif($location -match '(?i)Startup') {
+            foreach($existing in $entries){
+                if($existing.Kind -eq 'StartupFolder' -and [IO.Path]::GetFileNameWithoutExtension([string]$existing.EntryName) -ieq [IO.Path]::GetFileNameWithoutExtension($name)){$alreadyRegistered=$true;break}
+            }
+        }
+        if($alreadyRegistered){continue}
+        # Exact name + exact command is a duplicate; same command with a different
+        # application name is retained as a separate startup item.
+        $exactKey=$name+'|'+$normalizedCommand
+        if($normalizedCommand -and -not $seenExact.Add($exactKey)){continue}
         $approvalPath=$null;$approvalName=$name;$sourceLabel='Windows startup inventory'
-        if($location -match '(?i)(HKCU|HKEY_CURRENT_USER).*(CurrentVersion\Run|CurrentVersion/Run)'){
+        if(($location -match '(?i)(HKCU|HKEY_CURRENT_USER).*(CurrentVersion\\Run|CurrentVersion/Run)') -or ($currentSid -and $location -match ('(?i)(HKU|HKEY_USERS)[\\/]'+[regex]::Escape($currentSid)+'.*(CurrentVersion\\Run|CurrentVersion/Run)'))){
             if($location -match '(?i)Run32|Wow6432Node'){$approvalPath='HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run32'}else{$approvalPath='HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run'}
             $sourceLabel='Current user · Windows startup inventory'
-        } elseif($location -match '(?i)(HKLM|HKEY_LOCAL_MACHINE).*(CurrentVersion\Run|CurrentVersion/Run)'){
+        } elseif($location -match '(?i)(HKLM|HKEY_LOCAL_MACHINE).*(CurrentVersion\\Run|CurrentVersion/Run)'){
             if($location -match '(?i)Run32|Wow6432Node'){$approvalPath='HKLM:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run32'}else{$approvalPath='HKLM:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run'}
             $sourceLabel='All users · Windows startup inventory'
-        } elseif($location -match '(?i)Startup'){$approvalPath='HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\StartupFolder';$sourceLabel='Startup folder · Windows inventory'}
+        } elseif($location -match '(?i)Startup'){$approvalPath=$null;$sourceLabel='Startup folder · Windows inventory'}
         $match=Get-AMRStartupInstalledMatch -DisplayName $name -CommandText $command
-        $display=if($match){[string]$match.Name}else{$name}
-        $canToggle=($null -ne $approvalPath);$enabled=if($canToggle){Get-AMRStartupApprovalState -ApprovalPath $approvalPath -ValueName $approvalName}else{$true}
-        $newEntry=[pscustomobject]@{Name=$display;EntryName=$name;Command=$command;Source=$sourceLabel;Kind='WindowsInventory';ApprovalPath=$approvalPath;ApprovalValueName=$approvalName;Enabled=[bool]$enabled;CanToggle=$canToggle;InstalledMatch=($null -ne $match);InstalledRecord=$match;Identity=('CIM|'+$location+'|'+$name+'|'+$commandKey);IconSource=$null;IconLocation=''}
-        $entries+=,$newEntry;$added++;if($commandKey){[void]$seenCommands.Add($commandKey)}
+        $display=if($match){[string]$match.Name}else{Get-AMRStartupFriendlyName -FallbackName $name -CommandText $command}
+        $canToggle=($null -ne $approvalPath);$approvalState=if($canToggle){Get-AMRStartupApprovalState -ApprovalPath $approvalPath -ValueName $approvalName}else{$null};$enabled=if($null -eq $approvalState){$true}else{[bool]$approvalState}
+        $newEntry=[pscustomobject]@{Name=$display;EntryName=$name;Command=$command;Source=$sourceLabel;Kind='WindowsInventory';ApprovalPath=$approvalPath;ApprovalValueName=$approvalName;Enabled=[bool]$enabled;CanToggle=$canToggle;InstalledMatch=($null -ne $match);InstalledRecord=$match;Identity=('CIM|'+$location+'|'+$name+'|'+$normalizedCommand);StateKnown=($null -ne $approvalState);IconSource=$null;IconLocation=''}
+        $logical=Get-AMRStartupLogicalIdentity -Entry $newEntry
+        if($logical -and $logicalSeen.Contains($logical)){continue}
+        if($logical){[void]$logicalSeen.Add($logical)}
+        $entries+=,$newEntry;[void]$addedItems.Add($newEntry)
     }
-    if($added -gt 0){
+    try{Write-AMRLog ('Startup discovery · Win32_StartupCommand added '+$addedItems.Count+' previously-unlisted item(s) after cross-check.') INFO System}catch{}
+    if($addedItems.Count -gt 0){
         $script:StartupManagerEntries=@($entries | Sort-Object @{Expression={if($_.Enabled){0}else{1}}},Name)
         if(Get-Command Save-AMRStartupManagerCache -ErrorAction SilentlyContinue){[void](Save-AMRStartupManagerCache -Entries $script:StartupManagerEntries)}
-        Refresh-AMRStartupManager -Entries $script:StartupManagerEntries -SkipDeferredCim
+        Refresh-AMRStartupManager -Entries @($addedItems.ToArray()) -SkipDeferredCim -AppendEntries
+    }
+}
+
+function Add-AMRStartupAppxEntries {
+    param([object[]]$Items)
+    $taskItems=New-Object 'System.Collections.Generic.List[object]'
+    $packageIconMapCount=0
+    if($script:StartupPackageIconIndex -isnot [hashtable]){$script:StartupPackageIconIndex=@{}}
+    foreach($scanItem in @($Items)){
+        if($scanItem -and $scanItem.PSObject.Properties['AMRStartupWarning']){
+            try{Write-AMRLog ('Packaged startup discovery warning: '+[string]$scanItem.AMRStartupWarning) WARNING System}catch{}
+            continue
+        }
+        if($scanItem -and $scanItem.PSObject.Properties['AMRStartupDiagnostic']){
+            try{Write-AMRLog ('Startup discovery · '+[string]$scanItem.AMRStartupDiagnostic) INFO System}catch{}
+            continue
+        }
+        if($scanItem -and $scanItem.PSObject.Properties['AMRStartupPackageIconMap']){
+            $logoPath=[string]$scanItem.IconLocation
+            if($logoPath){
+                $mapNames=New-Object 'System.Collections.Generic.List[string]'
+                foreach($mapName in @([string]$scanItem.Name,[string]$scanItem.PackageName,[string]$scanItem.PackageFamilyName)+@($scanItem.StartAppNames)){
+                    $normalizedMapName=($mapName -replace '[^a-zA-Z0-9]','').ToLowerInvariant()
+                    if($normalizedMapName -and -not $mapNames.Contains($normalizedMapName)){$mapNames.Add($normalizedMapName)}
+                }
+                foreach($normalizedMapName in $mapNames){$script:StartupPackageIconIndex[$normalizedMapName]=$logoPath}
+                $packageIconMapCount++
+            }
+            continue
+        }
+        if($scanItem){$taskItems.Add($scanItem)}
+    }
+    try{Write-AMRLog ('Startup discovery · Packaged startup scan returned '+$taskItems.Count+' task(s); indexed '+$packageIconMapCount+' package icon source(s).') INFO System}catch{}
+    if($packageIconMapCount -gt 0){
+        try{Start-AMRStartupIconHydration -Entries @($script:StartupManagerEntries)}catch{try{Write-AMRLog ('Packaged app icon re-hydration warning: '+$_.Exception.Message) WARNING System}catch{}}
+    }
+    $entries=@($script:StartupManagerEntries)
+    $seen=New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    foreach($entry in $entries){
+        if($entry.Identity){[void]$seen.Add([string]$entry.Identity)}
+        $logical=if($entry.PSObject.Properties['LogicalIdentity']){[string]$entry.LogicalIdentity}else{Get-AMRStartupLogicalIdentity -Entry $entry}
+        if($logical){[void]$seen.Add('LOGICAL|'+$logical)}
+    }
+    $addedItems=New-Object 'System.Collections.Generic.List[object]'
+    foreach($item in @($taskItems.ToArray())){
+        $identity=[string]$item.Identity
+        $logical=if($item.PSObject.Properties['LogicalIdentity']){[string]$item.LogicalIdentity}else{Get-AMRStartupLogicalIdentity -Entry $item}
+        if([string]::IsNullOrWhiteSpace($identity) -or $seen.Contains($identity)){continue}
+        if($logical -and $seen.Contains('LOGICAL|'+$logical)){continue}
+        [void]$seen.Add($identity);if($logical){[void]$seen.Add('LOGICAL|'+$logical)}
+        $entries+=,$item;[void]$addedItems.Add($item)
+    }
+    if($addedItems.Count -gt 0){
+        $script:StartupManagerEntries=@($entries | Sort-Object @{Expression={if($_.Enabled){0}else{1}}},Name)
+        if(Get-Command Save-AMRStartupManagerCache -ErrorAction SilentlyContinue){[void](Save-AMRStartupManagerCache -Entries $script:StartupManagerEntries)}
+        Refresh-AMRStartupManager -Entries @($addedItems.ToArray()) -SkipDeferredCim -AppendEntries
+    }
+}
+
+
+function Add-AMRStartupScheduledTaskEntries {
+    param([object[]]$Items)
+    $taskItems=@($Items | Where-Object {$_ -and -not $_.PSObject.Properties['AMRStartupWarning']})
+    foreach($warning in @($Items | Where-Object {$_ -and $_.PSObject.Properties['AMRStartupWarning']})){
+        try{Write-AMRLog ('Scheduled-task startup discovery warning: '+[string]$warning.AMRStartupWarning) WARNING System}catch{}
+    }
+    try{Write-AMRLog ('Startup discovery · Filtered third-party logon-task scan returned '+$taskItems.Count+' eligible action(s).') INFO System}catch{}
+    $entries=@($script:StartupManagerEntries)
+    $seenIdentity=New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    $seenLogical=New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    foreach($entry in $entries){
+        if($entry.Identity){[void]$seenIdentity.Add([string]$entry.Identity)}
+        $logical=if($entry.PSObject.Properties['LogicalIdentity']){[string]$entry.LogicalIdentity}else{Get-AMRStartupLogicalIdentity -Entry $entry}
+        if($logical){[void]$seenLogical.Add($logical)}
+    }
+    $addedItems=New-Object 'System.Collections.Generic.List[object]'
+    foreach($item in $taskItems){
+        $identity=[string]$item.Identity
+        $logical=Get-AMRStartupLogicalIdentity -Entry $item
+        if([string]::IsNullOrWhiteSpace($identity) -or -not $seenIdentity.Add($identity)){continue}
+        if($logical -and -not $seenLogical.Add($logical)){continue}
+        if($logical){$item | Add-Member -NotePropertyName LogicalIdentity -NotePropertyValue $logical -Force}
+        $match=Get-AMRStartupInstalledMatch -DisplayName ([string]$item.Name) -CommandText ([string]$item.Command)
+        if($match){$item.Name=[string]$match.Name;$item.InstalledMatch=$true;$item.InstalledRecord=$match}else{$item.Name=Get-AMRStartupFriendlyName -FallbackName ([string]$item.Name) -CommandText ([string]$item.Command)}
+        $entries+=,$item
+        [void]$addedItems.Add($item)
+    }
+    try{Write-AMRLog ('Startup discovery · Scheduled-task scan added '+$addedItems.Count+' non-duplicate application task(s).') INFO System}catch{}
+    if($addedItems.Count -gt 0){
+        $script:StartupManagerEntries=@($entries | Sort-Object @{Expression={if($_.Enabled){0}else{1}}},Name)
+        if(Get-Command Save-AMRStartupManagerCache -ErrorAction SilentlyContinue){[void](Save-AMRStartupManagerCache -Entries $script:StartupManagerEntries)}
+        Refresh-AMRStartupManager -Entries @($addedItems.ToArray()) -SkipDeferredCim -AppendEntries
+    }
+}
+
+function Start-AMRStartupScheduledTaskScan {
+    if($script:StartupTaskState -and $script:StartupTaskState.Current){return}
+    try {
+        $rs=[System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace()
+        $rs.ApartmentState=[System.Threading.ApartmentState]::MTA
+        $rs.ThreadOptions=[System.Management.Automation.Runspaces.PSThreadOptions]::ReuseThread
+        $rs.Open()
+        $ps=[PowerShell]::Create();$ps.Runspace=$rs
+        $scriptText=@'
+$results=New-Object 'System.Collections.Generic.List[object]'
+$warnings=New-Object 'System.Collections.Generic.List[string]'
+$service=$null
+function Visit-AMRTaskFolder {
+    param($Folder)
+    try {
+        $folderPath=[string]$Folder.Path
+        if($folderPath -match '(?i)^\\Microsoft\\Windows(?:\\|$)'){return}
+        foreach($task in @($Folder.GetTasks(1))){
+            try {
+                if(-not $task.Enabled){continue}
+                $definition=$task.Definition
+                $triggerKinds=New-Object 'System.Collections.Generic.List[string]'
+                foreach($trigger in @($definition.Triggers)){
+                    if(-not $trigger.Enabled){continue}
+                    if([int]$trigger.Type -eq 9){$triggerKinds.Add('Logon')}
+                }
+                if($triggerKinds.Count -eq 0){continue}
+                $taskPath=[string]$task.Path
+                # Keep this as a filtered supplemental inventory; Windows maintenance
+                # tasks are not equivalent to Task Manager's Startup apps list.
+                if($taskPath -match '(?i)^\\Microsoft\\Windows\\'){continue}
+                foreach($action in @($definition.Actions)){
+                    if([int]$action.Type -ne 0){continue}
+                    $exe=[Environment]::ExpandEnvironmentVariables([string]$action.Path)
+                    if([string]::IsNullOrWhiteSpace($exe) -or -not(Test-Path -LiteralPath $exe -PathType Leaf)){continue}
+                    $exeLeaf=[IO.Path]::GetFileName($exe)
+                    if($exeLeaf -match '(?i)^(?:powershell|pwsh|cmd|wscript|cscript|msiexec|regsvr32|rundll32|schtasks|sc)\.exe$'){continue}
+                    if(([string]$task.Name+' '+$exeLeaf) -match '(?i)(update|updater|maintenance|telemetry|crashreport|diagnostic|installer|cleanup|repair)'){continue}
+                    $actionArgs=[string]$action.Arguments
+                    $command=if($actionArgs){'"'+$exe+'" '+$actionArgs}else{'"'+$exe+'"'}
+                    $name=[string]$task.Name
+                    $results.Add([pscustomobject]@{
+                        Name=$name;EntryName=$name;Command=$command
+                        Source=('Scheduled task · '+(($triggerKinds | Select-Object -Unique) -join '/'))
+                        Kind='ScheduledTask';ApprovalPath=$null;ApprovalValueName=$null
+                        Enabled=$true;StateKnown=$true;CanToggle=$false;InstalledMatch=$false;InstalledRecord=$null
+                        Identity=('TaskScheduler|'+$taskPath+'|'+$name+'|'+$command)
+                        IconSource=$null;IconLocation='';TaskPath=$taskPath
+                    })
+                }
+            } catch { if($warnings.Count -lt 12){$warnings.Add('Task '+[string]$task.Name+': '+$_.Exception.Message)} }
+        }
+        foreach($child in @($Folder.GetFolders(0))){Visit-AMRTaskFolder -Folder $child}
+    } catch { if($warnings.Count -lt 12){$warnings.Add('Folder '+[string]$Folder.Name+': '+$_.Exception.Message)} }
+}
+try {
+    $service=New-Object -ComObject 'Schedule.Service' -ErrorAction Stop
+    $service.Connect()
+    $root=$service.GetFolder('\')
+    Visit-AMRTaskFolder -Folder $root
+} catch { $warnings.Add('Task Scheduler connection: '+$_.Exception.Message) }
+finally {
+    if($service){try{[void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($service)}catch{}}
+}
+foreach($warning in $warnings){$results.Add([pscustomobject]@{AMRStartupWarning=[string]$warning})}
+$results.ToArray()
+'@
+        [void]$ps.AddScript($scriptText)
+        $handle=$ps.BeginInvoke()
+        $script:StartupTaskState=@{Current=$true;PowerShell=$ps;Runspace=$rs;Handle=$handle}
+        try{if($script:StartupTaskTimer){$script:StartupTaskTimer.Stop()}}catch{}
+        $poll=New-Object System.Windows.Threading.DispatcherTimer;$poll.Interval=[TimeSpan]::FromMilliseconds(240)
+        $poll.Add_Tick({
+            $state=$script:StartupTaskState
+            if(-not $state -or -not $state.Current){$script:StartupTaskTimer.Stop();return}
+            if($state.Handle.IsCompleted){
+                $script:StartupTaskTimer.Stop()
+                try{$items=@($state.PowerShell.EndInvoke($state.Handle));foreach($workerError in @($state.PowerShell.Streams.Error)){Write-AMRLog ('Deferred scheduled-task worker error: '+[string]$workerError) WARNING System};Add-AMRStartupScheduledTaskEntries -Items $items}
+                catch{Write-AMRLog ('Deferred scheduled-task startup inventory warning: '+$_.Exception.Message) WARNING System}
+                finally{
+                    try{$state.PowerShell.Dispose()}catch{}
+                    try{$state.Runspace.Close();$state.Runspace.Dispose()}catch{}
+                    $script:StartupTaskState=@{Current=$false}
+                    Start-AMRStartupCimScan
+                }
+            }
+        })
+        $script:StartupTaskTimer=$poll;$poll.Start()
+    } catch {
+        Write-AMRLog ('Could not start deferred scheduled-task startup inventory: '+$_.Exception.Message) WARNING System
+        try{if($rs){$rs.Close();$rs.Dispose()}}catch{}
+        Start-AMRStartupCimScan
+    }
+}
+
+function Start-AMRStartupAppxScan {
+    if($script:StartupAppxState -and $script:StartupAppxState.Current){return}
+    try {
+        $rs=[System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace()
+        $rs.ApartmentState=[System.Threading.ApartmentState]::STA
+        $rs.ThreadOptions=[System.Management.Automation.Runspaces.PSThreadOptions]::ReuseThread
+        $rs.Open()
+        $ps=[PowerShell]::Create();$ps.Runspace=$rs
+        $scriptText=@'
+$results=New-Object 'System.Collections.Generic.List[object]'
+$warnings=New-Object 'System.Collections.Generic.List[string]'
+$registryBase=$null;$systemDataRoot=$null;$approvedRoot=$null
+$packageCount=0;$manifestCount=0;$declarationCount=0
+$approvedOverrideCount=0;$systemStateCount=0;$desktopDefaultCount=0;$emittedCount=0
+try {
+    Import-Module Appx -ErrorAction Stop
+    if(-not (Get-Command Get-AppxPackage -ErrorAction SilentlyContinue)){throw 'Get-AppxPackage is unavailable.'}
+    $packages=@(Get-AppxPackage -ErrorAction Stop | Where-Object {-not $_.IsFramework -and -not $_.IsResourcePackage -and -not [string]::IsNullOrWhiteSpace([string]$_.InstallLocation)})
+    $packageCount=$packages.Count
+    $startAppNameByFamily=@{}
+    try{
+        if(Get-Command Get-StartApps -ErrorAction SilentlyContinue){
+            foreach($startApp in @(Get-StartApps -ErrorAction Stop)){
+                $appId=[string]$startApp.AppID
+                $separator=$appId.IndexOf('!')
+                if($separator -gt 0){
+                    $appFamily=$appId.Substring(0,$separator).ToLowerInvariant()
+                    if(-not $startAppNameByFamily.ContainsKey($appFamily) -and -not [string]::IsNullOrWhiteSpace([string]$startApp.Name)){
+                        $startAppNameByFamily[$appFamily]=[string]$startApp.Name
+                    }
+                }
+            }
+        }
+    }catch{$warnings.Add('Start menu display-name lookup warning: '+$_.Exception.Message)}
+    $view=if([Environment]::Is64BitOperatingSystem){[Microsoft.Win32.RegistryView]::Registry64}else{[Microsoft.Win32.RegistryView]::Registry32}
+    $registryBase=[Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::CurrentUser,$view)
+    $systemDataRoot=$registryBase.OpenSubKey('Software\Classes\Local Settings\Software\Microsoft\Windows\CurrentVersion\AppModel\SystemAppData',$false)
+    $approvedRoot=$registryBase.OpenSubKey('Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\StartupTask',$false)
+    if(-not $systemDataRoot){$warnings.Add('AppModel SystemAppData state root is unavailable; manifest and StartupApproved state will still be checked.')}
+    if(-not $approvedRoot){$warnings.Add('StartupApproved\StartupTask override root is unavailable; manifest and AppModel state will still be checked.')}
+    foreach($package in $packages){
+        $family=[string]$package.PackageFamilyName
+        if([string]::IsNullOrWhiteSpace($family)){continue}
+        $systemFamilyKey=$null;$approvedFamilyKey=$null
+        try {
+            $manifestPath=Join-Path ([string]$package.InstallLocation) 'AppxManifest.xml'
+            if(-not(Test-Path -LiteralPath $manifestPath -PathType Leaf)){continue}
+            $manifestText=Get-Content -LiteralPath $manifestPath -Raw -ErrorAction Stop
+            $hasStartupTask=($manifestText -match '(?i)windows\.startupTask')
+            [xml]$manifest=$manifestText
+            if($hasStartupTask){$manifestCount++}
+            if($systemDataRoot){try{$systemFamilyKey=$systemDataRoot.OpenSubKey($family,$false)}catch{}}
+            if($approvedRoot){try{$approvedFamilyKey=$approvedRoot.OpenSubKey($family,$false)}catch{}}
+            # Resolve the real packaged-app logo from its manifest before creating
+            # startup entries. This was present in the accepted V13/V14 engine and
+            # was lost in the restored V12 worker, leaving Store apps iconless.
+            $packageLogoPath=''
+            try{
+                $visualNode=$manifest.SelectSingleNode('//*[local-name()="VisualElements"]')
+                if($visualNode){
+                    foreach($logoAttribute in @('Square44x44Logo','Square30x30Logo','Logo','Square150x150Logo','Square71x71Logo','Square310x310Logo')){
+                        $logoRelative=[string]$visualNode.GetAttribute($logoAttribute)
+                        if([string]::IsNullOrWhiteSpace($logoRelative) -or $logoRelative -match '^ms-resource:'){continue}
+                        $logoRelative=$logoRelative -replace '/','\'
+                        $logoCandidate=Join-Path ([string]$package.InstallLocation) $logoRelative
+                        if(Test-Path -LiteralPath $logoCandidate -PathType Leaf){$packageLogoPath=$logoCandidate;break}
+                        $logoDirectory=Split-Path -Parent $logoCandidate
+                        $logoBase=[IO.Path]::GetFileNameWithoutExtension($logoCandidate)
+                        if(Test-Path -LiteralPath $logoDirectory -PathType Container){
+                            $logoMatch=Get-ChildItem -LiteralPath $logoDirectory -File -ErrorAction SilentlyContinue | Where-Object {$_.BaseName -like ($logoBase+'*')} | Sort-Object @{Expression={if($_.BaseName -match '(?i)targetsize-44|scale-100'){0}elseif($_.BaseName -match '(?i)scale-'){1}else{2}}} | Select-Object -First 1
+                            if($logoMatch){$packageLogoPath=$logoMatch.FullName;break}
+                        }
+                    }
+                }
+            }catch{}
+            if(-not $packageLogoPath){
+                try{
+                    $assetsDirectory=Join-Path ([string]$package.InstallLocation) 'Assets'
+                    if(Test-Path -LiteralPath $assetsDirectory -PathType Container){
+                        $assetMatch=Get-ChildItem -LiteralPath $assetsDirectory -File -ErrorAction SilentlyContinue | Where-Object {$_.BaseName -match '(?i)(Square44x44Logo|StoreLogo|Logo)'} | Sort-Object @{Expression={if($_.BaseName -match '(?i)Square44x44Logo'){0}elseif($_.BaseName -match '(?i)StoreLogo'){1}else{2}}} | Select-Object -First 1
+                        if($assetMatch){$packageLogoPath=$assetMatch.FullName}
+                    }
+                }catch{}
+            }
+            if($packageLogoPath){
+                $packageStartNames=@()
+                $familyKeyForNames=$family.ToLowerInvariant()
+                if($startAppNameByFamily.ContainsKey($familyKeyForNames)){$packageStartNames=@([string]$startAppNameByFamily[$familyKeyForNames])}
+                $results.Add([pscustomobject]@{
+                    AMRStartupPackageIconMap=$true;Name=[string]$package.Name
+                    PackageName=[string]$package.Name;PackageFamilyName=$family
+                    StartAppNames=$packageStartNames;IconLocation=$packageLogoPath
+                })
+            }
+            if(-not $hasStartupTask){continue}
+            $extensions=@($manifest.SelectNodes('//*[local-name()="Extension"]') | Where-Object {([string]$_.GetAttribute('Category')) -ieq 'windows.startupTask'})
+            foreach($extension in $extensions){
+                foreach($startupNode in @($extension.SelectNodes('./*[local-name()="StartupTask"]'))){
+                    $taskId=[string]$startupNode.GetAttribute('TaskId')
+                    if([string]::IsNullOrWhiteSpace($taskId)){continue}
+                    $declarationCount++
+                    $systemTaskKey=$null;$systemState=$null;$approvedValue=$null
+                    try{
+                        if($systemFamilyKey){$systemTaskKey=$systemFamilyKey.OpenSubKey($taskId,$false)}
+                        if($systemTaskKey){$systemState=$systemTaskKey.GetValue('State',$null,[Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)}
+                    }catch{$warnings.Add('AppModel state read '+$family+'!'+$taskId+': '+$_.Exception.Message)}
+                    finally{if($systemTaskKey){try{$systemTaskKey.Dispose()}catch{}}}
+                    try{
+                        if($approvedFamilyKey){$approvedValue=$approvedFamilyKey.GetValue($taskId,$null,[Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)}
+                    }catch{$warnings.Add('StartupApproved task read '+$family+'!'+$taskId+': '+$_.Exception.Message)}
+                    $entryPoint=[string]$extension.GetAttribute('EntryPoint')
+                    $relativeExe=[string]$extension.GetAttribute('Executable')
+                    $manifestEnabled=([string]$startupNode.GetAttribute('Enabled') -match '^(?i:true)$')
+                    $isPackagedDesktop=($entryPoint -ieq 'Windows.FullTrustApplication' -and -not [string]::IsNullOrWhiteSpace($relativeExe))
+                    $enabled=$false;$stateName='Disabled (default)';$stateKnown=$true
+                    if($approvedValue -is [byte[]] -and $approvedValue.Length -gt 0){
+                        $enabled=(($approvedValue[0] -band 0x01) -eq 0)
+                        $stateName=if($enabled){'Enabled (StartupApproved)'}else{'Disabled by user (StartupApproved)'}
+                        $approvedOverrideCount++
+                    } elseif($null -ne $systemState){
+                        $state=[int]$systemState
+                        if($state -lt 0 -or $state -gt 4){$warnings.Add('Unknown AppModel StartupTask state '+$state+' for '+$family+'!'+$taskId);$stateKnown=$false;$stateName='Unknown AppModel state'}
+                        else{
+                            $enabled=($state -eq 2 -or $state -eq 4)
+                            $stateName=switch($state){0{'Disabled'}1{'Disabled by user'}2{'Enabled'}3{'Disabled by policy'}4{'Enabled by policy'}}
+                            $systemStateCount++
+                        }
+                    } elseif($isPackagedDesktop -and $manifestEnabled){
+                        $enabled=$true;$stateName='Enabled (manifest default)';$desktopDefaultCount++
+                    } elseif($isPackagedDesktop){
+                        $enabled=$false;$stateName='Disabled (manifest default)'
+                    } else {
+                        $enabled=$false;$stateName='Disabled (not user-enabled)'
+                    }
+                    $display=[string]$startupNode.GetAttribute('DisplayName')
+                    if([string]::IsNullOrWhiteSpace($display) -or $display -match '^ms-resource:'){
+                        $familyKey=$family.ToLowerInvariant()
+                        if($startAppNameByFamily.ContainsKey($familyKey)){$display=[string]$startAppNameByFamily[$familyKey]}
+                        else{$display=[string]$package.Name}
+                    }
+                    if([string]::IsNullOrWhiteSpace($display)){$display=$taskId}
+                    $parameters=''
+                    foreach($attribute in @($extension.Attributes)){if([string]$attribute.LocalName -eq 'Parameters'){$parameters=[string]$attribute.Value;break}}
+                    $command='Appx: '+$family+' / '+$taskId;$iconLocation=$packageLogoPath
+                    if($relativeExe){
+                        $fullExe=Join-Path ([string]$package.InstallLocation) $relativeExe
+                        $command='"'+$fullExe+'"'
+                        if($parameters){$command+=' '+$parameters}
+                        if(-not $iconLocation){$iconLocation=$fullExe}
+                    }
+                    $results.Add([pscustomobject]@{
+                        Name=$display;EntryName=$taskId;Command=$command
+                        Source='Packaged startup task';Kind='PackagedStartupTask'
+                        ApprovalPath=('HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\StartupTask\'+$family)
+                        ApprovalValueName=$taskId;Enabled=[bool]$enabled
+                        StartupTaskState=$stateName;StateKnown=[bool]$stateKnown;CanToggle=$true
+                        InstalledMatch=$true;InstalledRecord=$null
+                        Identity=('AppxStartup|'+$family+'|'+$taskId)
+                        IconSource=$null;IconLocation=$iconLocation;PackageFamilyName=$family
+                        LogicalIdentity=('APPX|'+$family.ToLowerInvariant()+'|'+$taskId.ToLowerInvariant())
+                    })
+                    $emittedCount++
+                }
+            }
+        } catch { $warnings.Add('Packaged startup manifest '+$family+': '+$_.Exception.Message) }
+        finally {
+            if($systemFamilyKey){try{$systemFamilyKey.Dispose()}catch{}}
+            if($approvedFamilyKey){try{$approvedFamilyKey.Dispose()}catch{}}
+        }
+    }
+    $results.Add([pscustomobject]@{AMRStartupDiagnostic=('packages='+$packageCount+'; manifests-with-startup-declarations='+$manifestCount+'; startup declarations='+$declarationCount+'; emitted startup tasks='+$emittedCount+'; StartupApproved overrides='+$approvedOverrideCount+'; AppModel state values='+$systemStateCount+'; manifest-default enabled desktop tasks='+$desktopDefaultCount)})
+} catch { $warnings.Add('Packaged startup discovery failed: '+$_.Exception.Message) }
+finally {
+    if($approvedRoot){try{$approvedRoot.Dispose()}catch{}}
+    if($systemDataRoot){try{$systemDataRoot.Dispose()}catch{}}
+    if($registryBase){try{$registryBase.Dispose()}catch{}}
+}
+foreach($warning in $warnings){$results.Add([pscustomobject]@{AMRStartupWarning=[string]$warning})}
+$results.ToArray()
+'@
+        [void]$ps.AddScript($scriptText)
+        $handle=$ps.BeginInvoke()
+        $script:StartupAppxState=@{Current=$true;PowerShell=$ps;Runspace=$rs;Handle=$handle}
+        try{if($script:StartupAppxTimer){$script:StartupAppxTimer.Stop()}}catch{}
+        $poll=New-Object System.Windows.Threading.DispatcherTimer;$poll.Interval=[TimeSpan]::FromMilliseconds(220)
+        $poll.Add_Tick({
+            $state=$script:StartupAppxState
+            if(-not $state -or -not $state.Current){$script:StartupAppxTimer.Stop();return}
+            if($state.Handle.IsCompleted){
+                $script:StartupAppxTimer.Stop()
+                try{
+                    $items=@($state.PowerShell.EndInvoke($state.Handle))
+                    foreach($workerError in @($state.PowerShell.Streams.Error)){Write-AMRLog ('Deferred packaged-startup worker error: '+[string]$workerError) WARNING System}
+                    Add-AMRStartupAppxEntries -Items $items
+                } catch {Write-AMRLog ('Deferred packaged startup inventory warning: '+$_.Exception.Message) WARNING System}
+                finally{
+                    try{$state.PowerShell.Dispose()}catch{}
+                    try{$state.Runspace.Close();$state.Runspace.Dispose()}catch{}
+                    $script:StartupAppxState=@{Current=$false}
+                    Start-AMRStartupScheduledTaskScan
+                }
+            }
+        })
+        $script:StartupAppxTimer=$poll;$poll.Start()
+    } catch {
+        Write-AMRLog ('Could not start deferred packaged startup inventory: '+$_.Exception.Message) WARNING System
+        try{if($rs){$rs.Close();$rs.Dispose()}}catch{}
+        Start-AMRStartupScheduledTaskScan
     }
 }
 
@@ -28558,7 +29334,20 @@ function Start-AMRStartupCimScan {
         $rs.ThreadOptions=[System.Management.Automation.Runspaces.PSThreadOptions]::ReuseThread
         $rs.Open()
         $ps=[PowerShell]::Create();$ps.Runspace=$rs
-        [void]$ps.AddScript('Import-Module CimCmdlets -ErrorAction SilentlyContinue; Get-CimInstance -ClassName Win32_StartupCommand -ErrorAction Stop | Select-Object Name,Command,Location')
+        [void]$ps.AddScript(@'
+# Win32_StartupCommand is an independent Windows inventory cross-check for
+# logon commands. It overlaps Run/Startup-folder sources, so only unmatched
+# current-user or machine-wide records are eligible as fallback entries.
+# Its provider requires SeRestorePrivilege; explicitly enable token privileges.
+if(Get-Command Get-WmiObject -ErrorAction SilentlyContinue){
+    Get-WmiObject -Class Win32_StartupCommand -EnableAllPrivileges -ErrorAction Stop |
+        Select-Object Name,Command,Location,User,UserSID
+} else {
+    Import-Module CimCmdlets -ErrorAction SilentlyContinue
+    Get-CimInstance -ClassName Win32_StartupCommand -ErrorAction Stop |
+        Select-Object Name,Command,Location,User,UserSID
+}
+'@)
         $handle=$ps.BeginInvoke()
         $script:StartupCimState=@{Current=$true;PowerShell=$ps;Runspace=$rs;Handle=$handle}
         try{if($script:StartupCimTimer){$script:StartupCimTimer.Stop()}}catch{}
@@ -28568,7 +29357,7 @@ function Start-AMRStartupCimScan {
             if(-not $state -or -not $state.Current){$script:StartupCimTimer.Stop();return}
             if($state.Handle.IsCompleted){
                 $script:StartupCimTimer.Stop()
-                try{$items=@($state.PowerShell.EndInvoke($state.Handle));Add-AMRStartupCimEntries -Items $items}
+                try{$items=@($state.PowerShell.EndInvoke($state.Handle));foreach($workerError in @($state.PowerShell.Streams.Error)){Write-AMRLog ('Deferred Windows startup inventory error: '+[string]$workerError) WARNING System};Add-AMRStartupCimEntries -Items $items}
                 catch{Write-AMRLog ('Deferred Windows startup inventory warning: '+$_.Exception.Message) WARNING System}
                 finally{try{$state.PowerShell.Dispose()}catch{};try{$state.Runspace.Close();$state.Runspace.Dispose()}catch{};$script:StartupCimState=@{Current=$false}}
             }
@@ -29150,7 +29939,11 @@ if ($cleanupTabsForMotion) {
 
 # --- 9. Launch Suite ---
 Write-AMRLog ('Amr | windows_utility initialized. ' + $script:AMRReliabilityPhase) INFO System
+$script:AMRStartupPhaseTimings['BeforeOverviewRefreshMs'] = [int]$script:AMRStartupStopwatch.ElapsedMilliseconds
+Write-AMRLog ('Startup checkpoint: BeforeOverviewRefresh={0}ms' -f $script:AMRStartupPhaseTimings['BeforeOverviewRefreshMs']) INFO Startup
 Refresh-AMROverview
+$script:AMRStartupPhaseTimings['AfterOverviewRefreshMs'] = [int]$script:AMRStartupStopwatch.ElapsedMilliseconds
+Write-AMRLog ('Startup checkpoint: AfterOverviewRefresh={0}ms; OverviewRefreshCost={1}ms' -f $script:AMRStartupPhaseTimings['AfterOverviewRefreshMs'],($script:AMRStartupPhaseTimings['AfterOverviewRefreshMs']-$script:AMRStartupPhaseTimings['BeforeOverviewRefreshMs'])) INFO Startup
 Write-AMRLog 'Utility Ready.' SUCCESS System
 # --- ISOLATED PROGRESSIVE SOFTWARE-ICON REFRESH (V6 - CACHE-FIRST + FASTER LOCAL DELIVERY) ---
 # Preserve layout/cache; local cache is delivered in faster bounded batches; GitHub version checks remain isolated in the background worker.
@@ -29170,7 +29963,7 @@ function Get-AMRCatalogIconFromDisk {
         $ids += @($RawApp.IconAliases | ForEach-Object { [string]$_ })
     }
     foreach ($id in $ids) {
-        foreach ($ext in @('.png','.jpg','.jpeg')) {
+        foreach ($ext in $script:AMRIconImageExtensions) {
             $path = Join-Path $script:IconDir ($id + $ext)
             if (Test-Path -LiteralPath $path -PathType Leaf) {
                 $source = Get-AMRIconImageSource -Path $path
@@ -29224,6 +30017,10 @@ function Start-AMRBackgroundIconRefresh {
             # Keep background icon work below the UI thread's scheduling priority.
             try { [System.Threading.Thread]::CurrentThread.Priority = [System.Threading.ThreadPriority]::BelowNormal } catch {}
 
+            # Mirror the shared, approved extension list inside this isolated runspace.
+            $supportedImageExtensions = @('.png','.jpg','.jpeg','.jpe','.jfif','.bmp','.dib','.gif','.tif','.tiff','.ico','.webp','.wdp','.jxr','.hdp','.heic','.heif','.avif','.jp2','.j2k','.dds','.tga','.pcx','.ppm','.pgm','.pbm')
+            $supportedImagePattern = '(?i)\.(png|jpe?g|jpe|jfif|bmp|dib|gif|tif|tiff|ico|webp|wdp|jxr|hdp|heic|heif|avif|jp2|j2k|dds|tga|pcx|ppm|pgm|pbm)$'
+
             function Test-AMRIconCacheUsable {
                 param([string]$IconDir,[int]$Minimum)
                 try {
@@ -29235,7 +30032,7 @@ function Start-AMRBackgroundIconRefresh {
                         [string]$identity.branch -ne 'main' -or
                         [string]$identity.file -ne 'Icons.zip') { return $false }
                     $count = @(Get-ChildItem -LiteralPath $IconDir -File -ErrorAction SilentlyContinue |
-                        Where-Object { $_.Extension -match '^\.(png|jpe?g)$' -and $_.Length -gt 128 }).Count
+                        Where-Object { ($supportedImageExtensions -contains $_.Extension.ToLowerInvariant()) -and $_.Length -gt 32 }).Count
                     return ($count -ge $Minimum)
                 } catch { return $false }
             }
@@ -29246,13 +30043,17 @@ function Start-AMRBackgroundIconRefresh {
                 param([int]$Index,[string]$Path,[object]$ReadyIconQueue)
                 if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $false }
                 try {
-                    $bitmap = New-Object System.Windows.Media.Imaging.BitmapImage
-                    $bitmap.BeginInit()
-                    $bitmap.CacheOption = [System.Windows.Media.Imaging.BitmapCacheOption]::OnLoad
-                    $bitmap.CreateOptions = [System.Windows.Media.Imaging.BitmapCreateOptions]::IgnoreImageCache
-                    $bitmap.UriSource = New-Object System.Uri([System.IO.Path]::GetFullPath($Path),[System.UriKind]::Absolute)
-                    $bitmap.EndInit()
-                    if ($bitmap.CanFreeze) { $bitmap.Freeze() }
+                    $fileStream = [System.IO.File]::Open($Path,[System.IO.FileMode]::Open,[System.IO.FileAccess]::Read,[System.IO.FileShare]::ReadWrite)
+                    try {
+                        $decoder = [System.Windows.Media.Imaging.BitmapDecoder]::Create(
+                            $fileStream,
+                            [System.Windows.Media.Imaging.BitmapCreateOptions]::IgnoreImageCache,
+                            [System.Windows.Media.Imaging.BitmapCacheOption]::OnLoad
+                        )
+                        if ($null -eq $decoder -or $decoder.Frames.Count -lt 1) { return $false }
+                        $bitmap = $decoder.Frames[0]
+                        if ($bitmap.CanFreeze) { $bitmap.Freeze() }
+                    } finally { $fileStream.Dispose() }
                     # Do not throttle archive extraction/image preparation on UI delivery speed.
                     # The DispatcherTimer drains this queue independently in small UI-safe batches.
                     $ReadyIconQueue.Enqueue([pscustomobject]@{ Index=$Index; Source=$bitmap })
@@ -29266,7 +30067,7 @@ function Start-AMRBackgroundIconRefresh {
                 foreach ($request in $CatalogIconRequests) {
                     $found = $false
                     foreach ($candidateId in @($request.Ids)) {
-                        foreach ($extension in @('.png','.jpg','.jpeg')) {
+                        foreach ($extension in $supportedImageExtensions) {
                             $imagePath = Join-Path $IconDir ([string]$candidateId + $extension)
                             if (Publish-AMRIconFile -Index ([int]$request.Index) -Path $imagePath -ReadyIconQueue $ReadyIconQueue) {
                                 $prepared++; $found = $true; break
@@ -29307,7 +30108,7 @@ function Start-AMRBackgroundIconRefresh {
                         [string]$oldMeta.file -eq 'Icons.zip'
                     if (-not $cacheBelongsToTarget) {
                         Get-ChildItem -LiteralPath $IconDir -File -ErrorAction SilentlyContinue |
-                            Where-Object { $_.Extension -match '(?i)^\.(png|jpe?g)$' -or $_.Name -match '(?i)^icons\.zip(\.previous)?$' -or $_.Name -eq 'icons.cache.json' } |
+                            Where-Object { ($supportedImageExtensions -contains $_.Extension.ToLowerInvariant()) -or $_.Name -match '(?i)^icons\.zip(\.previous)?$' -or $_.Name -eq 'icons.cache.json' } |
                             Remove-Item -Force -ErrorAction SilentlyContinue
                         $oldMeta = $null
                     }
@@ -29332,7 +30133,7 @@ function Start-AMRBackgroundIconRefresh {
                             if ($localLength -ge 262144 -and ($remoteSize -lt 0 -or $localLength -eq $remoteSize)) {
                                 Add-Type -AssemblyName System.IO.Compression -ErrorAction SilentlyContinue
                                 $testZip = [IO.Compression.ZipFile]::OpenRead($localArchive)
-                                $imageEntries = @($testZip.Entries | Where-Object { $_.FullName -match '(?i)\.(png|jpe?g)$' })
+                                $imageEntries = @($testZip.Entries | Where-Object { $_.FullName -match $supportedImagePattern })
                                 $testZip.Dispose()
                                 $localValid = ($imageEntries.Count -ge $MinFileCount)
                             }
@@ -29342,7 +30143,7 @@ function Start-AMRBackgroundIconRefresh {
                         $remoteSize -gt 0 -and [long]$oldMeta.size -eq $remoteSize
 
                     if ($sameVersion) {
-                        $cachedImages = @(Get-ChildItem -LiteralPath $IconDir -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -match '^\.(png|jpe?g)$' -and $_.Length -gt 128 }).Count
+                        $cachedImages = @(Get-ChildItem -LiteralPath $IconDir -File -ErrorAction SilentlyContinue | Where-Object { ($supportedImageExtensions -contains $_.Extension.ToLowerInvariant()) -and $_.Length -gt 32 }).Count
                         $expectedImages = 0
                         try { $expectedImages = [int]$oldMeta.imageCount } catch {}
                         if ($expectedImages -gt 0 -and $cachedImages -ge $expectedImages) {
@@ -29375,7 +30176,7 @@ function Start-AMRBackgroundIconRefresh {
                                     if ($got -lt 262144) { throw "Downloaded ZIP is too small ($got bytes)" }
                                     if ($remoteSize -gt 0 -and $got -ne $remoteSize) { throw "Downloaded size mismatch: expected $remoteSize, received $got" }
                                     $verify = [IO.Compression.ZipFile]::OpenRead($partArchive)
-                                    try { $validEntries = @($verify.Entries | Where-Object { $_.FullName -match '(?i)\.(png|jpe?g)$' }) } finally { $verify.Dispose() }
+                                    try { $validEntries = @($verify.Entries | Where-Object { $_.FullName -match $supportedImagePattern }) } finally { $verify.Dispose() }
                                     if ($validEntries.Count -lt $MinFileCount) { throw "ZIP contains only $($validEntries.Count) image files" }
                                     $downloaded = $true
                                 } catch {
@@ -29413,7 +30214,7 @@ function Start-AMRBackgroundIconRefresh {
                     # Keep icons.zip and metadata alongside the extracted image files.
                     $zip = [IO.Compression.ZipFile]::OpenRead($localArchive)
                     $entries = @($zip.Entries | Where-Object {
-                        $_.FullName -match '(?i)\.(png|jpe?g)$' -and
+                        $_.FullName -match $supportedImagePattern -and
                         $_.FullName -notmatch '(^/|^[a-zA-Z]:|(^|[\\/])\.\.([\\/]|$))'
                     })
                     $extracted = 0; $seen = @{}
@@ -29444,8 +30245,8 @@ function Start-AMRBackgroundIconRefresh {
                         }
                     } finally { $zip.Dispose() }
                     if ($extracted -lt $MinFileCount) { return "ExtractFailed:Only $extracted images extracted" }
-                    $finalCount = @(Get-ChildItem -LiteralPath $IconDir -File | Where-Object { $_.Extension -match '^\.(png|jpe?g)$' -and $_.Length -gt 128 }).Count
-                    $metaOut = [pscustomobject]@{ repository='3mr10aa/Tool-Pro'; branch='main'; file='Icons.zip'; source=$ArchiveUrl; size=[long](Get-Item -LiteralPath $localArchive).Length; sha=$remoteSha; imageCount=$finalCount; updatedUtc=[DateTime]::UtcNow.ToString('o') }
+                    $finalCount = @(Get-ChildItem -LiteralPath $IconDir -File | Where-Object { ($supportedImageExtensions -contains $_.Extension.ToLowerInvariant()) -and $_.Length -gt 32 }).Count
+                    $metaOut = [pscustomobject]@{ schemaVersion=2; repository='3mr10aa/Tool-Pro'; branch='main'; file='Icons.zip'; source=$ArchiveUrl; size=[long](Get-Item -LiteralPath $localArchive).Length; sha=$remoteSha; imageCount=$finalCount; updatedUtc=[DateTime]::UtcNow.ToString('o') }
                     $metaOut | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $metaFile -Encoding UTF8
                     return "ArchiveReady:DownloadedOrReused;Extracted=$extracted;CacheImages=$finalCount;Zip=$localArchive"
                 } catch {
@@ -29652,6 +30453,8 @@ $script:Window.Add_ContentRendered({
 # intentional catalog/installed switches use a low-cost grid-level cross-fade + slide.
 # Inventory is warmed in a dedicated background runspace at startup. The UI only
 # consumes the last cached snapshot and the completed refresh payload.
+$script:AMRStartupPhaseTimings['BeforeShowDialogMs'] = [int]$script:AMRStartupStopwatch.ElapsedMilliseconds
+Write-AMRLog ('Startup checkpoint: BeforeShowDialog={0}ms' -f $script:AMRStartupPhaseTimings['BeforeShowDialogMs']) INFO Startup
 [void]$script:Window.ShowDialog()
 
 
