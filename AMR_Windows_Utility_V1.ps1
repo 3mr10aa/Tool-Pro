@@ -6,6 +6,9 @@
 
 $script:AMRStartupStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 $script:AMRStartupPhaseTimings = [ordered]@{}
+# Name of the combined tab inside Tool Kit (Optimize, Security, System, Networks, Utilities, Backup).
+# Change ONLY this line to rename it; the tab header is set from it right after the window loads.
+$script:AMRControlTabName = 'Control Center'
 
 # --- Phase 6.8 | Direct Vendor Adapters & Full Multi-Source Discovery (built on Phase 6.7) ---
 # --- 0. Single-pass STA + Administrator bootstrap ---
@@ -98,6 +101,8 @@ function Add-AMRDeferredStartupAction {
 Add-Type -AssemblyName System.Windows.Forms
 
 $script:AMRStartupStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+# A1 (measurement only): time from the start of this PowerShell process to this line (script read/parse and any elevation relaunch).
+try { $script:AMRStartupPhaseTimings['ProcessStartToScriptMs'] = [int]([DateTime]::Now - [System.Diagnostics.Process]::GetCurrentProcess().StartTime).TotalMilliseconds } catch {}
 
 # Load WPF only after the splash has been shown and painted.
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Xaml
@@ -241,6 +246,110 @@ $script:LogDir      = Join-Path $script:AppRoot 'Logs'
 $script:ExportDir   = Join-Path $script:AppRoot 'Exports'
 $script:IconDir     = Join-Path $script:AppRoot 'Icons'
 $script:DownloadDir = Join-Path $script:AppRoot 'Downloads'
+# A1: the A23 BelowNormal priority guard was removed from every worker (Amr's decision); only the older original BelowNormal lines remain.
+
+# A1: startup prefetch workers. Plain .NET/PowerShell work only (no WPF, no script functions), started before the window is built so
+# registry/AppX/JSON reads run in parallel with the XAML and catalog work. The consumer waits for the worker only if it is not done yet
+# and falls back to the original synchronous code when the worker failed or timed out, so results are identical.
+function Start-AMRStartupPrefetchWorker {
+    param([string]$Name,[string]$ScriptText,[object[]]$Arguments = @())
+    $rs = $null; $ps = $null
+    try {
+        $rs = [runspacefactory]::CreateRunspace()
+        $rs.ApartmentState = 'MTA'
+        $rs.Open()
+        $ps = [powershell]::Create()
+        $ps.Runspace = $rs
+        [void]$ps.AddScript($ScriptText,$true)
+        foreach ($argument in $Arguments) { [void]$ps.AddArgument($argument) }
+        return [pscustomobject]@{ Name = $Name; PowerShell = $ps; Runspace = $rs; Async = $ps.BeginInvoke(); Watch = [System.Diagnostics.Stopwatch]::StartNew() }
+    } catch {
+        try { if ($ps) { $ps.Dispose() } } catch {}
+        try { if ($rs) { $rs.Close(); $rs.Dispose() } } catch {}
+        return $null
+    }
+}
+function Complete-AMRStartupPrefetchWorker {
+    param($Job,[int]$WaitMs = 15000)
+    $items = @(); $ok = $false; $waited = [long]0
+    if ($null -eq $Job) { return [pscustomobject]@{ Ok = $false; Items = @(); WaitedMs = $waited; WorkerMs = [long]0 } }
+    $workerMs = [long]0
+    try {
+        if (-not $Job.Async.IsCompleted) {
+            $waitWatch = [System.Diagnostics.Stopwatch]::StartNew()
+            [void]$Job.Async.AsyncWaitHandle.WaitOne($WaitMs)
+            $waited = $waitWatch.ElapsedMilliseconds
+        }
+        if ($Job.Async.IsCompleted) {
+            $items = @($Job.PowerShell.EndInvoke($Job.Async))
+            $ok = $true
+            try { $workerMs = [long]$Job.Watch.ElapsedMilliseconds } catch {}
+            try { $Job.PowerShell.Dispose() } catch {}
+            try { $Job.Runspace.Close(); $Job.Runspace.Dispose() } catch {}
+        }
+    } catch { $ok = $false; $items = @() }
+    return [pscustomobject]@{ Ok = $ok; Items = $items; WaitedMs = $waited; WorkerMs = $workerMs }
+}
+
+# Worker 1: which known desktop apps are installed (uninstall registry display names + three AppX package lookups). Used by the Cleanup cache discovery.
+$script:AMRCleanupAppDetectWorkerText = @'
+$ErrorActionPreference = 'Continue'
+$watch = [System.Diagnostics.Stopwatch]::StartNew()
+$names = New-Object 'System.Collections.Generic.List[string]'
+foreach ($registryRoot in @('HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall','HKLM:\Software\Wow6432Node\Microsoft\Windows\CurrentVersion\Uninstall','HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall')) {
+    try {
+        foreach ($subKey in @(Get-ChildItem -LiteralPath $registryRoot -ErrorAction SilentlyContinue)) {
+            try {
+                $entry = Get-ItemProperty -LiteralPath $subKey.PSPath -ErrorAction Stop
+                if (-not [string]::IsNullOrWhiteSpace([string]$entry.DisplayName)) { $names.Add([string]$entry.DisplayName) }
+            } catch { }
+        }
+    } catch { }
+}
+$registryMs = $watch.ElapsedMilliseconds
+$appx = @{}
+foreach ($packageName in @('MSTeams','SpotifyAB.SpotifyMusic','*Discord*')) {
+    $found = $false
+    try { if (@(Get-AppxPackage -Name $packageName -ErrorAction SilentlyContinue).Count -gt 0) { $found = $true } } catch { }
+    $appx[$packageName] = $found
+}
+[pscustomobject]@{ DisplayNames = $names.ToArray(); Appx = $appx; RegistryMs = $registryMs; TotalMs = $watch.ElapsedMilliseconds }
+'@
+
+# Worker 2: read and parse the persisted Installed catalog (JSON) and apply the same per-record fixups the UI import used to apply.
+$script:AMRInstalledCachePrefetchWorkerText = @'
+param([string]$CachePath)
+$ErrorActionPreference = 'Stop'
+$watch = [System.Diagnostics.Stopwatch]::StartNew()
+try {
+    if (-not [System.IO.File]::Exists($CachePath)) { return [pscustomobject]@{ Status = 'missing'; Cache = $null; ReadMs = 0; ParseMs = 0; FixupMs = 0; FixupDone = $false } }
+    $text = Get-Content -LiteralPath $CachePath -Raw -ErrorAction Stop
+    $readMs = $watch.ElapsedMilliseconds
+    $cache = $text | ConvertFrom-Json -ErrorAction Stop
+    $parseMs = $watch.ElapsedMilliseconds - $readMs
+    $fixupDone = $false
+    $records = @($cache.Inventory)
+    if ($records.Count -le 20000) {
+        foreach ($record in $records) {
+            if (-not $record.PSObject.Properties['Icon']) { $record | Add-Member -NotePropertyName Icon -NotePropertyValue $null }
+            else { $record.Icon = $null }
+            if (-not $record.PSObject.Properties['IsUniversalInventory']) { $record | Add-Member -NotePropertyName IsUniversalInventory -NotePropertyValue $true } else { $record.IsUniversalInventory = $true }
+            if (-not $record.PSObject.Properties['DetailsExpanded']) { $record | Add-Member -NotePropertyName DetailsExpanded -NotePropertyValue $false } else { $record.DetailsExpanded = $false }
+            if (-not $record.PSObject.Properties['Category']) { $record | Add-Member -NotePropertyName Category -NotePropertyValue '' }
+        }
+        $fixupDone = $true
+    }
+    [pscustomobject]@{ Status = 'ok'; Cache = $cache; ReadMs = $readMs; ParseMs = $parseMs; FixupMs = ($watch.ElapsedMilliseconds - $readMs - $parseMs); FixupDone = $fixupDone }
+} catch {
+    [pscustomobject]@{ Status = 'error'; Cache = $null; ReadMs = 0; ParseMs = 0; FixupMs = 0; FixupDone = $false; Error = $_.Exception.Message }
+}
+'@
+$script:AMRCleanupAppxDetect = $null
+$script:AMRCleanupDetectJob = $null
+$script:AMRInstalledCachePrefetchJob = $null
+try { $script:AMRCleanupDetectJob = Start-AMRStartupPrefetchWorker -Name 'CleanupAppDetect' -ScriptText $script:AMRCleanupAppDetectWorkerText } catch { $script:AMRCleanupDetectJob = $null }
+try { $script:AMRInstalledCachePrefetchJob = Start-AMRStartupPrefetchWorker -Name 'InstalledCache' -ScriptText $script:AMRInstalledCachePrefetchWorkerText -Arguments @((Join-Path (Join-Path $script:AppRoot 'Cache') 'InstalledInventoryCache.json')) } catch { $script:AMRInstalledCachePrefetchJob = $null }
+
 New-Item -ItemType Directory -Force -Path $script:BackupDir,$script:LogDir,$script:ExportDir,$script:IconDir,$script:DownloadDir | Out-Null
 $script:LogFile = Join-Path $script:LogDir ("AMR_{0}.log" -f (Get-Date -Format 'yyyyMMdd'))
 try { [AMRLogDiskWriter]::Configure([string]$script:LogFile) } catch {}
@@ -1105,6 +1214,20 @@ function Show-AMRCleanupSummary {
         [string[]]$Lines=@(),
         [ValidateSet('Success','Info','Warning','Error')][string]$Kind='Success'
     )
+    # A20: the Cleanup summary uses the same transparent glass dialog as the Software and System result windows.
+    # The previous branded window below stays as the fallback if the glass dialog cannot be created.
+    try {
+        $glassParts = New-Object 'System.Collections.Generic.List[string]'
+        if (-not [string]::IsNullOrWhiteSpace($Status)) { $glassParts.Add([string]$Status) }
+        if (-not [string]::IsNullOrWhiteSpace($Details)) { $glassParts.Add([string]$Details) }
+        $glassLines = @($Lines | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+        if ($glassLines.Count -gt 0) { $glassParts.Add(($glassLines -join "`n")) }
+        $glassIcon = switch ($Kind) { 'Warning' { [System.Windows.MessageBoxImage]::Warning } 'Error' { [System.Windows.MessageBoxImage]::Error } default { [System.Windows.MessageBoxImage]::Information } }
+        [void](Show-AMRMessageGlass ($glassParts -join "`n`n") $Title ([System.Windows.MessageBoxButton]::OK) $glassIcon)
+        return
+    } catch {
+        try { Write-AMRLog ("Glass cleanup summary unavailable, using the branded window: {0}" -f $_.Exception.Message) WARNING Cleanup } catch {}
+    }
     try {
         $accentHex = switch ($Kind) {
             'Success' { '#8BDCC5' }
@@ -3003,6 +3126,10 @@ if ($script:IconCacheUsableAtStartup) {
 }
 
 $script:AMRCatalogItemCompiled = ($null -ne ('AMR.SoftwareCatalogItem' -as [type]))
+# A1 (measurement only): how much of the catalog loop is icon decoding.
+$script:AMRStartupIconDecodeTicks = [long]0
+$script:AMRStartupIconDecodeCalls = 0
+$amrCatalogLoopStart = [System.Diagnostics.Stopwatch]::GetTimestamp()
 $RawApps | ForEach-Object {
     $initial  = if ($_.Name.Length -gt 0) { $_.Name.Substring(0,1).ToUpper() } else { 'A' }
 
@@ -3020,7 +3147,10 @@ $RawApps | ForEach-Object {
                 $localIconPath = $null
                 if ($script:AMRStartupIconIndex.TryGetValue(($localIconId + $localIconExtension).ToLowerInvariant(), [ref]$localIconPath)) {
                     # Catalog icons are shown at 30x30 DIPs; 96 px keeps them sharp on high-DPI displays.
+                    $amrDecodeStart = [System.Diagnostics.Stopwatch]::GetTimestamp()
                     $iconSource = Get-AMRIconImageSource -Path $localIconPath -MaxPixelWidth 96
+                    $script:AMRStartupIconDecodeTicks += ([System.Diagnostics.Stopwatch]::GetTimestamp() - $amrDecodeStart)
+                    $script:AMRStartupIconDecodeCalls++
                     if ($null -ne $iconSource) { break }
                 }
             }
@@ -3058,6 +3188,12 @@ $RawApps | ForEach-Object {
 }
 
 $loadedIconCount = @($script:SoftwareCatalog | Where-Object { $null -ne $_.Icon }).Count
+try {
+    $amrTickMs = 1000.0 / [double][System.Diagnostics.Stopwatch]::Frequency
+    $script:AMRStartupPhaseTimings['CatalogLoopMs'] = [int](([System.Diagnostics.Stopwatch]::GetTimestamp() - $amrCatalogLoopStart) * $amrTickMs)
+    $script:AMRStartupPhaseTimings['CatalogIconDecodeMs'] = [int]($script:AMRStartupIconDecodeTicks * $amrTickMs)
+    Write-AMRLog ('Startup catalog loop: {0} item(s); {1} icon decode call(s) took {2} ms of the {3} ms loop.' -f $script:SoftwareCatalog.Count,$script:AMRStartupIconDecodeCalls,$script:AMRStartupPhaseTimings['CatalogIconDecodeMs'],$script:AMRStartupPhaseTimings['CatalogLoopMs']) INFO Startup
+} catch {}
 $script:AMRStartupPhaseTimings['IconCatalogReadyMs'] = [int]$script:AMRStartupStopwatch.ElapsedMilliseconds
 Write-AMRLog ("Startup catalog ready: {0} preloaded icons from local cache. Cache='{1}'." -f $loadedIconCount,$script:IconDir) INFO Software
 Write-AMRLog ("Catalog item model: {0} ({1} items)." -f $(if ($script:AMRCatalogItemCompiled) { 'compiled AMR.SoftwareCatalogItem with INotifyPropertyChanged' } else { 'PSCustomObject fallback' }),$script:SoftwareCatalog.Count) INFO Software
@@ -3473,10 +3609,10 @@ Write-AMRLog ("Catalog item model: {0} ({1} items)." -f $(if ($script:AMRCatalog
         <ColumnDefinition Width="*"/>
         <ColumnDefinition Width="330"/>
        </Grid.ColumnDefinitions>
-       <UniformGrid Grid.Row="0" Grid.Column="0" Rows="1" Columns="6"
+       <UniformGrid x:Name="PART_MainTabStrip" Grid.Row="0" Grid.Column="0" Rows="1" Columns="6"
                     IsItemsHost="True" Margin="0,0,10,10" VerticalAlignment="Center"
                     ClipToBounds="False"/>
-       <Border Grid.Row="0" Grid.Column="1" Margin="4,0,0,10"
+       <Border x:Name="PART_SmartSearchPanel" Grid.Row="0" Grid.Column="1" Margin="4,0,0,10"
                Background="#101D30" BorderBrush="#2874C7" BorderThickness="1.3"
                CornerRadius="11" Padding="9,6" VerticalAlignment="Center"
                RenderTransformOrigin="0.5,0.5">
@@ -3916,6 +4052,16 @@ Write-AMRLog ("Catalog item model: {0} ({1} items)." -f $(if ($script:AMRCatalog
    <Setter Property="MaxWidth" Value="146"/>
   </Style>
 
+  <!-- Control Center children: same tile as the Tool Kit sidebar items, indented under the Control Center entry; hidden until the group is opened. -->
+  <Style x:Key="ToolkitSubTabChildItemStyle" TargetType="TabItem" BasedOn="{StaticResource ToolkitSubTabItemStyle}">
+   <Setter Property="HorizontalAlignment" Value="Right"/>
+   <Setter Property="Width" Value="128"/>
+   <Setter Property="MinWidth" Value="128"/>
+   <Setter Property="MaxWidth" Value="128"/>
+   <Setter Property="Tag" Value="CCChild"/>
+   <Setter Property="Visibility" Value="Collapsed"/>
+  </Style>
+
   <Style TargetType="TextBox">
    <Setter Property="Background" Value="#27272A"/>
    <Setter Property="Foreground" Value="#FFFFFF"/>
@@ -4038,6 +4184,85 @@ Write-AMRLog ("Catalog item model: {0} ({1} items)." -f $(if ($script:AMRCatalog
         </Storyboard></BeginStoryboard></Trigger.EnterActions>
        </Trigger>
        <Trigger Property="IsEnabled" Value="False"><Setter TargetName="SystemRefreshSurface" Property="Opacity" Value="0.48"/></Trigger>
+      </ControlTemplate.Triggers>
+     </ControlTemplate>
+    </Setter.Value>
+   </Setter>
+  </Style>
+  <Style x:Key="AMRCleanupCheckStyle" TargetType="CheckBox">
+   <Setter Property="Cursor" Value="Hand"/>
+   <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+   <Setter Property="VerticalContentAlignment" Value="Center"/>
+   <Setter Property="Template">
+    <Setter.Value>
+     <ControlTemplate TargetType="CheckBox">
+      <StackPanel Orientation="Horizontal" Background="Transparent">
+       <Border x:Name="SelectionSurface" Width="18" Height="18" CornerRadius="5"
+               Background="#FF202C3B" BorderBrush="#FF65758B" BorderThickness="1.2"
+               SnapsToDevicePixels="True" VerticalAlignment="Center">
+        <Grid>
+         <Path x:Name="SelectionTick" Data="M 3,9 L 7,13 L 15,4"
+               Stroke="#FFFFFFFF" StrokeThickness="2.0" StrokeStartLineCap="Round"
+               StrokeEndLineCap="Round" StrokeLineJoin="Round" Visibility="Collapsed"
+               HorizontalAlignment="Center" VerticalAlignment="Center"/>
+        </Grid>
+       </Border>
+       <ContentPresenter Margin="4,0,0,0" VerticalAlignment="Center" RecognizesAccessKey="True"/>
+      </StackPanel>
+      <ControlTemplate.Triggers>
+       <Trigger Property="IsMouseOver" Value="True">
+        <Setter TargetName="SelectionSurface" Property="BorderBrush" Value="#FFE0AD"/>
+        <Setter TargetName="SelectionSurface" Property="Background" Value="#FF34465A"/>
+       </Trigger>
+       <Trigger Property="IsChecked" Value="True">
+        <Setter TargetName="SelectionSurface" Property="Background" Value="#FFB88D4D"/>
+        <Setter TargetName="SelectionSurface" Property="BorderBrush" Value="#FFFFE0AD"/>
+        <Setter TargetName="SelectionTick" Property="Visibility" Value="Visible"/>
+       </Trigger>
+       <Trigger Property="IsEnabled" Value="False">
+        <Setter TargetName="SelectionSurface" Property="Opacity" Value="0.45"/>
+       </Trigger>
+      </ControlTemplate.Triggers>
+     </ControlTemplate>
+    </Setter.Value>
+   </Setter>
+  </Style>
+  <Style x:Key="AMRTweakCheckStyle" TargetType="CheckBox">
+   <Setter Property="Cursor" Value="Hand"/>
+   <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+   <Setter Property="VerticalContentAlignment" Value="Center"/>
+   <Setter Property="Template">
+    <Setter.Value>
+     <ControlTemplate TargetType="CheckBox">
+      <StackPanel Orientation="Horizontal" Background="Transparent">
+       <Border x:Name="SelectionSurface" Width="18" Height="18" CornerRadius="5"
+               Background="#FF1E3550" BorderBrush="#FF5E8DB8" BorderThickness="1.2"
+               SnapsToDevicePixels="True" VerticalAlignment="Center" RenderTransformOrigin="0.5,0.5">
+        <Border.RenderTransform><ScaleTransform x:Name="BoxScale" ScaleX="1" ScaleY="1"/></Border.RenderTransform>
+        <Grid>
+         <Path x:Name="SelectionTick" Data="M 3,9 L 7,13 L 15,4"
+               Stroke="#FFFFFFFF" StrokeThickness="2.0" StrokeStartLineCap="Round"
+               StrokeEndLineCap="Round" StrokeLineJoin="Round" Visibility="Collapsed"
+               HorizontalAlignment="Center" VerticalAlignment="Center"/>
+        </Grid>
+       </Border>
+       <ContentPresenter Margin="4,0,0,0" VerticalAlignment="Center" RecognizesAccessKey="True"/>
+      </StackPanel>
+      <ControlTemplate.Triggers>
+       <Trigger Property="IsMouseOver" Value="True">
+        <Setter TargetName="SelectionSurface" Property="BorderBrush" Value="#FF8BC6F4"/>
+        <Setter TargetName="SelectionSurface" Property="Background" Value="#FF2A4A6E"/>
+        <Trigger.EnterActions><BeginStoryboard x:Name="TweakCheckHoverIn"><Storyboard><DoubleAnimation Storyboard.TargetName="BoxScale" Storyboard.TargetProperty="ScaleX" To="1.12" Duration="0:0:0.11"/><DoubleAnimation Storyboard.TargetName="BoxScale" Storyboard.TargetProperty="ScaleY" To="1.12" Duration="0:0:0.11"/></Storyboard></BeginStoryboard></Trigger.EnterActions>
+        <Trigger.ExitActions><RemoveStoryboard BeginStoryboardName="TweakCheckHoverIn"/><BeginStoryboard><Storyboard FillBehavior="Stop"><DoubleAnimation Storyboard.TargetName="BoxScale" Storyboard.TargetProperty="ScaleX" From="1.12" To="1" Duration="0:0:0.12" FillBehavior="Stop"/><DoubleAnimation Storyboard.TargetName="BoxScale" Storyboard.TargetProperty="ScaleY" From="1.12" To="1" Duration="0:0:0.12" FillBehavior="Stop"/></Storyboard></BeginStoryboard></Trigger.ExitActions>
+       </Trigger>
+       <Trigger Property="IsChecked" Value="True">
+        <Setter TargetName="SelectionSurface" Property="Background" Value="#FF3F8FD6"/>
+        <Setter TargetName="SelectionSurface" Property="BorderBrush" Value="#FF9DD2FA"/>
+        <Setter TargetName="SelectionTick" Property="Visibility" Value="Visible"/>
+       </Trigger>
+       <Trigger Property="IsEnabled" Value="False">
+        <Setter TargetName="SelectionSurface" Property="Opacity" Value="0.45"/>
+       </Trigger>
       </ControlTemplate.Triggers>
      </ControlTemplate>
     </Setter.Value>
@@ -4722,62 +4947,9 @@ Write-AMRLog ("Catalog item model: {0} ({1} items)." -f $(if ($script:AMRCatalog
       </ScrollViewer>
      </TabItem>
      <TabItem Header="Backups">
-      <Border BorderThickness="1" CornerRadius="14" Padding="10" Margin="6,4,6,6">
-       <Border.Background>
-        <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
-         <GradientStop Color="#D92A2E33" Offset="0"/>
-         <GradientStop Color="#C51B1F24" Offset="0.52"/>
-         <GradientStop Color="#B814171B" Offset="1"/>
-        </LinearGradientBrush>
-       </Border.Background>
-       <Border.BorderBrush>
-        <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
-         <GradientStop Color="#80FFFFFF" Offset="0"/>
-         <GradientStop Color="#35FFFFFF" Offset="0.55"/>
-         <GradientStop Color="#65FFFFFF" Offset="1"/>
-        </LinearGradientBrush>
-       </Border.BorderBrush>
+      <Border BorderThickness="0" Background="Transparent" Padding="0" Margin="0">
        <Grid>
         <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
-        <!-- The two backup destinations are shown as a compact animated submenu when the main Backups section is opened. -->
-        <Border Grid.Row="0" BorderThickness="1" CornerRadius="11" Padding="10,7" Margin="2,0,2,8">
-         <Border.Background>
-          <LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
-           <GradientStop Color="#66FFFFFF" Offset="0"/>
-           <GradientStop Color="#24FFFFFF" Offset="0.45"/>
-           <GradientStop Color="#12FFFFFF" Offset="1"/>
-          </LinearGradientBrush>
-         </Border.Background>
-         <Border.BorderBrush>
-          <LinearGradientBrush StartPoint="0,0" EndPoint="1,0">
-           <GradientStop Color="#75FFFFFF" Offset="0"/>
-           <GradientStop Color="#28FFFFFF" Offset="0.5"/>
-           <GradientStop Color="#65FFFFFF" Offset="1"/>
-          </LinearGradientBrush>
-         </Border.BorderBrush>
-         <Grid>
-          <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-          <StackPanel Grid.Column="0" VerticalAlignment="Center" Margin="2,0,12,0">
-           <TextBlock Text="Backup &amp; Recovery Center" FontSize="23" FontWeight="Bold" Foreground="#E7EAF0"/>
-           <TextBlock Text="System backups, recovery tools and driver protection" FontSize="11" Foreground="#AEB8C8" Margin="0,2,0,0"/>
-          </StackPanel>
-         <StackPanel x:Name="BackupSubMenuPanel" Grid.Column="1" Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center" Opacity="0" RenderTransformOrigin="0.5,0.5">
-          <StackPanel.RenderTransform><TranslateTransform Y="-6"/></StackPanel.RenderTransform>
-          <StackPanel.Triggers>
-           <EventTrigger RoutedEvent="FrameworkElement.Loaded">
-            <BeginStoryboard>
-             <Storyboard>
-              <DoubleAnimation Storyboard.TargetProperty="Opacity" From="0" To="1" Duration="0:0:0.24"/>
-              <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.Y)" From="-6" To="0" Duration="0:0:0.24" DecelerationRatio="0.8"/>
-             </Storyboard>
-            </BeginStoryboard>
-           </EventTrigger>
-          </StackPanel.Triggers>
-          <Button Name="BackupCenterChoiceBtn" Content="💾  Backup Center" Width="142" Height="29" Margin="0,0,8,0" Padding="9,3" FontSize="11" FontWeight="SemiBold" Background="#263646" Foreground="#E7EAF0" BorderBrush="#B89A62" BorderThickness="1" Cursor="Hand"/>
-          <Button Name="DriverBackupChoiceBtn" Content="🛡  Driver Backup" Width="142" Height="29" Padding="9,3" FontSize="11" FontWeight="SemiBold" Background="#303D35" Foreground="#E7EFE8" BorderBrush="#40564A" BorderThickness="1" Cursor="Hand"/>
-         </StackPanel>
-         </Grid>
-        </Border>
         <TabControl Name="BackupSubTabs" Grid.Row="1" Background="Transparent" BorderThickness="0">
          <TabControl.Template>
           <ControlTemplate TargetType="{x:Type TabControl}">
@@ -4788,116 +4960,8 @@ Write-AMRLog ("Catalog item model: {0} ({1} items)." -f $(if ($script:AMRCatalog
            </Grid>
           </ControlTemplate>
          </TabControl.Template>
-       <TabItem Header="Backup Center" MinWidth="184" Height="34" Padding="14,4" FontSize="12" FontWeight="SemiBold" Background="#202A35" Foreground="#E7EAF0" BorderBrush="#B89A62">
-     <ScrollViewer Name="BackupCenterScrollViewer" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" HorizontalAlignment="Stretch" VerticalAlignment="Stretch" VerticalContentAlignment="Top">
-      <ScrollViewer.Template>
-       <ControlTemplate TargetType="{x:Type ScrollViewer}">
-        <Grid ClipToBounds="True">
-         <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-         <ScrollContentPresenter x:Name="PART_ScrollContentPresenter" Grid.Column="0" CanContentScroll="{TemplateBinding CanContentScroll}" Content="{TemplateBinding Content}" ContentTemplate="{TemplateBinding ContentTemplate}" Margin="{TemplateBinding Padding}" HorizontalAlignment="Stretch" VerticalAlignment="Top"/>
-         <ScrollBar x:Name="PART_VerticalScrollBar" Grid.Column="1" Orientation="Vertical" Value="{TemplateBinding VerticalOffset}" Maximum="{TemplateBinding ScrollableHeight}" ViewportSize="{TemplateBinding ViewportHeight}" Visibility="{TemplateBinding ComputedVerticalScrollBarVisibility}"/>
-        </Grid>
-       </ControlTemplate>
-      </ScrollViewer.Template>
-      <Grid MinHeight="{Binding ViewportHeight, RelativeSource={RelativeSource AncestorType={x:Type ScrollViewer}}}" VerticalAlignment="Top">
-       <Grid.RowDefinitions>
-        <RowDefinition Height="Auto"/>
-        <RowDefinition Height="*"/>
-       </Grid.RowDefinitions>
-      <Border Grid.Row="0" Padding="12,10,12,12" VerticalAlignment="Top">
-       <StackPanel VerticalAlignment="Top">
-        <Grid Margin="0">
-        <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="390"/></Grid.ColumnDefinitions>
-
-        <Grid Grid.Column="1" VerticalAlignment="Center" Visibility="Collapsed"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-         <Grid Grid.Column="0" Margin="0,0,6,0">
-          <TextBox Name="BackupSearchBox" Grid.Column="0" Height="34" Padding="32,5" FontSize="13" ToolTip="Search backup tools by name or keyword" Margin="0,0,6,0" Background="#1AFFFFFF" BorderBrush="#557F7B" BorderThickness="1.2" Visibility="Collapsed"/>
-          <TextBlock Text="⌕" Visibility="Collapsed" IsHitTestVisible="False" HorizontalAlignment="Left" VerticalAlignment="Center" Margin="11,0,0,2" FontSize="21" FontWeight="SemiBold" Foreground="#79AAA5"/>
-         </Grid>
-         <ComboBox Name="BackupCategoryFilter" Grid.Column="1" Height="34" Padding="8,4" FontSize="13" Margin="6,0,0,0" SelectedIndex="0" Background="#244C50" Foreground="#D9F0ED" BorderBrush="#3D6D6F">
-           <ComboBox.Resources>
-            <Style TargetType="{x:Type ComboBox}">
-             <Setter Property="SnapsToDevicePixels" Value="True"/>
-             <Setter Property="OverridesDefaultStyle" Value="True"/>
-             <Setter Property="ScrollViewer.HorizontalScrollBarVisibility" Value="Auto"/>
-             <Setter Property="ScrollViewer.VerticalScrollBarVisibility" Value="Auto"/>
-             <Setter Property="Template">
-              <Setter.Value>
-               <ControlTemplate TargetType="{x:Type ComboBox}">
-                <Grid>
-                 <ToggleButton x:Name="DropDownToggle" Focusable="False" ClickMode="Press" IsChecked="{Binding IsDropDownOpen, Mode=TwoWay, RelativeSource={RelativeSource TemplatedParent}}">
-                  <ToggleButton.Template>
-                   <ControlTemplate TargetType="{x:Type ToggleButton}">
-                    <Border x:Name="ToggleBorder" Background="{Binding Background, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" BorderBrush="{Binding BorderBrush, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" BorderThickness="1" CornerRadius="6" Padding="8,4">
-                     <Grid>
-                      <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="18"/></Grid.ColumnDefinitions>
-                      <ContentPresenter Grid.Column="0" Content="{Binding SelectionBoxItem, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" ContentTemplate="{Binding SelectionBoxItemTemplate, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" ContentStringFormat="{Binding SelectionBoxItemStringFormat, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" VerticalAlignment="Center" HorizontalAlignment="Left"/>
-                      <Path Grid.Column="1" Data="M 0 0 L 4 4 L 8 0" Stroke="#B7D5D1" StrokeThickness="1.6" HorizontalAlignment="Center" VerticalAlignment="Center"/>
-                     </Grid>
-                    </Border>
-                    <ControlTemplate.Triggers>
-                     <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="ToggleBorder" Property="BorderBrush" Value="#79AAA5"/></Trigger>
-                     <Trigger Property="IsPressed" Value="True"><Setter TargetName="ToggleBorder" Property="Background" Value="#31515A"/></Trigger>
-                    </ControlTemplate.Triggers>
-                   </ControlTemplate>
-                  </ToggleButton.Template>
-                 </ToggleButton>
-                 <Popup x:Name="PART_Popup" IsOpen="{TemplateBinding IsDropDownOpen}" Placement="Bottom" AllowsTransparency="True" Focusable="False" PopupAnimation="Fade">
-                  <Border Background="#263B46" BorderBrush="#6B9994" BorderThickness="1" CornerRadius="7" Padding="3" SnapsToDevicePixels="True">
-                   <ScrollViewer MaxHeight="320" CanContentScroll="True">
-                    <ItemsPresenter KeyboardNavigation.DirectionalNavigation="Contained"/>
-                   </ScrollViewer>
-                  </Border>
-                 </Popup>
-                </Grid>
-                <ControlTemplate.Triggers>
-                 <Trigger Property="HasItems" Value="False"><Setter TargetName="PART_Popup" Property="MinHeight" Value="24"/></Trigger>
-                 <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.55"/></Trigger>
-                </ControlTemplate.Triggers>
-               </ControlTemplate>
-              </Setter.Value>
-             </Setter>
-            </Style>
-
-            <SolidColorBrush x:Key="{x:Static SystemColors.WindowBrushKey}" Color="#263B46"/>
-            <SolidColorBrush x:Key="{x:Static SystemColors.WindowTextBrushKey}" Color="#D9F0ED"/>
-            <SolidColorBrush x:Key="{x:Static SystemColors.HighlightBrushKey}" Color="#6B9994"/>
-            <SolidColorBrush x:Key="{x:Static SystemColors.HighlightTextBrushKey}" Color="#FFFFFF"/>
-           </ComboBox.Resources>
-           <ComboBox.ItemContainerStyle>
-            <Style TargetType="ComboBoxItem">
-             <Setter Property="Foreground" Value="#D9F0ED"/>
-             <Setter Property="Background" Value="#263B46"/>
-             <Setter Property="BorderBrush" Value="#6B9994"/>
-             <Setter Property="Padding" Value="9,6"/>
-             <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
-             <Style.Triggers>
-              <Trigger Property="IsHighlighted" Value="True">
-               <Setter Property="Background" Value="#6B9994"/>
-               <Setter Property="Foreground" Value="#FFFFFF"/>
-              </Trigger>
-              <Trigger Property="IsSelected" Value="True">
-               <Setter Property="Background" Value="#31515A"/>
-               <Setter Property="Foreground" Value="#FFFFFF"/>
-              </Trigger>
-              <Trigger Property="IsEnabled" Value="False">
-               <Setter Property="Foreground" Value="#78918F"/>
-              </Trigger>
-             </Style.Triggers>
-            </Style>
-           </ComboBox.ItemContainerStyle>
- <ComboBoxItem Content="💾 All Categories"/><ComboBoxItem Content="🛡 Security"/><ComboBoxItem Content="⚙ System"/><ComboBoxItem Content="🚀 Optimize"/><ComboBoxItem Content="🌐 Network"/><ComboBoxItem Content="🧰 Utilities"/></ComboBox>
-        </Grid>
-       </Grid>
-       <TextBlock Name="BackupResultsCount" Text="50 backup actions" Foreground="#AEB8C8" Margin="0,0,0,4" VerticalAlignment="Top"/>
-        <WrapPanel Name="BackupActionsGrid" Orientation="Horizontal" HorizontalAlignment="Stretch" VerticalAlignment="Top" FlowDirection="RightToLeft" ItemWidth="380" ItemHeight="58" MinHeight="0"/>
-       </StackPanel>
-      </Border>
-      </Grid>
-     </ScrollViewer>
-       </TabItem>
        <TabItem Header="Driver Backup" MinWidth="184" Height="34" Padding="14,4" FontSize="12" FontWeight="SemiBold" Background="#252B28" Foreground="#E9EEE9" BorderBrush="#789987">
-        <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" VerticalContentAlignment="Top" HorizontalContentAlignment="Stretch" Background="#171B21" Padding="18,8,18,20">
+        <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" VerticalContentAlignment="Top" HorizontalContentAlignment="Stretch" Background="#17191D" Padding="18,16,18,22">
          <StackPanel Name="DriverBackupRoot" VerticalAlignment="Top" Margin="0" Opacity="0">
           <StackPanel.RenderTransform><TranslateTransform Y="8"/></StackPanel.RenderTransform>
           <StackPanel.Triggers>
@@ -4910,68 +4974,89 @@ Write-AMRLog ("Catalog item model: {0} ({1} items)." -f $(if ($script:AMRCatalog
             </BeginStoryboard>
            </EventTrigger>
           </StackPanel.Triggers>
-          <Border Background="#252B33" BorderBrush="#46515F" BorderThickness="1" CornerRadius="16" Padding="22,17" Margin="0,0,0,12">
+          <Border Background="{DynamicResource ActivationOuterGlassBrush}" BorderBrush="{DynamicResource ActivationGlassEdgeBrush}" BorderThickness="1" CornerRadius="16" Padding="22,17" Margin="0,0,0,12"><Border.Effect><DropShadowEffect Color="#000000" BlurRadius="16" ShadowDepth="4" Opacity="0.28"/></Border.Effect>
            <Grid>
             <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
             <StackPanel Grid.Column="0" VerticalAlignment="Center">
-             <TextBlock Text="DRIVER BACKUP" FontSize="26" FontWeight="Bold" Foreground="#A8C5AE" Margin="0,0,0,4"/>
-             <TextBlock Text="Create a Windows recovery checkpoint before driver changes, then return to that exact checkpoint when needed." Foreground="#C1CAD4" FontSize="12" TextWrapping="Wrap" MaxWidth="760"/>
+             <TextBlock Text="DRIVER BACKUP" FontSize="26" FontWeight="Bold" Foreground="#E9D8B5" Margin="0,0,0,6"/>
+             <Border Width="48" Height="2" CornerRadius="1" HorizontalAlignment="Left" Margin="0,0,0,9" Background="#D8B56D"/>
+             <TextBlock Text="Create a Windows recovery checkpoint before driver changes, then return to that exact checkpoint when needed." Foreground="#CFCABF" FontSize="12" TextWrapping="Wrap" MaxWidth="760"/>
             </StackPanel>
-            <Border Grid.Column="1" Background="#303945" BorderBrush="#566272" BorderThickness="1" CornerRadius="18" Padding="12,7" VerticalAlignment="Center" Margin="18,0,0,0">
-             <TextBlock Text="RECOVERY CENTER" Foreground="#D4DCE5" FontSize="10" FontWeight="Bold"/>
-            </Border>
+            <Button Name="DriverRecoveryCenterBtn" Grid.Column="1" Cursor="Hand" VerticalAlignment="Center" Margin="18,0,0,0" FocusVisualStyle="{x:Null}" ToolTip="Show your AMR restore point and open Windows System Restore">
+             <Button.Template>
+              <ControlTemplate TargetType="{x:Type Button}">
+               <Border x:Name="RcFace" Background="{DynamicResource ActivationInsetGlassBrush}" BorderBrush="#99B89A62" BorderThickness="1" CornerRadius="18" Padding="12,7" RenderTransformOrigin="0.5,0.5">
+                <Border.RenderTransform><ScaleTransform x:Name="RcScale" ScaleX="1" ScaleY="1"/></Border.RenderTransform>
+                <TextBlock x:Name="RcText" Text="RECOVERY CENTER" Foreground="#E2C68E" FontSize="10" FontWeight="Bold"/>
+               </Border>
+               <ControlTemplate.Triggers>
+                <Trigger Property="IsMouseOver" Value="True">
+                 <Setter TargetName="RcFace" Property="BorderBrush" Value="#F0D9A0"/>
+                 <Setter TargetName="RcText" Property="Foreground" Value="#FFF1D0"/>
+                 <Setter TargetName="RcFace" Property="Effect"><Setter.Value><DropShadowEffect Color="#D8B56D" BlurRadius="14" ShadowDepth="0" Opacity="0.55"/></Setter.Value></Setter>
+                 <Trigger.EnterActions><BeginStoryboard x:Name="RcIn"><Storyboard><DoubleAnimation Storyboard.TargetName="RcScale" Storyboard.TargetProperty="ScaleX" To="1.05" Duration="0:0:0.13"/><DoubleAnimation Storyboard.TargetName="RcScale" Storyboard.TargetProperty="ScaleY" To="1.05" Duration="0:0:0.13"/></Storyboard></BeginStoryboard></Trigger.EnterActions>
+                 <Trigger.ExitActions><RemoveStoryboard BeginStoryboardName="RcIn"/><BeginStoryboard><Storyboard><DoubleAnimation Storyboard.TargetName="RcScale" Storyboard.TargetProperty="ScaleX" From="1.05" To="1" Duration="0:0:0.15"/><DoubleAnimation Storyboard.TargetName="RcScale" Storyboard.TargetProperty="ScaleY" From="1.05" To="1" Duration="0:0:0.15"/></Storyboard></BeginStoryboard></Trigger.ExitActions>
+                </Trigger>
+                <Trigger Property="IsPressed" Value="True">
+                 <Trigger.EnterActions><BeginStoryboard x:Name="RcPress"><Storyboard><DoubleAnimation Storyboard.TargetName="RcScale" Storyboard.TargetProperty="ScaleX" To="0.96" Duration="0:0:0.07"/><DoubleAnimation Storyboard.TargetName="RcScale" Storyboard.TargetProperty="ScaleY" To="0.96" Duration="0:0:0.07"/></Storyboard></BeginStoryboard></Trigger.EnterActions>
+                 <Trigger.ExitActions><RemoveStoryboard BeginStoryboardName="RcPress"/></Trigger.ExitActions>
+                </Trigger>
+               </ControlTemplate.Triggers>
+              </ControlTemplate>
+             </Button.Template>
+            </Button>
            </Grid>
           </Border>
           <Grid Margin="0,0,0,12">
            <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-           <Border Grid.Column="0" Background="#222831" BorderBrush="#46515F" BorderThickness="1" CornerRadius="15" Padding="20" Margin="0,0,7,0">
+           <Border Grid.Column="0" Background="{DynamicResource ActivationInnerGlassBrush}" BorderBrush="{DynamicResource ActivationGlassEdgeBrush}" BorderThickness="1" CornerRadius="15" Padding="20" Margin="0,0,7,0"><Border.Effect><DropShadowEffect Color="#000000" BlurRadius="16" ShadowDepth="4" Opacity="0.28"/></Border.Effect>
             <StackPanel>
-             <TextBlock Text="01  ·  CREATE A CHECKPOINT" FontSize="10" FontWeight="Bold" Foreground="#D0B98B" Margin="0,0,0,9"/>
+             <TextBlock Text="01  ·  CREATE A CHECKPOINT" FontSize="10" FontWeight="Bold" Foreground="#D8B56D" Margin="0,0,0,9"/>
              <TextBlock Text="Create Restore Point" FontSize="19" FontWeight="SemiBold" Foreground="#F0F3F6" Margin="0,0,0,6"/>
-             <TextBlock Text="Save the current Windows system state before changing drivers. AMR enables System Protection on the Windows drive and verifies the exact checkpoint." Foreground="#B9C3CE" FontSize="11" TextWrapping="Wrap" MinHeight="48" Margin="0,0,0,15"/>
-             <Button Name="DriverCreateRestorePointBtn" Content="＋  Create Restore Point" Height="42" MinWidth="205" HorizontalAlignment="Left" Background="#805E6B78" Foreground="#F4F7FA" BorderBrush="#D0DAE4" BorderThickness="1" Padding="17,8" FontSize="12" FontWeight="Bold" Cursor="Hand" ToolTip="Enable System Protection, request a Windows restore point, and verify a new or explicitly reused checkpoint"/>
+             <TextBlock Text="Save the current Windows system state before changing drivers. AMR enables System Protection on the Windows drive and verifies the exact checkpoint." Foreground="#CFCABF" FontSize="11" TextWrapping="Wrap" MinHeight="48" Margin="0,0,0,15"/>
+             <Button Name="DriverCreateRestorePointBtn" Content="＋  Smart Create" Style="{StaticResource AMRUpdateGlassButtonStyle}" Height="42" MinWidth="185" HorizontalAlignment="Left" Background="#D93B382F" Foreground="#EDE2C9" BorderBrush="#9C865A" Padding="17,8" FontSize="12" FontWeight="Bold" Cursor="Hand" ToolTip="Enable System Protection, request a Windows restore point, and verify a new or explicitly reused checkpoint"/>
             </StackPanel>
            </Border>
-           <Border Grid.Column="1" Background="#222831" BorderBrush="#46515F" BorderThickness="1" CornerRadius="15" Padding="20" Margin="7,0,0,0">
+           <Border Grid.Column="1" Background="{DynamicResource ActivationInnerGlassBrush}" BorderBrush="{DynamicResource ActivationGlassEdgeBrush}" BorderThickness="1" CornerRadius="15" Padding="20" Margin="7,0,0,0"><Border.Effect><DropShadowEffect Color="#000000" BlurRadius="16" ShadowDepth="4" Opacity="0.28"/></Border.Effect>
             <StackPanel>
-             <TextBlock Text="02  ·  RECOVER YOUR SYSTEM" FontSize="10" FontWeight="Bold" Foreground="#AFC0D1" Margin="0,0,0,9"/>
+             <TextBlock Text="02  ·  RECOVER YOUR SYSTEM" FontSize="10" FontWeight="Bold" Foreground="#C9B27E" Margin="0,0,0,9"/>
              <TextBlock Text="Smart Restore" FontSize="19" FontWeight="SemiBold" Foreground="#F0F3F6" Margin="0,0,0,6"/>
-             <TextBlock Text="Return Windows to the exact verified checkpoint saved here. If Windows blocks a new point due to its frequency limit, AMR may clearly label and reuse a recent existing checkpoint. It never silently substitutes another point." Foreground="#B9C3CE" FontSize="11" TextWrapping="Wrap" MinHeight="48" Margin="0,0,0,15"/>
-             <Button Name="DriverSmartRestoreBtn" IsEnabled="True" Content="↶  Smart Restore" Height="42" MinWidth="185" HorizontalAlignment="Left" Background="#805E6B78" Foreground="#F4F7FA" BorderBrush="#D0DAE4" BorderThickness="1" Padding="17,8" FontSize="12" FontWeight="Bold" Cursor="Hand" ToolTip="Restore Windows using the exact verified Windows checkpoint recorded by Driver Backup"/>
+             <TextBlock Text="Return Windows to the exact verified checkpoint saved here. If Windows blocks a new point due to its frequency limit, AMR may clearly label and reuse a recent existing checkpoint. It never silently substitutes another point." Foreground="#CFCABF" FontSize="11" TextWrapping="Wrap" MinHeight="48" Margin="0,0,0,15"/>
+             <Button Name="DriverSmartRestoreBtn" IsEnabled="True" Content="↶  Smart Restore" Style="{StaticResource AMRUpdateGlassButtonStyle}" Height="42" MinWidth="185" HorizontalAlignment="Left" Padding="17,8" FontSize="12" FontWeight="Bold" Cursor="Hand" ToolTip="Restore Windows using the exact verified Windows checkpoint recorded by Driver Backup"/>
             </StackPanel>
            </Border>
           </Grid>
-          <Border Name="DriverRestoreProgressPanel" Background="#222831" BorderBrush="#657487" BorderThickness="1" CornerRadius="12" Padding="16,13" Margin="0,0,0,12" Visibility="Collapsed">
+          <Border Name="DriverRestoreProgressPanel" Background="{DynamicResource ActivationInnerGlassBrush}" BorderBrush="{DynamicResource ActivationGlassEdgeBrush}" BorderThickness="1" CornerRadius="12" Padding="16,13" Margin="0,0,0,12" Visibility="Collapsed">
            <StackPanel>
             <Grid Margin="0,0,0,8">
              <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-             <TextBlock Text="RESTORE POINT ACTIVITY" Foreground="#D0B98B" FontSize="10" FontWeight="Bold"/>
-             <TextBlock Grid.Column="1" Text="LIVE STATUS" Foreground="#AFC0D1" FontSize="9" FontWeight="Bold"/>
+             <TextBlock Text="RESTORE POINT ACTIVITY" Foreground="#D8B56D" FontSize="10" FontWeight="Bold"/>
+             <TextBlock Grid.Column="1" Text="LIVE STATUS" Foreground="#C9B27E" FontSize="9" FontWeight="Bold"/>
             </Grid>
             <Grid Margin="0,0,0,5">
              <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-             <TextBlock Text="LIVE OPERATION STAGE · WINDOWS DOES NOT REPORT A PERCENTAGE" Foreground="#AFC0D1" FontSize="9" FontWeight="SemiBold"/>
-             <TextBlock Name="DriverRestorePointPercent" Grid.Column="1" Text="Ready" Foreground="#D5DEE7" FontSize="10" FontWeight="Bold"/>
+             <TextBlock Text="LIVE OPERATION STAGE · WINDOWS DOES NOT REPORT A PERCENTAGE" Foreground="#C9B27E" FontSize="9" FontWeight="SemiBold"/>
+             <TextBlock Name="DriverRestorePointPercent" Grid.Column="1" Text="Ready" Foreground="#E9D8B5" FontSize="10" FontWeight="Bold"/>
             </Grid>
-            <ProgressBar Name="DriverRestorePointProgressBar" Height="6" IsIndeterminate="True" Minimum="0" Maximum="100" Value="0" Background="#3A4451" Foreground="#B8C7D6" BorderThickness="0"/>
+            <ProgressBar Name="DriverRestorePointProgressBar" Height="6" IsIndeterminate="True" Minimum="0" Maximum="100" Value="0" Background="#2A2C31" Foreground="#D8B56D" BorderThickness="0"/>
             <Grid Margin="0,9,0,0">
              <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
              <TextBlock Name="DriverRestorePointProgressText" Text="Preparing Windows System Restore…" Foreground="#E1E7ED" FontSize="11" TextWrapping="Wrap"/>
-             <TextBlock Name="DriverRestorePointElapsed" Grid.Column="1" Text="Elapsed 00:00" Foreground="#B8C5D3" FontSize="10" FontWeight="SemiBold" Margin="12,0,0,0" VerticalAlignment="Center"/>
-             <TextBlock Name="DriverRestorePointEstimate" Grid.Column="2" Text="Waiting for Windows" Foreground="#AFC0D1" FontSize="9" Margin="10,0,10,0" VerticalAlignment="Center"/>
+             <TextBlock Name="DriverRestorePointElapsed" Grid.Column="1" Text="Elapsed 00:00" Foreground="#D9D2C2" FontSize="10" FontWeight="SemiBold" Margin="12,0,0,0" VerticalAlignment="Center"/>
+             <TextBlock Name="DriverRestorePointEstimate" Grid.Column="2" Text="Waiting for Windows" Foreground="#C9B27E" FontSize="9" Margin="10,0,10,0" VerticalAlignment="Center"/>
              <Button Name="DriverRestorePointCancelBtn" Grid.Column="3" Content="Cancel" Visibility="Collapsed" IsEnabled="False" Height="28" MinWidth="72" Padding="12,3" FontSize="10" FontWeight="SemiBold" Background="#3B3032" Foreground="#F0DADB" BorderBrush="#805B60" BorderThickness="1" Cursor="Hand" ToolTip="Stop the AMR worker. Windows may still finish a native System Restore request already accepted."/>
             </Grid>
            </StackPanel>
           </Border>
-          <Border Background="#252C35" BorderBrush="#46515F" BorderThickness="1" CornerRadius="12" Padding="16,14" Margin="0,0,0,10">
+          <Border Background="{DynamicResource ActivationOuterGlassBrush}" BorderBrush="{DynamicResource ActivationGlassEdgeBrush}" BorderThickness="1" CornerRadius="12" Padding="16,14" Margin="0,0,0,10">
            <StackPanel>
-            <TextBlock Text="DRIVER SAFETY POINT" FontSize="12" FontWeight="Bold" Foreground="#D0B98B" Margin="0,0,0,6"/>
-            <TextBlock Text="Restore points are not created automatically during driver installation. Create one whenever you choose. Smart Restore verifies and targets the exact checkpoint saved here; it will not silently choose another restore point. Before replacing a driver, this utility also attempts to export the current OEM driver package." Foreground="#C1CAD4" FontSize="11" TextWrapping="Wrap"/>
+            <TextBlock Text="DRIVER SAFETY POINT" FontSize="12" FontWeight="Bold" Foreground="#D8B56D" Margin="0,0,0,6"/>
+            <TextBlock Text="Restore points are not created automatically during driver installation. Create one whenever you choose. Smart Restore verifies and targets the exact checkpoint saved here; it will not silently choose another restore point. Before replacing a driver, this utility also attempts to export the current OEM driver package." Foreground="#CFCABF" FontSize="11" TextWrapping="Wrap"/>
            </StackPanel>
           </Border>
-          <Border Background="#222831" BorderBrush="#46515F" BorderThickness="1" CornerRadius="11" Padding="14,12">
+          <Border Background="{DynamicResource ActivationInsetGlassBrush}" BorderBrush="{DynamicResource ActivationGlassEdgeBrush}" BorderThickness="1" CornerRadius="11" Padding="14,12">
            <StackPanel>
-            <TextBlock Text="RESTORE POINT STATUS" Foreground="#D0B98B" FontSize="10" FontWeight="Bold" Margin="0,0,0,5"/>
+            <TextBlock Text="RESTORE POINT STATUS" Foreground="#D8B56D" FontSize="10" FontWeight="Bold" Margin="0,0,0,5"/>
             <TextBlock Name="DriverRestorePointStatus" Text="Checking Windows System Protection and saved recovery point…" Foreground="#DCE3EA" FontSize="11" TextWrapping="Wrap"/>
            </StackPanel>
           </Border>
@@ -5462,22 +5547,22 @@ Write-AMRLog ("Catalog item model: {0} ({1} items)." -f $(if ($script:AMRCatalog
       
 <TabItem Header="Tweaks" IsSelected="True">
 <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Padding="8,0,4,8">
-      <StackPanel Name="BasicTweaksPanel">
+      <StackPanel Name="BasicTweaksPanel"><StackPanel.Resources><Style TargetType="CheckBox" BasedOn="{StaticResource AMRTweakCheckStyle}"/></StackPanel.Resources>
        <Border BorderBrush="#4B83B8" BorderThickness="1" CornerRadius="13" Padding="13,11" Margin="0,8,0,12">
         <Border.Background><LinearGradientBrush StartPoint="0,0" EndPoint="1,1"><GradientStop Color="#65305278" Offset="0"/><GradientStop Color="#4320395D" Offset="1"/></LinearGradientBrush></Border.Background>
         <StackPanel>
          <TextBlock Text="Windows Tweaks" FontSize="17" FontWeight="SemiBold" Foreground="#E5F1FF"/>
          <TextBlock Text="Choose a preset to pre-select options. Nothing runs until you press Apply." Foreground="#B8CDE4" FontSize="11" TextWrapping="Wrap" Margin="0,3,0,8"/>
          <UniformGrid Columns="4" Margin="0,0,0,10">
-          <Button Name="BasicPresetEssentialBtn" Content="Essential" Background="#1765A8" Foreground="#FFFFFF" BorderBrush="#65B7F3" BorderThickness="1.2" Padding="7,7" Margin="3" FontWeight="Bold" ToolTip="Select everyday privacy and convenience options"/>
+          <Button Name="BasicPresetEssentialBtn" Content="Essential" Background="#2F6DAF" Foreground="#F2F8FF" BorderBrush="#7DB9EC" BorderThickness="1.0" Padding="7,7" Margin="3" FontWeight="Bold" ToolTip="Select everyday privacy and convenience options"/>
           <Button Name="BasicPresetMinimalBtn" Content="Minimal" Background="#46566B" Foreground="#F1F5F9" BorderBrush="#8999AC" BorderThickness="1.2" Padding="7,7" Margin="3" FontWeight="Bold" ToolTip="Select a small, conservative set of options"/>
-          <Button Name="BasicPresetMediumBtn" Content="Medium" Background="#176B4A" Foreground="#FFFFFF" BorderBrush="#55C995" BorderThickness="1.2" Padding="7,7" Margin="3" FontWeight="Bold" ToolTip="Select a balanced set of options"/>
-          <Button Name="BasicPresetAdvancedBtn" Content="Advanced" Background="#A8273D" Foreground="#FFFFFF" BorderBrush="#F16B7D" BorderThickness="1.2" Padding="7,7" Margin="3" FontWeight="Bold" ToolTip="Select more changes for review before applying"/>
+          <Button Name="BasicPresetMediumBtn" Content="Medium" Background="#10B981" Foreground="#FFFFFF" BorderBrush="#55D6A8" BorderThickness="1.2" Padding="7,7" Margin="3" FontWeight="Bold" ToolTip="Select a balanced set of options"/>
+          <Button Name="BasicPresetAdvancedBtn" Content="Advanced" Background="#3B1F22" Foreground="#F2CDD0" BorderBrush="#6E2F36" BorderThickness="1.2" Padding="7,7" Margin="3" FontWeight="Bold" ToolTip="Select more changes for review before applying"/>
          </UniformGrid>
          <TextBlock Name="BasicPresetStatus" Text="Custom selection — choose a preset or select options below." Foreground="#C7DDF4" TextWrapping="Wrap" Margin="2,0,2,4"/>
          <TextBlock Name="BasicSelectionCount" Text="0 selected on right | 0 selected total" Foreground="#9DD9D0" FontSize="12" FontWeight="SemiBold" Margin="2,0,2,8"/>
-         <Button Name="CancelAllTweaksBtn" Content="✕ Cancel All / Clear Selections" Background="#503A4A" Foreground="#F5E8EF" BorderBrush="#94647B" Padding="7,6" Margin="0,0,0,7"/>
-         <Button Name="RestoreBasicDefaultsBtn" Content="↶ Restore Defaults" Background="#176B4A" Foreground="#FFFFFF" BorderBrush="#55C995" BorderThickness="1.2" Padding="7,6" Margin="0,0,0,7" ToolTip="Restore original Registry values captured by right-side Basic Tweaks only"/>
+         <Button Name="CancelAllTweaksBtn" Content="✕ Cancel All / Clear Selections" Background="#3B1F22" Foreground="#F2CDD0" BorderBrush="#6E2F36" Padding="7,6" Margin="0,0,0,7"/>
+         <Button Name="RestoreBasicDefaultsBtn" Content="↶ Restore Defaults" Background="#5A4416" Foreground="#FFF4D8" BorderBrush="#D9A93E" BorderThickness="1.2" Padding="7,6" Margin="0,0,0,7" ToolTip="Restore original Registry values captured by right-side Basic Tweaks only"/>
          <Button Name="ApplyBasicTweaksBtn" Content="⚡ Apply Selected Tweaks" Background="#1765A8" Foreground="#FFFFFF" BorderBrush="#65B7F3" BorderThickness="1" FontWeight="SemiBold" Padding="10,7" HorizontalAlignment="Stretch"/>
         </StackPanel>
        </Border>
@@ -5485,8 +5570,8 @@ Write-AMRLog ("Catalog item model: {0} ({1} items)." -f $(if ($script:AMRCatalog
        <Border  BorderBrush="#668FC0" BorderThickness="1.1" CornerRadius="12" Padding="10" Margin="5" Width="246" MinHeight="136" Opacity="0" RenderTransformOrigin="0.5,0.5">
         <Border.Background><LinearGradientBrush StartPoint="0,0" EndPoint="1,1"><GradientStop Color="#D02A4565" Offset="0"/><GradientStop Color="#B51A304B" Offset="1"/></LinearGradientBrush></Border.Background>
         <Border.Effect><DropShadowEffect Color="#020A16" BlurRadius="14" ShadowDepth="2" Opacity="0.42"/></Border.Effect>
-        <Border.RenderTransform><TranslateTransform Y="7"/></Border.RenderTransform>
-        <Border.Triggers><EventTrigger RoutedEvent="FrameworkElement.Loaded"><BeginStoryboard><Storyboard><DoubleAnimation Storyboard.TargetProperty="Opacity" From="0" To="1" Duration="0:0:0.28"/><DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.Y)" From="7" To="0" Duration="0:0:0.28" DecelerationRatio="0.8"/></Storyboard></BeginStoryboard></EventTrigger></Border.Triggers>
+        <Border.RenderTransform><TranslateTransform Y="8"/></Border.RenderTransform>
+        <Border.Triggers><EventTrigger RoutedEvent="FrameworkElement.Loaded"><BeginStoryboard><Storyboard><DoubleAnimation Storyboard.TargetProperty="Opacity" From="0" To="1" Duration="0:0:0.25"/><DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.Y)" From="8" To="0" Duration="0:0:0.25" DecelerationRatio="0.8"/></Storyboard></BeginStoryboard></EventTrigger></Border.Triggers>
         <StackPanel>
          <TextBlock Text="🧹 Everyday cleanup" FontSize="13" FontWeight="SemiBold" Foreground="#D6E9FF" Margin="0,0,0,6"/>
          <CheckBox Name="btTempFiles" Content="Delete current-user temporary files" Foreground="#E5EFFB" FontSize="11" Margin="0,3"/>
@@ -5498,8 +5583,8 @@ Write-AMRLog ("Catalog item model: {0} ({1} items)." -f $(if ($script:AMRCatalog
        <Border  BorderBrush="#668FC0" BorderThickness="1.1" CornerRadius="12" Padding="10" Margin="5" Width="246" MinHeight="136" Opacity="0" RenderTransformOrigin="0.5,0.5">
         <Border.Background><LinearGradientBrush StartPoint="0,0" EndPoint="1,1"><GradientStop Color="#D02A4565" Offset="0"/><GradientStop Color="#B51A304B" Offset="1"/></LinearGradientBrush></Border.Background>
         <Border.Effect><DropShadowEffect Color="#020A16" BlurRadius="14" ShadowDepth="2" Opacity="0.42"/></Border.Effect>
-        <Border.RenderTransform><TranslateTransform Y="7"/></Border.RenderTransform>
-        <Border.Triggers><EventTrigger RoutedEvent="FrameworkElement.Loaded"><BeginStoryboard><Storyboard><DoubleAnimation Storyboard.TargetProperty="Opacity" From="0" To="1" Duration="0:0:0.28"/><DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.Y)" From="7" To="0" Duration="0:0:0.28" DecelerationRatio="0.8"/></Storyboard></BeginStoryboard></EventTrigger></Border.Triggers>
+        <Border.RenderTransform><TranslateTransform Y="8"/></Border.RenderTransform>
+        <Border.Triggers><EventTrigger RoutedEvent="FrameworkElement.Loaded"><BeginStoryboard><Storyboard><DoubleAnimation Storyboard.TargetProperty="Opacity" From="0" To="1" Duration="0:0:0.271"/><DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.Y)" From="8" To="0" Duration="0:0:0.271" DecelerationRatio="0.8"/></Storyboard></BeginStoryboard></EventTrigger></Border.Triggers>
         <StackPanel>
          <TextBlock Text="🚀 Responsiveness" FontSize="13" FontWeight="SemiBold" Foreground="#D6E9FF" Margin="0,0,0,6"/>
          <CheckBox Name="btDisableTransparency" Content="Disable transparency effects" Foreground="#E5EFFB" FontSize="11" Margin="0,3"/>
@@ -5511,8 +5596,8 @@ Write-AMRLog ("Catalog item model: {0} ({1} items)." -f $(if ($script:AMRCatalog
        <Border  BorderBrush="#668FC0" BorderThickness="1.1" CornerRadius="12" Padding="10" Margin="5" Width="246" MinHeight="136" Opacity="0" RenderTransformOrigin="0.5,0.5">
         <Border.Background><LinearGradientBrush StartPoint="0,0" EndPoint="1,1"><GradientStop Color="#D02A4565" Offset="0"/><GradientStop Color="#B51A304B" Offset="1"/></LinearGradientBrush></Border.Background>
         <Border.Effect><DropShadowEffect Color="#020A16" BlurRadius="14" ShadowDepth="2" Opacity="0.42"/></Border.Effect>
-        <Border.RenderTransform><TranslateTransform Y="7"/></Border.RenderTransform>
-        <Border.Triggers><EventTrigger RoutedEvent="FrameworkElement.Loaded"><BeginStoryboard><Storyboard><DoubleAnimation Storyboard.TargetProperty="Opacity" From="0" To="1" Duration="0:0:0.28"/><DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.Y)" From="7" To="0" Duration="0:0:0.28" DecelerationRatio="0.8"/></Storyboard></BeginStoryboard></EventTrigger></Border.Triggers>
+        <Border.RenderTransform><TranslateTransform Y="8"/></Border.RenderTransform>
+        <Border.Triggers><EventTrigger RoutedEvent="FrameworkElement.Loaded"><BeginStoryboard><Storyboard><DoubleAnimation Storyboard.TargetProperty="Opacity" From="0" To="1" Duration="0:0:0.292"/><DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.Y)" From="8" To="0" Duration="0:0:0.292" DecelerationRatio="0.8"/></Storyboard></BeginStoryboard></EventTrigger></Border.Triggers>
         <StackPanel>
          <TextBlock Text="🗂️ File Explorer" FontSize="13" FontWeight="SemiBold" Foreground="#D6E9FF" Margin="0,0,0,6"/>
          <CheckBox Name="btShowExtensions" Content="Show file extensions" Foreground="#E5EFFB" FontSize="11" Margin="0,3"/>
@@ -5524,8 +5609,8 @@ Write-AMRLog ("Catalog item model: {0} ({1} items)." -f $(if ($script:AMRCatalog
        <Border  BorderBrush="#668FC0" BorderThickness="1.1" CornerRadius="12" Padding="10" Margin="5" Width="246" MinHeight="136" Opacity="0" RenderTransformOrigin="0.5,0.5">
         <Border.Background><LinearGradientBrush StartPoint="0,0" EndPoint="1,1"><GradientStop Color="#D02A4565" Offset="0"/><GradientStop Color="#B51A304B" Offset="1"/></LinearGradientBrush></Border.Background>
         <Border.Effect><DropShadowEffect Color="#020A16" BlurRadius="14" ShadowDepth="2" Opacity="0.42"/></Border.Effect>
-        <Border.RenderTransform><TranslateTransform Y="7"/></Border.RenderTransform>
-        <Border.Triggers><EventTrigger RoutedEvent="FrameworkElement.Loaded"><BeginStoryboard><Storyboard><DoubleAnimation Storyboard.TargetProperty="Opacity" From="0" To="1" Duration="0:0:0.28"/><DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.Y)" From="7" To="0" Duration="0:0:0.28" DecelerationRatio="0.8"/></Storyboard></BeginStoryboard></EventTrigger></Border.Triggers>
+        <Border.RenderTransform><TranslateTransform Y="8"/></Border.RenderTransform>
+        <Border.Triggers><EventTrigger RoutedEvent="FrameworkElement.Loaded"><BeginStoryboard><Storyboard><DoubleAnimation Storyboard.TargetProperty="Opacity" From="0" To="1" Duration="0:0:0.313"/><DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.Y)" From="8" To="0" Duration="0:0:0.313" DecelerationRatio="0.8"/></Storyboard></BeginStoryboard></EventTrigger></Border.Triggers>
         <StackPanel>
          <TextBlock Text="🔒 Privacy &amp; convenience" FontSize="13" FontWeight="SemiBold" Foreground="#D6E9FF" Margin="0,0,0,6"/>
          <CheckBox Name="btDisableAds" Content="Disable advertising ID for this user" Foreground="#E5EFFB" FontSize="11" Margin="0,3"/>
@@ -5537,8 +5622,8 @@ Write-AMRLog ("Catalog item model: {0} ({1} items)." -f $(if ($script:AMRCatalog
        <Border  BorderBrush="#668FC0" BorderThickness="1.1" CornerRadius="12" Padding="10" Margin="5" Width="246" MinHeight="136" Opacity="0" RenderTransformOrigin="0.5,0.5">
         <Border.Background><LinearGradientBrush StartPoint="0,0" EndPoint="1,1"><GradientStop Color="#D02A4565" Offset="0"/><GradientStop Color="#B51A304B" Offset="1"/></LinearGradientBrush></Border.Background>
         <Border.Effect><DropShadowEffect Color="#020A16" BlurRadius="14" ShadowDepth="2" Opacity="0.42"/></Border.Effect>
-        <Border.RenderTransform><TranslateTransform Y="7"/></Border.RenderTransform>
-        <Border.Triggers><EventTrigger RoutedEvent="FrameworkElement.Loaded"><BeginStoryboard><Storyboard><DoubleAnimation Storyboard.TargetProperty="Opacity" From="0" To="1" Duration="0:0:0.28"/><DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.Y)" From="7" To="0" Duration="0:0:0.28" DecelerationRatio="0.8"/></Storyboard></BeginStoryboard></EventTrigger></Border.Triggers>
+        <Border.RenderTransform><TranslateTransform Y="8"/></Border.RenderTransform>
+        <Border.Triggers><EventTrigger RoutedEvent="FrameworkElement.Loaded"><BeginStoryboard><Storyboard><DoubleAnimation Storyboard.TargetProperty="Opacity" From="0" To="1" Duration="0:0:0.334"/><DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.Y)" From="8" To="0" Duration="0:0:0.334" DecelerationRatio="0.8"/></Storyboard></BeginStoryboard></EventTrigger></Border.Triggers>
         <StackPanel>
          <TextBlock Text="🕵️ WinUtil-style privacy &amp; diagnostics" FontSize="13" FontWeight="SemiBold" Foreground="#D6E9FF" Margin="0,0,0,6"/>
          <CheckBox Name="btActivityHistory" Content="Disable Activity History uploads (keeps clipboard history)" Foreground="#E5EFFB" FontSize="11" Margin="0,3"/>
@@ -5552,8 +5637,8 @@ Write-AMRLog ("Catalog item model: {0} ({1} items)." -f $(if ($script:AMRCatalog
        <Border  BorderBrush="#668FC0" BorderThickness="1.1" CornerRadius="12" Padding="10" Margin="5" Width="246" MinHeight="136" Opacity="0" RenderTransformOrigin="0.5,0.5">
         <Border.Background><LinearGradientBrush StartPoint="0,0" EndPoint="1,1"><GradientStop Color="#D02A4565" Offset="0"/><GradientStop Color="#B51A304B" Offset="1"/></LinearGradientBrush></Border.Background>
         <Border.Effect><DropShadowEffect Color="#020A16" BlurRadius="14" ShadowDepth="2" Opacity="0.42"/></Border.Effect>
-        <Border.RenderTransform><TranslateTransform Y="7"/></Border.RenderTransform>
-        <Border.Triggers><EventTrigger RoutedEvent="FrameworkElement.Loaded"><BeginStoryboard><Storyboard><DoubleAnimation Storyboard.TargetProperty="Opacity" From="0" To="1" Duration="0:0:0.28"/><DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.Y)" From="7" To="0" Duration="0:0:0.28" DecelerationRatio="0.8"/></Storyboard></BeginStoryboard></EventTrigger></Border.Triggers>
+        <Border.RenderTransform><TranslateTransform Y="8"/></Border.RenderTransform>
+        <Border.Triggers><EventTrigger RoutedEvent="FrameworkElement.Loaded"><BeginStoryboard><Storyboard><DoubleAnimation Storyboard.TargetProperty="Opacity" From="0" To="1" Duration="0:0:0.355"/><DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.Y)" From="8" To="0" Duration="0:0:0.355" DecelerationRatio="0.8"/></Storyboard></BeginStoryboard></EventTrigger></Border.Triggers>
         <StackPanel>
          <TextBlock Text="🧰 Windows components &amp; behavior" FontSize="13" FontWeight="SemiBold" Foreground="#D6E9FF" Margin="0,0,0,6"/>
          <CheckBox Name="btDisableTelemetryService" Content="Disable Connected User Experiences service (DiagTrack)" Foreground="#E5EFFB" FontSize="11" Margin="0,3"/>
@@ -5567,8 +5652,8 @@ Write-AMRLog ("Catalog item model: {0} ({1} items)." -f $(if ($script:AMRCatalog
        <Border  BorderBrush="#668FC0" BorderThickness="1.1" CornerRadius="12" Padding="10" Margin="5" Width="246" MinHeight="136" Opacity="0" RenderTransformOrigin="0.5,0.5">
         <Border.Background><LinearGradientBrush StartPoint="0,0" EndPoint="1,1"><GradientStop Color="#D02A4565" Offset="0"/><GradientStop Color="#B51A304B" Offset="1"/></LinearGradientBrush></Border.Background>
         <Border.Effect><DropShadowEffect Color="#020A16" BlurRadius="14" ShadowDepth="2" Opacity="0.42"/></Border.Effect>
-        <Border.RenderTransform><TranslateTransform Y="7"/></Border.RenderTransform>
-        <Border.Triggers><EventTrigger RoutedEvent="FrameworkElement.Loaded"><BeginStoryboard><Storyboard><DoubleAnimation Storyboard.TargetProperty="Opacity" From="0" To="1" Duration="0:0:0.28"/><DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.Y)" From="7" To="0" Duration="0:0:0.28" DecelerationRatio="0.8"/></Storyboard></BeginStoryboard></EventTrigger></Border.Triggers>
+        <Border.RenderTransform><TranslateTransform Y="8"/></Border.RenderTransform>
+        <Border.Triggers><EventTrigger RoutedEvent="FrameworkElement.Loaded"><BeginStoryboard><Storyboard><DoubleAnimation Storyboard.TargetProperty="Opacity" From="0" To="1" Duration="0:0:0.376"/><DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.Y)" From="8" To="0" Duration="0:0:0.376" DecelerationRatio="0.8"/></Storyboard></BeginStoryboard></EventTrigger></Border.Triggers>
         <StackPanel>
          <TextBlock Text="🛡️ Additional privacy &amp; Start menu controls" FontSize="13" FontWeight="SemiBold" Foreground="#D6E9FF" Margin="0,0,0,6"/>
          <CheckBox Name="btDisableStartAppSuggestions" Content="Disable suggested apps in Start menu" Foreground="#E5EFFB" FontSize="11" Margin="0,3"/>
@@ -5583,8 +5668,8 @@ Write-AMRLog ("Catalog item model: {0} ({1} items)." -f $(if ($script:AMRCatalog
        <Border  BorderBrush="#668FC0" BorderThickness="1.1" CornerRadius="12" Padding="10" Margin="5" Width="246" MinHeight="136" Opacity="0" RenderTransformOrigin="0.5,0.5">
         <Border.Background><LinearGradientBrush StartPoint="0,0" EndPoint="1,1"><GradientStop Color="#D02A4565" Offset="0"/><GradientStop Color="#B51A304B" Offset="1"/></LinearGradientBrush></Border.Background>
         <Border.Effect><DropShadowEffect Color="#020A16" BlurRadius="14" ShadowDepth="2" Opacity="0.42"/></Border.Effect>
-        <Border.RenderTransform><TranslateTransform Y="7"/></Border.RenderTransform>
-        <Border.Triggers><EventTrigger RoutedEvent="FrameworkElement.Loaded"><BeginStoryboard><Storyboard><DoubleAnimation Storyboard.TargetProperty="Opacity" From="0" To="1" Duration="0:0:0.28"/><DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.Y)" From="7" To="0" Duration="0:0:0.28" DecelerationRatio="0.8"/></Storyboard></BeginStoryboard></EventTrigger></Border.Triggers>
+        <Border.RenderTransform><TranslateTransform Y="8"/></Border.RenderTransform>
+        <Border.Triggers><EventTrigger RoutedEvent="FrameworkElement.Loaded"><BeginStoryboard><Storyboard><DoubleAnimation Storyboard.TargetProperty="Opacity" From="0" To="1" Duration="0:0:0.397"/><DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.Y)" From="8" To="0" Duration="0:0:0.397" DecelerationRatio="0.8"/></Storyboard></BeginStoryboard></EventTrigger></Border.Triggers>
         <StackPanel>
          <TextBlock Text="🗂️ Explorer &amp; device behavior" FontSize="13" FontWeight="SemiBold" Foreground="#D6E9FF" Margin="0,0,0,6"/>
          <CheckBox Name="btShowFullPath" Content="Show full path in File Explorer title bar" Foreground="#E5EFFB" FontSize="11" Margin="0,3"/>
@@ -5600,8 +5685,8 @@ Write-AMRLog ("Catalog item model: {0} ({1} items)." -f $(if ($script:AMRCatalog
        <Border BorderBrush="#5D9FC8" BorderThickness="1.1" CornerRadius="12" Padding="10" Margin="5" Width="246" MinHeight="136" Opacity="0" RenderTransformOrigin="0.5,0.5">
         <Border.Background><LinearGradientBrush StartPoint="0,0" EndPoint="1,1"><GradientStop Color="#D02B536D" Offset="0"/><GradientStop Color="#B51B354F" Offset="1"/></LinearGradientBrush></Border.Background>
         <Border.Effect><DropShadowEffect Color="#020A16" BlurRadius="14" ShadowDepth="2" Opacity="0.42"/></Border.Effect>
-        <Border.RenderTransform><TranslateTransform Y="7"/></Border.RenderTransform>
-        <Border.Triggers><EventTrigger RoutedEvent="FrameworkElement.Loaded"><BeginStoryboard><Storyboard><DoubleAnimation Storyboard.TargetProperty="Opacity" From="0" To="1" Duration="0:0:0.32"/><DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.Y)" From="7" To="0" Duration="0:0:0.32" DecelerationRatio="0.8"/></Storyboard></BeginStoryboard></EventTrigger></Border.Triggers>
+        <Border.RenderTransform><TranslateTransform Y="8"/></Border.RenderTransform>
+        <Border.Triggers><EventTrigger RoutedEvent="FrameworkElement.Loaded"><BeginStoryboard><Storyboard><DoubleAnimation Storyboard.TargetProperty="Opacity" From="0" To="1" Duration="0:0:0.418"/><DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.Y)" From="8" To="0" Duration="0:0:0.418" DecelerationRatio="0.8"/></Storyboard></BeginStoryboard></EventTrigger></Border.Triggers>
         <StackPanel>
          <TextBlock Text="☁️ Clipboard &amp; cloud privacy" FontSize="13" FontWeight="SemiBold" Foreground="#A9DDFB" Margin="0,0,0,6"/>
          <CheckBox Name="btDisableClipboardCloudSync" Content="Turn off cloud clipboard synchronization" Foreground="#E5EFFB" FontSize="11" Margin="0,3"/>
@@ -5610,8 +5695,8 @@ Write-AMRLog ("Catalog item model: {0} ({1} items)." -f $(if ($script:AMRCatalog
        <Border BorderBrush="#668FC0" BorderThickness="1.1" CornerRadius="12" Padding="10" Margin="5" Width="246" MinHeight="136" Opacity="0" RenderTransformOrigin="0.5,0.5">
         <Border.Background><LinearGradientBrush StartPoint="0,0" EndPoint="1,1"><GradientStop Color="#D02B4F78" Offset="0"/><GradientStop Color="#B51A3154" Offset="1"/></LinearGradientBrush></Border.Background>
         <Border.Effect><DropShadowEffect Color="#020A16" BlurRadius="14" ShadowDepth="2" Opacity="0.42"/></Border.Effect>
-        <Border.RenderTransform><TranslateTransform Y="7"/></Border.RenderTransform>
-        <Border.Triggers><EventTrigger RoutedEvent="FrameworkElement.Loaded"><BeginStoryboard><Storyboard><DoubleAnimation Storyboard.TargetProperty="Opacity" From="0" To="1" Duration="0:0:0.36"/><DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.Y)" From="7" To="0" Duration="0:0:0.36" DecelerationRatio="0.8"/></Storyboard></BeginStoryboard></EventTrigger></Border.Triggers>
+        <Border.RenderTransform><TranslateTransform Y="8"/></Border.RenderTransform>
+        <Border.Triggers><EventTrigger RoutedEvent="FrameworkElement.Loaded"><BeginStoryboard><Storyboard><DoubleAnimation Storyboard.TargetProperty="Opacity" From="0" To="1" Duration="0:0:0.439"/><DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.Y)" From="8" To="0" Duration="0:0:0.439" DecelerationRatio="0.8"/></Storyboard></BeginStoryboard></EventTrigger></Border.Triggers>
         <StackPanel>
          <TextBlock Text="📍 Location access" FontSize="13" FontWeight="SemiBold" Foreground="#B9D5FF" Margin="0,0,0,6"/>
          <CheckBox Name="btDisableLocationTracking" Content="Block Windows location access for this user" Foreground="#E5EFFB" FontSize="11" Margin="0,3"/>
@@ -5620,8 +5705,8 @@ Write-AMRLog ("Catalog item model: {0} ({1} items)." -f $(if ($script:AMRCatalog
        <Border BorderBrush="#7897C8" BorderThickness="1.1" CornerRadius="12" Padding="10" Margin="5" Width="246" MinHeight="136" Opacity="0" RenderTransformOrigin="0.5,0.5">
         <Border.Background><LinearGradientBrush StartPoint="0,0" EndPoint="1,1"><GradientStop Color="#D02D426B" Offset="0"/><GradientStop Color="#B51C2D50" Offset="1"/></LinearGradientBrush></Border.Background>
         <Border.Effect><DropShadowEffect Color="#020A16" BlurRadius="14" ShadowDepth="2" Opacity="0.42"/></Border.Effect>
-        <Border.RenderTransform><TranslateTransform Y="7"/></Border.RenderTransform>
-        <Border.Triggers><EventTrigger RoutedEvent="FrameworkElement.Loaded"><BeginStoryboard><Storyboard><DoubleAnimation Storyboard.TargetProperty="Opacity" From="0" To="1" Duration="0:0:0.40"/><DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.Y)" From="7" To="0" Duration="0:0:0.40" DecelerationRatio="0.8"/></Storyboard></BeginStoryboard></EventTrigger></Border.Triggers>
+        <Border.RenderTransform><TranslateTransform Y="8"/></Border.RenderTransform>
+        <Border.Triggers><EventTrigger RoutedEvent="FrameworkElement.Loaded"><BeginStoryboard><Storyboard><DoubleAnimation Storyboard.TargetProperty="Opacity" From="0" To="1" Duration="0:0:0.46"/><DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.Y)" From="8" To="0" Duration="0:0:0.46" DecelerationRatio="0.8"/></Storyboard></BeginStoryboard></EventTrigger></Border.Triggers>
         <StackPanel>
          <TextBlock Text="🛡️ Remote access protection" FontSize="13" FontWeight="SemiBold" Foreground="#C5C8FF" Margin="0,0,0,6"/>
          <CheckBox Name="btDisableRemoteAssistance" Content="Disable Windows Remote Assistance invitations" Foreground="#E5EFFB" FontSize="11" Margin="0,3"/>
@@ -5634,7 +5719,7 @@ Write-AMRLog ("Catalog item model: {0} ({1} items)." -f $(if ($script:AMRCatalog
      </TabItem>
      <TabItem Header="Customization">
       <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Padding="6,2,8,10">
-       <StackPanel Name="CustomizePanel" Margin="2">
+       <StackPanel Name="CustomizePanel" Margin="2"><StackPanel.Resources><Style TargetType="CheckBox" BasedOn="{StaticResource AMRTweakCheckStyle}"/></StackPanel.Resources>
         <Border BorderBrush="#526F91" BorderThickness="1" CornerRadius="14" Padding="12,10" Margin="2,4,2,12">
          <Border.Background><LinearGradientBrush StartPoint="0,0" EndPoint="1,1"><GradientStop Color="#B52B4968" Offset="0"/><GradientStop Color="#8F172B43" Offset="1"/></LinearGradientBrush></Border.Background>
          <Grid>
@@ -5648,14 +5733,14 @@ Write-AMRLog ("Catalog item model: {0} ({1} items)." -f $(if ($script:AMRCatalog
            <StackPanel.Resources>
             <Style x:Key="CustomizeActionButton" TargetType="{x:Type Button}">
              <Setter Property="Height" Value="34"/><Setter Property="MinWidth" Value="112"/><Setter Property="Padding" Value="10,6"/><Setter Property="Margin" Value="4,0,0,0"/><Setter Property="FontSize" Value="10"/><Setter Property="FontWeight" Value="SemiBold"/><Setter Property="BorderThickness" Value="1"/>
-             <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="{x:Type Button}"><Border x:Name="ActionBorder" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="8" Padding="{TemplateBinding Padding}"><ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" TextElement.Foreground="{TemplateBinding Foreground}"/></Border><ControlTemplate.Triggers><Trigger Property="IsMouseOver" Value="True"><Setter TargetName="ActionBorder" Property="Opacity" Value="0.88"/></Trigger><Trigger Property="IsPressed" Value="True"><Setter TargetName="ActionBorder" Property="Opacity" Value="0.72"/></Trigger><Trigger Property="IsEnabled" Value="False"><Setter TargetName="ActionBorder" Property="Opacity" Value="0.45"/></Trigger></ControlTemplate.Triggers></ControlTemplate></Setter.Value></Setter>
+             <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="{x:Type Button}"><Border x:Name="ActionBorder" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="8" Padding="{TemplateBinding Padding}"><ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" TextElement.Foreground="{TemplateBinding Foreground}"/></Border><ControlTemplate.Triggers><Trigger Property="IsMouseOver" Value="True"><Setter TargetName="ActionBorder" Property="Opacity" Value="1"/></Trigger><Trigger Property="IsPressed" Value="True"><Setter TargetName="ActionBorder" Property="Opacity" Value="0.9"/></Trigger><Trigger Property="IsEnabled" Value="False"><Setter TargetName="ActionBorder" Property="Opacity" Value="0.45"/></Trigger></ControlTemplate.Triggers></ControlTemplate></Setter.Value></Setter>
             </Style>
            </StackPanel.Resources>
            <StackPanel.RenderTransform><TranslateTransform Y="6"/></StackPanel.RenderTransform>
            <StackPanel.Triggers><EventTrigger RoutedEvent="FrameworkElement.Loaded"><BeginStoryboard><Storyboard><DoubleAnimation Storyboard.TargetProperty="Opacity" From="0" To="1" Duration="0:0:0.30"/><DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.Y)" From="6" To="0" Duration="0:0:0.30" DecelerationRatio="0.8"/></Storyboard></BeginStoryboard></EventTrigger></StackPanel.Triggers>
+           <Button Name="RestoreDefaultsBtn" Content="↶ Restore Defaults" Background="#5A4416" Foreground="#FFF4D8" BorderBrush="#D9A93E" Style="{StaticResource CustomizeActionButton}" ToolTip="Restore original supported settings captured before changes"/>
+           <Button Name="CancelCustomizeBtn" Content="✕ Cancel" Background="#3B1F22" Foreground="#F2CDD0" BorderBrush="#6E2F36" Style="{StaticResource CustomizeActionButton}" ToolTip="Clear selections only; no settings are changed"/>
            <Button Name="ApplyCustomizeBtn" Content="⚡ Apply" Background="#10B981" Foreground="#FFFFFF" BorderBrush="#55D6A8" Style="{StaticResource CustomizeActionButton}" ToolTip="Apply the selected customization options"/>
-           <Button Name="CancelCustomizeBtn" Content="✕ Cancel" Background="#3F1D1D" Foreground="#FECACA" BorderBrush="#7F1D1D" Style="{StaticResource CustomizeActionButton}" ToolTip="Clear selections only; no settings are changed"/>
-           <Button Name="RestoreDefaultsBtn" Content="↶ Restore Defaults" Background="#244C50" Foreground="#D9F0ED" BorderBrush="#3D6D6F" Style="{StaticResource CustomizeActionButton}" ToolTip="Restore original supported settings captured before changes"/>
           </StackPanel>
          </Grid>
         </Border>
@@ -5769,15 +5854,23 @@ Write-AMRLog ("Catalog item model: {0} ({1} items)." -f $(if ($script:AMRCatalog
        </StackPanel>
       </ScrollViewer>
      </TabItem>
-     <TabItem Header="Optimize">
-     <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-      <Border Padding="20">
+ <TabItem Name="ToolKitControlTab" Header="Control Center"><Grid/></TabItem>
+     <TabItem Name="ToolKitCCOptimize" Style="{StaticResource ToolkitSubTabChildItemStyle}" Header="Optimize">
+     <Grid>
+<ScrollViewer Name="CCScrollOptimize" Margin="0,52,0,0" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+      <Border Padding="20,0,20,20">
        <StackPanel>
-        <Grid Margin="0,0,0,12">
+        
+        <UniformGrid Name="OptToolsGrid" Columns="3"/>
+       </StackPanel>
+      </Border>
+     </ScrollViewer>
+<Grid Name="CCHeaderOptimize" Height="30" Margin="20,14,20,0" VerticalAlignment="Top">
          <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="390"/></Grid.ColumnDefinitions>
          <StackPanel Grid.Column="0" VerticalAlignment="Center" Margin="0,0,16,0">
-          <TextBlock Text="System Optimization Engine" FontSize="22" FontWeight="Bold" Foreground="#FFFFFF" Margin="0,0,0,8"/>
+          <TextBlock Text="System Optimization Engine" FontSize="22" FontWeight="Bold" Foreground="#E9D8B5" Margin="0"/>
          </StackPanel>
+        <TextBlock Name="OptResultsCount" Foreground="#C9B27E" Grid.Column="1" HorizontalAlignment="Right" VerticalAlignment="Center" Margin="0,0,124,0"/>
          <Grid Grid.Column="1" VerticalAlignment="Center">
           <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
           <Grid Grid.Column="0" Margin="0,0,6,0">
@@ -5861,123 +5954,31 @@ Write-AMRLog ("Catalog item model: {0} ({1} items)." -f $(if ($script:AMRCatalog
           </ComboBox>
          </Grid>
         </Grid>
-        <TextBlock Name="OptResultsCount" Foreground="#AEB8C8" Margin="0,0,0,10"/>
-        <UniformGrid Name="OptToolsGrid" Columns="3"/>
-       </StackPanel>
-      </Border>
-     </ScrollViewer>
+</Grid>
     </TabItem>
      
- <TabItem Header="Security">
-     <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-      <Border Padding="20">
+       <TabItem Name="ToolKitCCBackup" Style="{StaticResource ToolkitSubTabChildItemStyle}" Header="Backup">
+     <Grid>
+<ScrollViewer Name="BackupCenterScrollViewer" Margin="0,52,0,0" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+      <Border Padding="20,0,20,20">
        <StackPanel>
-        <Grid Margin="0,0,0,12">
-        <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="390"/></Grid.ColumnDefinitions>
-        <StackPanel Grid.Column="0" VerticalAlignment="Center" Margin="0,0,16,0">
-         <TextBlock Text="Security &amp; Privacy Console" FontSize="22" FontWeight="Bold" Foreground="#FFFFFF" Margin="0,0,0,8"/>
-        </StackPanel>
-        <Grid Grid.Column="1" VerticalAlignment="Center"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-         <Grid Grid.Column="0" Margin="0,0,6,0">
-          <TextBox Name="SecSearchBox" Grid.Column="0" Height="34" Padding="32,5" FontSize="13" ToolTip="Search security tools by name or keyword" Margin="0,0,6,0" Background="#1AFFFFFF" BorderBrush="#557F7B" BorderThickness="1.2" Visibility="Collapsed"/>
-          <TextBlock Text="⌕" Visibility="Collapsed" IsHitTestVisible="False" HorizontalAlignment="Left" VerticalAlignment="Center" Margin="11,0,0,2" FontSize="21" FontWeight="SemiBold" Foreground="#79AAA5"/>
-         </Grid>
-         <ComboBox Name="SecCategoryFilter" Grid.Column="1" Height="34" Padding="8,4" FontSize="13" Margin="6,0,0,0" SelectedIndex="0" Background="#244C50" Foreground="#D9F0ED" BorderBrush="#3D6D6F">
-           <ComboBox.Resources>
-            <Style TargetType="{x:Type ComboBox}">
-             <Setter Property="SnapsToDevicePixels" Value="True"/>
-             <Setter Property="OverridesDefaultStyle" Value="True"/>
-             <Setter Property="ScrollViewer.HorizontalScrollBarVisibility" Value="Auto"/>
-             <Setter Property="ScrollViewer.VerticalScrollBarVisibility" Value="Auto"/>
-             <Setter Property="Template">
-              <Setter.Value>
-               <ControlTemplate TargetType="{x:Type ComboBox}">
-                <Grid>
-                 <ToggleButton x:Name="DropDownToggle" Focusable="False" ClickMode="Press" IsChecked="{Binding IsDropDownOpen, Mode=TwoWay, RelativeSource={RelativeSource TemplatedParent}}">
-                  <ToggleButton.Template>
-                   <ControlTemplate TargetType="{x:Type ToggleButton}">
-                    <Border x:Name="ToggleBorder" Background="{Binding Background, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" BorderBrush="{Binding BorderBrush, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" BorderThickness="1" CornerRadius="6" Padding="8,4">
-                     <Grid>
-                      <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="18"/></Grid.ColumnDefinitions>
-                      <ContentPresenter Grid.Column="0" Content="{Binding SelectionBoxItem, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" ContentTemplate="{Binding SelectionBoxItemTemplate, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" ContentStringFormat="{Binding SelectionBoxItemStringFormat, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" VerticalAlignment="Center" HorizontalAlignment="Left"/>
-                      <Path Grid.Column="1" Data="M 0 0 L 4 4 L 8 0" Stroke="#B7D5D1" StrokeThickness="1.6" HorizontalAlignment="Center" VerticalAlignment="Center"/>
-                     </Grid>
-                    </Border>
-                    <ControlTemplate.Triggers>
-                     <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="ToggleBorder" Property="BorderBrush" Value="#79AAA5"/></Trigger>
-                     <Trigger Property="IsPressed" Value="True"><Setter TargetName="ToggleBorder" Property="Background" Value="#31515A"/></Trigger>
-                    </ControlTemplate.Triggers>
-                   </ControlTemplate>
-                  </ToggleButton.Template>
-                 </ToggleButton>
-                 <Popup x:Name="PART_Popup" IsOpen="{TemplateBinding IsDropDownOpen}" Placement="Bottom" AllowsTransparency="True" Focusable="False" PopupAnimation="Fade">
-                  <Border Background="#263B46" BorderBrush="#6B9994" BorderThickness="1" CornerRadius="7" Padding="3" SnapsToDevicePixels="True">
-                   <ScrollViewer MaxHeight="320" CanContentScroll="True">
-                    <ItemsPresenter KeyboardNavigation.DirectionalNavigation="Contained"/>
-                   </ScrollViewer>
-                  </Border>
-                 </Popup>
-                </Grid>
-                <ControlTemplate.Triggers>
-                 <Trigger Property="HasItems" Value="False"><Setter TargetName="PART_Popup" Property="MinHeight" Value="24"/></Trigger>
-                 <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.55"/></Trigger>
-                </ControlTemplate.Triggers>
-               </ControlTemplate>
-              </Setter.Value>
-             </Setter>
-            </Style>
-
-            <SolidColorBrush x:Key="{x:Static SystemColors.WindowBrushKey}" Color="#263B46"/>
-            <SolidColorBrush x:Key="{x:Static SystemColors.WindowTextBrushKey}" Color="#D9F0ED"/>
-            <SolidColorBrush x:Key="{x:Static SystemColors.HighlightBrushKey}" Color="#6B9994"/>
-            <SolidColorBrush x:Key="{x:Static SystemColors.HighlightTextBrushKey}" Color="#FFFFFF"/>
-           </ComboBox.Resources>
-           <ComboBox.ItemContainerStyle>
-            <Style TargetType="ComboBoxItem">
-             <Setter Property="Foreground" Value="#D9F0ED"/>
-             <Setter Property="Background" Value="#263B46"/>
-             <Setter Property="BorderBrush" Value="#6B9994"/>
-             <Setter Property="Padding" Value="9,6"/>
-             <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
-             <Style.Triggers>
-              <Trigger Property="IsHighlighted" Value="True">
-               <Setter Property="Background" Value="#6B9994"/>
-               <Setter Property="Foreground" Value="#FFFFFF"/>
-              </Trigger>
-              <Trigger Property="IsSelected" Value="True">
-               <Setter Property="Background" Value="#31515A"/>
-               <Setter Property="Foreground" Value="#FFFFFF"/>
-              </Trigger>
-              <Trigger Property="IsEnabled" Value="False">
-               <Setter Property="Foreground" Value="#78918F"/>
-              </Trigger>
-             </Style.Triggers>
-            </Style>
-           </ComboBox.ItemContainerStyle>
- <ComboBoxItem Content="🛡️ All Categories"/><ComboBoxItem Content="🛡️ Defender &amp; Antivirus"/><ComboBoxItem Content="🛡️ Firewall &amp; Network"/><ComboBoxItem Content="🛡️ Privacy &amp; Tracking"/><ComboBoxItem Content="🛡️ Accounts &amp; Sign-in"/><ComboBoxItem Content="🛡️ Encryption &amp; Protection"/><ComboBoxItem Content="🛡️ Auditing &amp; Reports"/><ComboBoxItem Content="🛡️ Security Settings"/></ComboBox>
-        </Grid>
-       </Grid>
-       <TextBlock Name="SecResultsCount" Foreground="#AEB8C8" Margin="0,0,0,10"/>
-        <UniformGrid Name="SecToolsGrid" Columns="3"/>
+        
+        <WrapPanel Name="BackupActionsGrid" Orientation="Horizontal" HorizontalAlignment="Stretch" VerticalAlignment="Top" FlowDirection="RightToLeft" ItemWidth="380" ItemHeight="58" MinHeight="0"/>
        </StackPanel>
       </Border>
      </ScrollViewer>
-    </TabItem>
- <TabItem Header="System">
-     <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-     <Border Padding="20">
-      <StackPanel>
-       <Grid Margin="0,0,0,12">
+<Grid Name="CCHeaderBackup" Height="30" Margin="20,14,20,0" VerticalAlignment="Top">
         <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="390"/></Grid.ColumnDefinitions>
-        <StackPanel Grid.Column="0" VerticalAlignment="Center" Margin="0,0,16,0">
-         <TextBlock Text="Advanced System Configuration" FontSize="22" FontWeight="Bold" Foreground="#FFFFFF" Margin="0,0,0,8"/>
-        </StackPanel>
-        <Grid Grid.Column="1" VerticalAlignment="Center"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+         <StackPanel Grid.Column="0" VerticalAlignment="Center" Margin="0,0,16,0">
+          <TextBlock Text="Backup &amp; Recovery Center" FontSize="22" FontWeight="Bold" Foreground="#E9D8B5" Margin="0"/>
+         </StackPanel>
+        <TextBlock Name="BackupResultsCount" Text="50 backup actions" Foreground="#C9B27E" Grid.Column="1" HorizontalAlignment="Right" VerticalAlignment="Center" Margin="0,0,124,0"/>
+        <Grid Grid.Column="1" VerticalAlignment="Center" Visibility="Collapsed"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
          <Grid Grid.Column="0" Margin="0,0,6,0">
-          <TextBox Name="SysSearchBox" Grid.Column="0" Height="34" Padding="32,5" FontSize="13" ToolTip="Search system tools by name or keyword" Margin="0,0,6,0" Background="#1AFFFFFF" BorderBrush="#557F7B" BorderThickness="1.2" Visibility="Collapsed"/>
+          <TextBox Name="BackupSearchBox" Grid.Column="0" Height="34" Padding="32,5" FontSize="13" ToolTip="Search backup tools by name or keyword" Margin="0,0,6,0" Background="#1AFFFFFF" BorderBrush="#557F7B" BorderThickness="1.2" Visibility="Collapsed"/>
           <TextBlock Text="⌕" Visibility="Collapsed" IsHitTestVisible="False" HorizontalAlignment="Left" VerticalAlignment="Center" Margin="11,0,0,2" FontSize="21" FontWeight="SemiBold" Foreground="#79AAA5"/>
          </Grid>
-         <ComboBox Name="SysCategoryFilter" Grid.Column="1" Height="34" Padding="8,4" FontSize="13" Margin="6,0,0,0" SelectedIndex="0" Background="#244C50" Foreground="#D9F0ED" BorderBrush="#3D6D6F">
+         <ComboBox Name="BackupCategoryFilter" Grid.Column="1" Height="34" Padding="8,4" FontSize="13" Margin="6,0,0,0" SelectedIndex="0" Background="#244C50" Foreground="#D9F0ED" BorderBrush="#3D6D6F">
            <ComboBox.Resources>
             <Style TargetType="{x:Type ComboBox}">
              <Setter Property="SnapsToDevicePixels" Value="True"/>
@@ -6049,117 +6050,76 @@ Write-AMRLog ("Catalog item model: {0} ({1} items)." -f $(if ($script:AMRCatalog
              </Style.Triggers>
             </Style>
            </ComboBox.ItemContainerStyle>
- <ComboBoxItem Content="⚙️ All Categories"/><ComboBoxItem Content="⚙️ Performance &amp; Power"/><ComboBoxItem Content="⚙️ Startup &amp; Boot"/><ComboBoxItem Content="⚙️ Recovery &amp; Repair"/><ComboBoxItem Content="⚙️ Diagnostics &amp; Reports"/><ComboBoxItem Content="⚙️ Services &amp; Processes"/><ComboBoxItem Content="⚙️ Windows Settings"/><ComboBoxItem Content="⚙️ Storage &amp; Devices"/><ComboBoxItem Content="⚙️ Security &amp; Maintenance"/></ComboBox>
+ <ComboBoxItem Content="💾 All Categories"/><ComboBoxItem Content="🛡 Security"/><ComboBoxItem Content="⚙ System"/><ComboBoxItem Content="🚀 Optimize"/><ComboBoxItem Content="🌐 Network"/><ComboBoxItem Content="🧰 Utilities"/></ComboBox>
         </Grid>
        </Grid>
-       <TextBlock Name="SysResultsCount" Text="50 system tools" Foreground="#AEB8C8" Margin="0,0,0,12"/>
-       <UniformGrid Name="SysToolsGrid" Columns="3"/>
-      </StackPanel>
-     </Border>
-    </ScrollViewer>
-    </TabItem>
- <TabItem Header="Networks">
-     <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-      <Border Padding="20">
+</Grid>
+       </TabItem>
+ <TabItem Name="ToolKitCCUtilities" Style="{StaticResource ToolkitSubTabChildItemStyle}" Header="Utilities">
+     <Grid>
+<ScrollViewer Name="CCScrollUtilities" Margin="0,52,0,0" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" CanContentScroll="True">
+      <Border Padding="20,0,20,20">
        <StackPanel>
-        <Grid Margin="0,0,0,12">
-        <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="390"/></Grid.ColumnDefinitions>
-        <StackPanel Grid.Column="0" VerticalAlignment="Center" Margin="0,0,16,0">
-         <TextBlock Text="Network Diagnostic &amp; Repair Center" FontSize="22" FontWeight="Bold" Foreground="#FFFFFF" Margin="0,0,0,8"/>
-        </StackPanel>
-        <Grid Grid.Column="1" VerticalAlignment="Center"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-         <Grid Grid.Column="0" Margin="0,0,6,0">
-          <TextBox Name="NetSearchBox" Grid.Column="0" Height="34" Padding="32,5" FontSize="13" ToolTip="Search network tools by name or keyword" Margin="0,0,6,0" Background="#1AFFFFFF" BorderBrush="#557F7B" BorderThickness="1.2" Visibility="Collapsed"/>
-          <TextBlock Text="⌕" Visibility="Collapsed" IsHitTestVisible="False" HorizontalAlignment="Left" VerticalAlignment="Center" Margin="11,0,0,2" FontSize="21" FontWeight="SemiBold" Foreground="#79AAA5"/>
-         </Grid>
-         <ComboBox Name="NetCategoryFilter" Grid.Column="1" Height="34" Padding="8,4" FontSize="13" Margin="6,0,0,0" SelectedIndex="0" Background="#244C50" Foreground="#D9F0ED" BorderBrush="#3D6D6F">
-           <ComboBox.Resources>
-            <Style TargetType="{x:Type ComboBox}">
-             <Setter Property="SnapsToDevicePixels" Value="True"/>
-             <Setter Property="OverridesDefaultStyle" Value="True"/>
-             <Setter Property="ScrollViewer.HorizontalScrollBarVisibility" Value="Auto"/>
-             <Setter Property="ScrollViewer.VerticalScrollBarVisibility" Value="Auto"/>
-             <Setter Property="Template">
-              <Setter.Value>
-               <ControlTemplate TargetType="{x:Type ComboBox}">
-                <Grid>
-                 <ToggleButton x:Name="DropDownToggle" Focusable="False" ClickMode="Press" IsChecked="{Binding IsDropDownOpen, Mode=TwoWay, RelativeSource={RelativeSource TemplatedParent}}">
-                  <ToggleButton.Template>
-                   <ControlTemplate TargetType="{x:Type ToggleButton}">
-                    <Border x:Name="ToggleBorder" Background="{Binding Background, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" BorderBrush="{Binding BorderBrush, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" BorderThickness="1" CornerRadius="6" Padding="8,4">
-                     <Grid>
-                      <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="18"/></Grid.ColumnDefinitions>
-                      <ContentPresenter Grid.Column="0" Content="{Binding SelectionBoxItem, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" ContentTemplate="{Binding SelectionBoxItemTemplate, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" ContentStringFormat="{Binding SelectionBoxItemStringFormat, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" VerticalAlignment="Center" HorizontalAlignment="Left"/>
-                      <Path Grid.Column="1" Data="M 0 0 L 4 4 L 8 0" Stroke="#B7D5D1" StrokeThickness="1.6" HorizontalAlignment="Center" VerticalAlignment="Center"/>
-                     </Grid>
-                    </Border>
-                    <ControlTemplate.Triggers>
-                     <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="ToggleBorder" Property="BorderBrush" Value="#79AAA5"/></Trigger>
-                     <Trigger Property="IsPressed" Value="True"><Setter TargetName="ToggleBorder" Property="Background" Value="#31515A"/></Trigger>
-                    </ControlTemplate.Triggers>
-                   </ControlTemplate>
-                  </ToggleButton.Template>
-                 </ToggleButton>
-                 <Popup x:Name="PART_Popup" IsOpen="{TemplateBinding IsDropDownOpen}" Placement="Bottom" AllowsTransparency="True" Focusable="False" PopupAnimation="Fade">
-                  <Border Background="#263B46" BorderBrush="#6B9994" BorderThickness="1" CornerRadius="7" Padding="3" SnapsToDevicePixels="True">
-                   <ScrollViewer MaxHeight="320" CanContentScroll="True">
-                    <ItemsPresenter KeyboardNavigation.DirectionalNavigation="Contained"/>
-                   </ScrollViewer>
-                  </Border>
-                 </Popup>
-                </Grid>
-                <ControlTemplate.Triggers>
-                 <Trigger Property="HasItems" Value="False"><Setter TargetName="PART_Popup" Property="MinHeight" Value="24"/></Trigger>
-                 <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.55"/></Trigger>
-                </ControlTemplate.Triggers>
-               </ControlTemplate>
-              </Setter.Value>
-             </Setter>
-            </Style>
-
-            <SolidColorBrush x:Key="{x:Static SystemColors.WindowBrushKey}" Color="#263B46"/>
-            <SolidColorBrush x:Key="{x:Static SystemColors.WindowTextBrushKey}" Color="#D9F0ED"/>
-            <SolidColorBrush x:Key="{x:Static SystemColors.HighlightBrushKey}" Color="#6B9994"/>
-            <SolidColorBrush x:Key="{x:Static SystemColors.HighlightTextBrushKey}" Color="#FFFFFF"/>
-           </ComboBox.Resources>
-           <ComboBox.ItemContainerStyle>
-            <Style TargetType="ComboBoxItem">
-             <Setter Property="Foreground" Value="#D9F0ED"/>
-             <Setter Property="Background" Value="#263B46"/>
-             <Setter Property="BorderBrush" Value="#6B9994"/>
-             <Setter Property="Padding" Value="9,6"/>
-             <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
-             <Style.Triggers>
-              <Trigger Property="IsHighlighted" Value="True">
-               <Setter Property="Background" Value="#6B9994"/>
-               <Setter Property="Foreground" Value="#FFFFFF"/>
-              </Trigger>
-              <Trigger Property="IsSelected" Value="True">
-               <Setter Property="Background" Value="#31515A"/>
-               <Setter Property="Foreground" Value="#FFFFFF"/>
-              </Trigger>
-              <Trigger Property="IsEnabled" Value="False">
-               <Setter Property="Foreground" Value="#78918F"/>
-              </Trigger>
-             </Style.Triggers>
-            </Style>
-           </ComboBox.ItemContainerStyle>
- <ComboBoxItem Content="🌐 All Categories"/><ComboBoxItem Content="🌐 Diagnostics"/><ComboBoxItem Content="🌐 DNS &amp; IP"/><ComboBoxItem Content="🌐 Repair &amp; Reset"/><ComboBoxItem Content="🌐 Adapters &amp; Wi-Fi"/><ComboBoxItem Content="🌐 Connections &amp; Ports"/><ComboBoxItem Content="🌐 Reports &amp; Settings"/></ComboBox>
-        </Grid>
-       </Grid>
-       <TextBlock Name="NetResultsCount" Text="50 network tools" Foreground="#AEB8C8" Margin="0,0,0,12"/>
-        <UniformGrid Name="NetToolsGrid" Columns="3"/>
+       
+       <UniformGrid Name="UtilButtonsPanel" Columns="4">
+        <Button Name="UtilControlPanelBtn" Content="🛠 Open Classic Control Panel" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
+        <Button Name="UtilRegeditBtn" Content="🛠 Open Registry Editor" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
+        <Button Name="UtilDevMgmtBtn" Content="🛠 Open Device Manager" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
+        <Button Name="UtilSysInfoBtn" Content="🛠 Open System Information" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
+        <Button Name="UtilTaskMgrBtn" Content="🛠 Open Task Manager" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
+        <Button Name="UtilServicesBtn" Content="🛠 Open Services" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
+        <Button Name="UtilEventViewerBtn" Content="🛠 Open Event Viewer" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
+        <Button Name="UtilResourceMonitorBtn" Content="🛠 Open Resource Monitor" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
+        <Button Name="UtilPerformanceMonitorBtn" Content="🛠 Open Performance Monitor" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
+        <Button Name="UtilDiskMgmtBtn" Content="🛠 Open Disk Management" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
+        <Button Name="UtilComputerMgmtBtn" Content="🛠 Open Computer Management" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
+        <Button Name="UtilTaskSchedulerBtn" Content="🛠 Open Task Scheduler" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
+        <Button Name="UtilFirewallAdvancedBtn" Content="🛠 Open Advanced Firewall" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
+        <Button Name="UtilNetworkConnectionsBtn" Content="🛠 Open Network Connections" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
+        <Button Name="UtilSystemPropertiesBtn" Content="🛠 Open System Properties" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
+        <Button Name="UtilProgramsFeaturesBtn" Content="🛠 Open Programs and Features" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
+        <Button Name="UtilWindowsFeaturesBtn" Content="🛠 Open Windows Features" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
+        <Button Name="UtilPowerOptionsBtn" Content="🛠 Open Power Options" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
+        <Button Name="UtilSoundBtn" Content="🛠 Open Sound Settings" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
+        <Button Name="UtilMemoryDiagnosticBtn" Content="🛠 Open Windows Memory Diagnostic" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
+        <Button Name="UtilCertificatesBtn" Content="🛠 Open Certificate Manager" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
+        <Button Name="UtilCredentialManagerBtn" Content="🛠 Open Credential Manager" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
+        <Button Name="UtilGroupPolicyBtn" Content="🛠 Open Local Group Policy" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
+        <Button Name="UtilLocalUsersBtn" Content="🛠 Open Local Users and Groups" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
+        <Button Name="UtilTPMBtn" Content="🛠 Open TPM Management" Tag="Network &amp; Security" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
+        <Button Name="UtilSystemConfigBtn" Content="🛠 Open System Configuration" Tag="System &amp; Performance" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
+        <Button Name="UtilAboutWindowsBtn" Content="🛠 About Windows" Tag="System &amp; Performance" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
+        <Button Name="UtilAdvancedStartupBtn" Content="🛠 Advanced Startup Options" Tag="Troubleshooting &amp; Recovery" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
+        <Button Name="UtilRecoveryBtn" Content="🛠 Recovery Options" Tag="Troubleshooting &amp; Recovery" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
+        <Button Name="UtilWindowsUpdateBtn" Content="🛠 Windows Update" Tag="System &amp; Performance" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
+        <Button Name="UtilStorageSettingsBtn" Content="🛠 Storage Settings" Tag="System &amp; Performance" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
+        <Button Name="UtilAppsSettingsBtn" Content="🛠 Installed Apps" Tag="Administration" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
+        <Button Name="UtilPrivacySettingsBtn" Content="🛠 Privacy Settings" Tag="Network &amp; Security" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
+        <Button Name="UtilProxySettingsBtn" Content="🛠 Proxy Settings" Tag="Network &amp; Security" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
+        <Button Name="UtilBluetoothBtn" Content="🛠 Bluetooth Settings" Tag="Hardware &amp; Devices" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
+        <Button Name="UtilDisplaySettingsBtn" Content="🛠 Display Settings" Tag="Hardware &amp; Devices" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
+        <Button Name="UtilMouseSettingsBtn" Content="🛠 Mouse Settings" Tag="Hardware &amp; Devices" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
+        <Button Name="UtilKeyboardSettingsBtn" Content="🛠 Keyboard Settings" Tag="Hardware &amp; Devices" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
+        <Button Name="UtilPrintersBtn" Content="🛠 Printers &amp; Scanners" Tag="Hardware &amp; Devices" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
+        <Button Name="UtilDateTimeBtn" Content="🛠 Date &amp; Time Settings" Tag="System &amp; Performance" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
+        <Button Name="UtilRegionBtn" Content="🛠 Region Settings" Tag="Administration" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
+        <Button Name="UtilEnvVariablesBtn" Content="🛠 Environment Variables" Tag="Administration" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
+        <Button Name="UtilWindowsDefenderBtn" Content="🛠 Windows Security" Tag="Network &amp; Security" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
+        <Button Name="UtilReliabilityBtn" Content="🛠 Reliability Monitor" Tag="Troubleshooting &amp; Recovery" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
+        <Button Name="UtilStepsRecorderBtn" Content="🛠 Steps Recorder (if available)" Tag="Troubleshooting &amp; Recovery" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
+        <Button Name="UtilDiskCleanupBtn" Content="🛠 Disk Cleanup" Tag="Troubleshooting &amp; Recovery" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
+        <Button Name="UtilNetworkResetBtn" Content="🛠 Network Status" Tag="Network &amp; Security" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
+        <Button Name="UtilIndexingBtn" Content="🛠 Indexing Options" Tag="System &amp; Performance" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
+        <Button Name="UtilFontsBtn" Content="🛠 Fonts" Tag="Administration" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
+        <Button Name="UtilColorMgmtBtn" Content="🛠 Color Management" Tag="Hardware &amp; Devices" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
+       </UniformGrid>
        </StackPanel>
       </Border>
      </ScrollViewer>
-    </TabItem>
- <TabItem Header="Utilities">
-     <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" CanContentScroll="True">
-      <Border Padding="20">
-       <StackPanel>
-       <Grid Margin="0,0,0,12">
+<Grid Name="CCHeaderUtilities" Height="30" Margin="20,14,20,0" VerticalAlignment="Top">
         <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="390"/></Grid.ColumnDefinitions>
-        <TextBlock Grid.Column="0" Text="Quick Administration Utilities" FontSize="22" FontWeight="Bold" Foreground="#FFFFFF" VerticalAlignment="Center" Margin="0,0,16,0"/>
+        <TextBlock Grid.Column="0" Text="Quick Administration Utilities" FontSize="22" FontWeight="Bold" Foreground="#E9D8B5" VerticalAlignment="Center" Margin="0,0,16,0"/>
+        <TextBlock Name="UtilResultsCount" Text="50 utilities" Foreground="#C9B27E" Grid.Column="1" HorizontalAlignment="Right" VerticalAlignment="Center" Margin="0,0,124,0"/>
         <Grid Grid.Column="1" VerticalAlignment="Center"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
          <Grid Grid.Column="0" Margin="0,0,6,0">
           <TextBox Name="UtilSearchBox" Grid.Column="0" Height="34" Padding="32,5" FontSize="13" ToolTip="Search Utilities by name or keyword" Text="" Margin="0,0,6,0" Background="#1AFFFFFF" BorderBrush="#557F7B" BorderThickness="1.2" Visibility="Collapsed"/>
@@ -6249,64 +6209,302 @@ Write-AMRLog ("Catalog item model: {0} ({1} items)." -f $(if ($script:AMRCatalog
          </ComboBox>
         </Grid>
        </Grid>
-       <TextBlock Name="UtilResultsCount" Text="50 utilities" Foreground="#AEB8C8" Margin="0,0,0,12"/>
-       <UniformGrid Name="UtilButtonsPanel" Columns="4">
-        <Button Name="UtilControlPanelBtn" Content="🛠 Open Classic Control Panel" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
-        <Button Name="UtilRegeditBtn" Content="🛠 Open Registry Editor" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
-        <Button Name="UtilDevMgmtBtn" Content="🛠 Open Device Manager" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
-        <Button Name="UtilSysInfoBtn" Content="🛠 Open System Information" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
-        <Button Name="UtilTaskMgrBtn" Content="🛠 Open Task Manager" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
-        <Button Name="UtilServicesBtn" Content="🛠 Open Services" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
-        <Button Name="UtilEventViewerBtn" Content="🛠 Open Event Viewer" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
-        <Button Name="UtilResourceMonitorBtn" Content="🛠 Open Resource Monitor" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
-        <Button Name="UtilPerformanceMonitorBtn" Content="🛠 Open Performance Monitor" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
-        <Button Name="UtilDiskMgmtBtn" Content="🛠 Open Disk Management" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
-        <Button Name="UtilComputerMgmtBtn" Content="🛠 Open Computer Management" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
-        <Button Name="UtilTaskSchedulerBtn" Content="🛠 Open Task Scheduler" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
-        <Button Name="UtilFirewallAdvancedBtn" Content="🛠 Open Advanced Firewall" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
-        <Button Name="UtilNetworkConnectionsBtn" Content="🛠 Open Network Connections" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
-        <Button Name="UtilSystemPropertiesBtn" Content="🛠 Open System Properties" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
-        <Button Name="UtilProgramsFeaturesBtn" Content="🛠 Open Programs and Features" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
-        <Button Name="UtilWindowsFeaturesBtn" Content="🛠 Open Windows Features" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
-        <Button Name="UtilPowerOptionsBtn" Content="🛠 Open Power Options" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
-        <Button Name="UtilSoundBtn" Content="🛠 Open Sound Settings" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
-        <Button Name="UtilMemoryDiagnosticBtn" Content="🛠 Open Windows Memory Diagnostic" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
-        <Button Name="UtilCertificatesBtn" Content="🛠 Open Certificate Manager" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
-        <Button Name="UtilCredentialManagerBtn" Content="🛠 Open Credential Manager" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
-        <Button Name="UtilGroupPolicyBtn" Content="🛠 Open Local Group Policy" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
-        <Button Name="UtilLocalUsersBtn" Content="🛠 Open Local Users and Groups" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
-        <Button Name="UtilTPMBtn" Content="🛠 Open TPM Management" Tag="Network &amp; Security" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
-        <Button Name="UtilSystemConfigBtn" Content="🛠 Open System Configuration" Tag="System &amp; Performance" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
-        <Button Name="UtilAboutWindowsBtn" Content="🛠 About Windows" Tag="System &amp; Performance" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
-        <Button Name="UtilAdvancedStartupBtn" Content="🛠 Advanced Startup Options" Tag="Troubleshooting &amp; Recovery" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
-        <Button Name="UtilRecoveryBtn" Content="🛠 Recovery Options" Tag="Troubleshooting &amp; Recovery" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
-        <Button Name="UtilWindowsUpdateBtn" Content="🛠 Windows Update" Tag="System &amp; Performance" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
-        <Button Name="UtilStorageSettingsBtn" Content="🛠 Storage Settings" Tag="System &amp; Performance" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
-        <Button Name="UtilAppsSettingsBtn" Content="🛠 Installed Apps" Tag="Administration" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
-        <Button Name="UtilPrivacySettingsBtn" Content="🛠 Privacy Settings" Tag="Network &amp; Security" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
-        <Button Name="UtilProxySettingsBtn" Content="🛠 Proxy Settings" Tag="Network &amp; Security" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
-        <Button Name="UtilBluetoothBtn" Content="🛠 Bluetooth Settings" Tag="Hardware &amp; Devices" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
-        <Button Name="UtilDisplaySettingsBtn" Content="🛠 Display Settings" Tag="Hardware &amp; Devices" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
-        <Button Name="UtilMouseSettingsBtn" Content="🛠 Mouse Settings" Tag="Hardware &amp; Devices" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
-        <Button Name="UtilKeyboardSettingsBtn" Content="🛠 Keyboard Settings" Tag="Hardware &amp; Devices" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
-        <Button Name="UtilPrintersBtn" Content="🛠 Printers &amp; Scanners" Tag="Hardware &amp; Devices" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
-        <Button Name="UtilDateTimeBtn" Content="🛠 Date &amp; Time Settings" Tag="System &amp; Performance" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
-        <Button Name="UtilRegionBtn" Content="🛠 Region Settings" Tag="Administration" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
-        <Button Name="UtilEnvVariablesBtn" Content="🛠 Environment Variables" Tag="Administration" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
-        <Button Name="UtilWindowsDefenderBtn" Content="🛠 Windows Security" Tag="Network &amp; Security" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
-        <Button Name="UtilReliabilityBtn" Content="🛠 Reliability Monitor" Tag="Troubleshooting &amp; Recovery" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
-        <Button Name="UtilStepsRecorderBtn" Content="🛠 Steps Recorder (if available)" Tag="Troubleshooting &amp; Recovery" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
-        <Button Name="UtilDiskCleanupBtn" Content="🛠 Disk Cleanup" Tag="Troubleshooting &amp; Recovery" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
-        <Button Name="UtilNetworkResetBtn" Content="🛠 Network Status" Tag="Network &amp; Security" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
-        <Button Name="UtilIndexingBtn" Content="🛠 Indexing Options" Tag="System &amp; Performance" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
-        <Button Name="UtilFontsBtn" Content="🛠 Fonts" Tag="Administration" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
-        <Button Name="UtilColorMgmtBtn" Content="🛠 Color Management" Tag="Hardware &amp; Devices" Width="190" Height="38" Padding="8,5" FontSize="11" Margin="0,0,8,8"/>
-       </UniformGrid>
+</Grid>
+    </TabItem>
+ <TabItem Name="ToolKitCCSecurity" Style="{StaticResource ToolkitSubTabChildItemStyle}" Header="Security">
+     <Grid>
+<ScrollViewer Name="CCScrollSecurity" Margin="0,52,0,0" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+      <Border Padding="20,0,20,20">
+       <StackPanel>
+        
+        <UniformGrid Name="SecToolsGrid" Columns="3"/>
        </StackPanel>
       </Border>
      </ScrollViewer>
-    </TabItem>
+<Grid Name="CCHeaderSecurity" Height="30" Margin="20,14,20,0" VerticalAlignment="Top">
+        <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="390"/></Grid.ColumnDefinitions>
+        <StackPanel Grid.Column="0" VerticalAlignment="Center" Margin="0,0,16,0">
+         <TextBlock Text="Security &amp; Privacy Console" FontSize="22" FontWeight="Bold" Foreground="#E9D8B5" Margin="0"/>
+        </StackPanel>
+        <TextBlock Name="SecResultsCount" Foreground="#C9B27E" Grid.Column="1" HorizontalAlignment="Right" VerticalAlignment="Center" Margin="0,0,124,0"/>
+        <Grid Grid.Column="1" VerticalAlignment="Center"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+         <Grid Grid.Column="0" Margin="0,0,6,0">
+          <TextBox Name="SecSearchBox" Grid.Column="0" Height="34" Padding="32,5" FontSize="13" ToolTip="Search security tools by name or keyword" Margin="0,0,6,0" Background="#1AFFFFFF" BorderBrush="#557F7B" BorderThickness="1.2" Visibility="Collapsed"/>
+          <TextBlock Text="⌕" Visibility="Collapsed" IsHitTestVisible="False" HorizontalAlignment="Left" VerticalAlignment="Center" Margin="11,0,0,2" FontSize="21" FontWeight="SemiBold" Foreground="#79AAA5"/>
+         </Grid>
+         <ComboBox Name="SecCategoryFilter" Grid.Column="1" Height="34" Padding="8,4" FontSize="13" Margin="6,0,0,0" SelectedIndex="0" Background="#244C50" Foreground="#D9F0ED" BorderBrush="#3D6D6F">
+           <ComboBox.Resources>
+            <Style TargetType="{x:Type ComboBox}">
+             <Setter Property="SnapsToDevicePixels" Value="True"/>
+             <Setter Property="OverridesDefaultStyle" Value="True"/>
+             <Setter Property="ScrollViewer.HorizontalScrollBarVisibility" Value="Auto"/>
+             <Setter Property="ScrollViewer.VerticalScrollBarVisibility" Value="Auto"/>
+             <Setter Property="Template">
+              <Setter.Value>
+               <ControlTemplate TargetType="{x:Type ComboBox}">
+                <Grid>
+                 <ToggleButton x:Name="DropDownToggle" Focusable="False" ClickMode="Press" IsChecked="{Binding IsDropDownOpen, Mode=TwoWay, RelativeSource={RelativeSource TemplatedParent}}">
+                  <ToggleButton.Template>
+                   <ControlTemplate TargetType="{x:Type ToggleButton}">
+                    <Border x:Name="ToggleBorder" Background="{Binding Background, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" BorderBrush="{Binding BorderBrush, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" BorderThickness="1" CornerRadius="6" Padding="8,4">
+                     <Grid>
+                      <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="18"/></Grid.ColumnDefinitions>
+                      <ContentPresenter Grid.Column="0" Content="{Binding SelectionBoxItem, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" ContentTemplate="{Binding SelectionBoxItemTemplate, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" ContentStringFormat="{Binding SelectionBoxItemStringFormat, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" VerticalAlignment="Center" HorizontalAlignment="Left"/>
+                      <Path Grid.Column="1" Data="M 0 0 L 4 4 L 8 0" Stroke="#B7D5D1" StrokeThickness="1.6" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                     </Grid>
+                    </Border>
+                    <ControlTemplate.Triggers>
+                     <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="ToggleBorder" Property="BorderBrush" Value="#79AAA5"/></Trigger>
+                     <Trigger Property="IsPressed" Value="True"><Setter TargetName="ToggleBorder" Property="Background" Value="#31515A"/></Trigger>
+                    </ControlTemplate.Triggers>
+                   </ControlTemplate>
+                  </ToggleButton.Template>
+                 </ToggleButton>
+                 <Popup x:Name="PART_Popup" IsOpen="{TemplateBinding IsDropDownOpen}" Placement="Bottom" AllowsTransparency="True" Focusable="False" PopupAnimation="Fade">
+                  <Border Background="#263B46" BorderBrush="#6B9994" BorderThickness="1" CornerRadius="7" Padding="3" SnapsToDevicePixels="True">
+                   <ScrollViewer MaxHeight="320" CanContentScroll="True">
+                    <ItemsPresenter KeyboardNavigation.DirectionalNavigation="Contained"/>
+                   </ScrollViewer>
+                  </Border>
+                 </Popup>
+                </Grid>
+                <ControlTemplate.Triggers>
+                 <Trigger Property="HasItems" Value="False"><Setter TargetName="PART_Popup" Property="MinHeight" Value="24"/></Trigger>
+                 <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.55"/></Trigger>
+                </ControlTemplate.Triggers>
+               </ControlTemplate>
+              </Setter.Value>
+             </Setter>
+            </Style>
 
+            <SolidColorBrush x:Key="{x:Static SystemColors.WindowBrushKey}" Color="#263B46"/>
+            <SolidColorBrush x:Key="{x:Static SystemColors.WindowTextBrushKey}" Color="#D9F0ED"/>
+            <SolidColorBrush x:Key="{x:Static SystemColors.HighlightBrushKey}" Color="#6B9994"/>
+            <SolidColorBrush x:Key="{x:Static SystemColors.HighlightTextBrushKey}" Color="#FFFFFF"/>
+           </ComboBox.Resources>
+           <ComboBox.ItemContainerStyle>
+            <Style TargetType="ComboBoxItem">
+             <Setter Property="Foreground" Value="#D9F0ED"/>
+             <Setter Property="Background" Value="#263B46"/>
+             <Setter Property="BorderBrush" Value="#6B9994"/>
+             <Setter Property="Padding" Value="9,6"/>
+             <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+             <Style.Triggers>
+              <Trigger Property="IsHighlighted" Value="True">
+               <Setter Property="Background" Value="#6B9994"/>
+               <Setter Property="Foreground" Value="#FFFFFF"/>
+              </Trigger>
+              <Trigger Property="IsSelected" Value="True">
+               <Setter Property="Background" Value="#31515A"/>
+               <Setter Property="Foreground" Value="#FFFFFF"/>
+              </Trigger>
+              <Trigger Property="IsEnabled" Value="False">
+               <Setter Property="Foreground" Value="#78918F"/>
+              </Trigger>
+             </Style.Triggers>
+            </Style>
+           </ComboBox.ItemContainerStyle>
+ <ComboBoxItem Content="🛡️ All Categories"/><ComboBoxItem Content="🛡️ Defender &amp; Antivirus"/><ComboBoxItem Content="🛡️ Firewall &amp; Network"/><ComboBoxItem Content="🛡️ Privacy &amp; Tracking"/><ComboBoxItem Content="🛡️ Accounts &amp; Sign-in"/><ComboBoxItem Content="🛡️ Encryption &amp; Protection"/><ComboBoxItem Content="🛡️ Auditing &amp; Reports"/><ComboBoxItem Content="🛡️ Security Settings"/></ComboBox>
+        </Grid>
+       </Grid>
+</Grid>
+    </TabItem>
+ <TabItem Name="ToolKitCCSystem" Style="{StaticResource ToolkitSubTabChildItemStyle}" Header="System">
+     <Grid>
+<ScrollViewer Name="CCScrollSystem" Margin="0,52,0,0" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+     <Border Padding="20,0,20,20">
+      <StackPanel>
+       
+       <UniformGrid Name="SysToolsGrid" Columns="3"/>
+      </StackPanel>
+     </Border>
+    </ScrollViewer>
+<Grid Name="CCHeaderSystem" Height="30" Margin="20,14,20,0" VerticalAlignment="Top">
+        <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="390"/></Grid.ColumnDefinitions>
+        <StackPanel Grid.Column="0" VerticalAlignment="Center" Margin="0,0,16,0">
+         <TextBlock Text="Advanced System Configuration" FontSize="22" FontWeight="Bold" Foreground="#E9D8B5" Margin="0"/>
+        </StackPanel>
+        <TextBlock Name="SysResultsCount" Text="50 system tools" Foreground="#C9B27E" Grid.Column="1" HorizontalAlignment="Right" VerticalAlignment="Center" Margin="0,0,124,0"/>
+        <Grid Grid.Column="1" VerticalAlignment="Center"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+         <Grid Grid.Column="0" Margin="0,0,6,0">
+          <TextBox Name="SysSearchBox" Grid.Column="0" Height="34" Padding="32,5" FontSize="13" ToolTip="Search system tools by name or keyword" Margin="0,0,6,0" Background="#1AFFFFFF" BorderBrush="#557F7B" BorderThickness="1.2" Visibility="Collapsed"/>
+          <TextBlock Text="⌕" Visibility="Collapsed" IsHitTestVisible="False" HorizontalAlignment="Left" VerticalAlignment="Center" Margin="11,0,0,2" FontSize="21" FontWeight="SemiBold" Foreground="#79AAA5"/>
+         </Grid>
+         <ComboBox Name="SysCategoryFilter" Grid.Column="1" Height="34" Padding="8,4" FontSize="13" Margin="6,0,0,0" SelectedIndex="0" Background="#244C50" Foreground="#D9F0ED" BorderBrush="#3D6D6F">
+           <ComboBox.Resources>
+            <Style TargetType="{x:Type ComboBox}">
+             <Setter Property="SnapsToDevicePixels" Value="True"/>
+             <Setter Property="OverridesDefaultStyle" Value="True"/>
+             <Setter Property="ScrollViewer.HorizontalScrollBarVisibility" Value="Auto"/>
+             <Setter Property="ScrollViewer.VerticalScrollBarVisibility" Value="Auto"/>
+             <Setter Property="Template">
+              <Setter.Value>
+               <ControlTemplate TargetType="{x:Type ComboBox}">
+                <Grid>
+                 <ToggleButton x:Name="DropDownToggle" Focusable="False" ClickMode="Press" IsChecked="{Binding IsDropDownOpen, Mode=TwoWay, RelativeSource={RelativeSource TemplatedParent}}">
+                  <ToggleButton.Template>
+                   <ControlTemplate TargetType="{x:Type ToggleButton}">
+                    <Border x:Name="ToggleBorder" Background="{Binding Background, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" BorderBrush="{Binding BorderBrush, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" BorderThickness="1" CornerRadius="6" Padding="8,4">
+                     <Grid>
+                      <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="18"/></Grid.ColumnDefinitions>
+                      <ContentPresenter Grid.Column="0" Content="{Binding SelectionBoxItem, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" ContentTemplate="{Binding SelectionBoxItemTemplate, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" ContentStringFormat="{Binding SelectionBoxItemStringFormat, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" VerticalAlignment="Center" HorizontalAlignment="Left"/>
+                      <Path Grid.Column="1" Data="M 0 0 L 4 4 L 8 0" Stroke="#B7D5D1" StrokeThickness="1.6" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                     </Grid>
+                    </Border>
+                    <ControlTemplate.Triggers>
+                     <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="ToggleBorder" Property="BorderBrush" Value="#79AAA5"/></Trigger>
+                     <Trigger Property="IsPressed" Value="True"><Setter TargetName="ToggleBorder" Property="Background" Value="#31515A"/></Trigger>
+                    </ControlTemplate.Triggers>
+                   </ControlTemplate>
+                  </ToggleButton.Template>
+                 </ToggleButton>
+                 <Popup x:Name="PART_Popup" IsOpen="{TemplateBinding IsDropDownOpen}" Placement="Bottom" AllowsTransparency="True" Focusable="False" PopupAnimation="Fade">
+                  <Border Background="#263B46" BorderBrush="#6B9994" BorderThickness="1" CornerRadius="7" Padding="3" SnapsToDevicePixels="True">
+                   <ScrollViewer MaxHeight="320" CanContentScroll="True">
+                    <ItemsPresenter KeyboardNavigation.DirectionalNavigation="Contained"/>
+                   </ScrollViewer>
+                  </Border>
+                 </Popup>
+                </Grid>
+                <ControlTemplate.Triggers>
+                 <Trigger Property="HasItems" Value="False"><Setter TargetName="PART_Popup" Property="MinHeight" Value="24"/></Trigger>
+                 <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.55"/></Trigger>
+                </ControlTemplate.Triggers>
+               </ControlTemplate>
+              </Setter.Value>
+             </Setter>
+            </Style>
+
+            <SolidColorBrush x:Key="{x:Static SystemColors.WindowBrushKey}" Color="#263B46"/>
+            <SolidColorBrush x:Key="{x:Static SystemColors.WindowTextBrushKey}" Color="#D9F0ED"/>
+            <SolidColorBrush x:Key="{x:Static SystemColors.HighlightBrushKey}" Color="#6B9994"/>
+            <SolidColorBrush x:Key="{x:Static SystemColors.HighlightTextBrushKey}" Color="#FFFFFF"/>
+           </ComboBox.Resources>
+           <ComboBox.ItemContainerStyle>
+            <Style TargetType="ComboBoxItem">
+             <Setter Property="Foreground" Value="#D9F0ED"/>
+             <Setter Property="Background" Value="#263B46"/>
+             <Setter Property="BorderBrush" Value="#6B9994"/>
+             <Setter Property="Padding" Value="9,6"/>
+             <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+             <Style.Triggers>
+              <Trigger Property="IsHighlighted" Value="True">
+               <Setter Property="Background" Value="#6B9994"/>
+               <Setter Property="Foreground" Value="#FFFFFF"/>
+              </Trigger>
+              <Trigger Property="IsSelected" Value="True">
+               <Setter Property="Background" Value="#31515A"/>
+               <Setter Property="Foreground" Value="#FFFFFF"/>
+              </Trigger>
+              <Trigger Property="IsEnabled" Value="False">
+               <Setter Property="Foreground" Value="#78918F"/>
+              </Trigger>
+             </Style.Triggers>
+            </Style>
+           </ComboBox.ItemContainerStyle>
+ <ComboBoxItem Content="⚙️ All Categories"/><ComboBoxItem Content="⚙️ Performance &amp; Power"/><ComboBoxItem Content="⚙️ Startup &amp; Boot"/><ComboBoxItem Content="⚙️ Recovery &amp; Repair"/><ComboBoxItem Content="⚙️ Diagnostics &amp; Reports"/><ComboBoxItem Content="⚙️ Services &amp; Processes"/><ComboBoxItem Content="⚙️ Windows Settings"/><ComboBoxItem Content="⚙️ Storage &amp; Devices"/><ComboBoxItem Content="⚙️ Security &amp; Maintenance"/></ComboBox>
+        </Grid>
+       </Grid>
+</Grid>
+    </TabItem>
+ <TabItem Name="ToolKitCCNetworks" Style="{StaticResource ToolkitSubTabChildItemStyle}" Header="Networks">
+     <Grid>
+<ScrollViewer Name="CCScrollNetworks" Margin="0,52,0,0" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+      <Border Padding="20,0,20,20">
+       <StackPanel>
+        
+        <UniformGrid Name="NetToolsGrid" Columns="3"/>
+       </StackPanel>
+      </Border>
+     </ScrollViewer>
+<Grid Name="CCHeaderNetworks" Height="30" Margin="20,14,20,0" VerticalAlignment="Top">
+        <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="390"/></Grid.ColumnDefinitions>
+        <StackPanel Grid.Column="0" VerticalAlignment="Center" Margin="0,0,16,0">
+         <TextBlock Text="Network Diagnostic &amp; Repair Center" FontSize="22" FontWeight="Bold" Foreground="#E9D8B5" Margin="0"/>
+        </StackPanel>
+        <TextBlock Name="NetResultsCount" Text="50 network tools" Foreground="#C9B27E" Grid.Column="1" HorizontalAlignment="Right" VerticalAlignment="Center" Margin="0,0,124,0"/>
+        <Grid Grid.Column="1" VerticalAlignment="Center"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+         <Grid Grid.Column="0" Margin="0,0,6,0">
+          <TextBox Name="NetSearchBox" Grid.Column="0" Height="34" Padding="32,5" FontSize="13" ToolTip="Search network tools by name or keyword" Margin="0,0,6,0" Background="#1AFFFFFF" BorderBrush="#557F7B" BorderThickness="1.2" Visibility="Collapsed"/>
+          <TextBlock Text="⌕" Visibility="Collapsed" IsHitTestVisible="False" HorizontalAlignment="Left" VerticalAlignment="Center" Margin="11,0,0,2" FontSize="21" FontWeight="SemiBold" Foreground="#79AAA5"/>
+         </Grid>
+         <ComboBox Name="NetCategoryFilter" Grid.Column="1" Height="34" Padding="8,4" FontSize="13" Margin="6,0,0,0" SelectedIndex="0" Background="#244C50" Foreground="#D9F0ED" BorderBrush="#3D6D6F">
+           <ComboBox.Resources>
+            <Style TargetType="{x:Type ComboBox}">
+             <Setter Property="SnapsToDevicePixels" Value="True"/>
+             <Setter Property="OverridesDefaultStyle" Value="True"/>
+             <Setter Property="ScrollViewer.HorizontalScrollBarVisibility" Value="Auto"/>
+             <Setter Property="ScrollViewer.VerticalScrollBarVisibility" Value="Auto"/>
+             <Setter Property="Template">
+              <Setter.Value>
+               <ControlTemplate TargetType="{x:Type ComboBox}">
+                <Grid>
+                 <ToggleButton x:Name="DropDownToggle" Focusable="False" ClickMode="Press" IsChecked="{Binding IsDropDownOpen, Mode=TwoWay, RelativeSource={RelativeSource TemplatedParent}}">
+                  <ToggleButton.Template>
+                   <ControlTemplate TargetType="{x:Type ToggleButton}">
+                    <Border x:Name="ToggleBorder" Background="{Binding Background, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" BorderBrush="{Binding BorderBrush, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" BorderThickness="1" CornerRadius="6" Padding="8,4">
+                     <Grid>
+                      <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="18"/></Grid.ColumnDefinitions>
+                      <ContentPresenter Grid.Column="0" Content="{Binding SelectionBoxItem, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" ContentTemplate="{Binding SelectionBoxItemTemplate, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" ContentStringFormat="{Binding SelectionBoxItemStringFormat, RelativeSource={RelativeSource AncestorType={x:Type ComboBox}}}" VerticalAlignment="Center" HorizontalAlignment="Left"/>
+                      <Path Grid.Column="1" Data="M 0 0 L 4 4 L 8 0" Stroke="#B7D5D1" StrokeThickness="1.6" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                     </Grid>
+                    </Border>
+                    <ControlTemplate.Triggers>
+                     <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="ToggleBorder" Property="BorderBrush" Value="#79AAA5"/></Trigger>
+                     <Trigger Property="IsPressed" Value="True"><Setter TargetName="ToggleBorder" Property="Background" Value="#31515A"/></Trigger>
+                    </ControlTemplate.Triggers>
+                   </ControlTemplate>
+                  </ToggleButton.Template>
+                 </ToggleButton>
+                 <Popup x:Name="PART_Popup" IsOpen="{TemplateBinding IsDropDownOpen}" Placement="Bottom" AllowsTransparency="True" Focusable="False" PopupAnimation="Fade">
+                  <Border Background="#263B46" BorderBrush="#6B9994" BorderThickness="1" CornerRadius="7" Padding="3" SnapsToDevicePixels="True">
+                   <ScrollViewer MaxHeight="320" CanContentScroll="True">
+                    <ItemsPresenter KeyboardNavigation.DirectionalNavigation="Contained"/>
+                   </ScrollViewer>
+                  </Border>
+                 </Popup>
+                </Grid>
+                <ControlTemplate.Triggers>
+                 <Trigger Property="HasItems" Value="False"><Setter TargetName="PART_Popup" Property="MinHeight" Value="24"/></Trigger>
+                 <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.55"/></Trigger>
+                </ControlTemplate.Triggers>
+               </ControlTemplate>
+              </Setter.Value>
+             </Setter>
+            </Style>
+
+            <SolidColorBrush x:Key="{x:Static SystemColors.WindowBrushKey}" Color="#263B46"/>
+            <SolidColorBrush x:Key="{x:Static SystemColors.WindowTextBrushKey}" Color="#D9F0ED"/>
+            <SolidColorBrush x:Key="{x:Static SystemColors.HighlightBrushKey}" Color="#6B9994"/>
+            <SolidColorBrush x:Key="{x:Static SystemColors.HighlightTextBrushKey}" Color="#FFFFFF"/>
+           </ComboBox.Resources>
+           <ComboBox.ItemContainerStyle>
+            <Style TargetType="ComboBoxItem">
+             <Setter Property="Foreground" Value="#D9F0ED"/>
+             <Setter Property="Background" Value="#263B46"/>
+             <Setter Property="BorderBrush" Value="#6B9994"/>
+             <Setter Property="Padding" Value="9,6"/>
+             <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+             <Style.Triggers>
+              <Trigger Property="IsHighlighted" Value="True">
+               <Setter Property="Background" Value="#6B9994"/>
+               <Setter Property="Foreground" Value="#FFFFFF"/>
+              </Trigger>
+              <Trigger Property="IsSelected" Value="True">
+               <Setter Property="Background" Value="#31515A"/>
+               <Setter Property="Foreground" Value="#FFFFFF"/>
+              </Trigger>
+              <Trigger Property="IsEnabled" Value="False">
+               <Setter Property="Foreground" Value="#78918F"/>
+              </Trigger>
+             </Style.Triggers>
+            </Style>
+           </ComboBox.ItemContainerStyle>
+ <ComboBoxItem Content="🌐 All Categories"/><ComboBoxItem Content="🌐 Diagnostics"/><ComboBoxItem Content="🌐 DNS &amp; IP"/><ComboBoxItem Content="🌐 Repair &amp; Reset"/><ComboBoxItem Content="🌐 Adapters &amp; Wi-Fi"/><ComboBoxItem Content="🌐 Connections &amp; Ports"/><ComboBoxItem Content="🌐 Reports &amp; Settings"/></ComboBox>
+        </Grid>
+       </Grid>
+</Grid>
+    </TabItem>
       </TabControl>
     </Grid>
    </TabItem>
@@ -6346,13 +6544,13 @@ Write-AMRLog ("Catalog item model: {0} ({1} items)." -f $(if ($script:AMRCatalog
           </Grid>
           <ScrollViewer Name="CleanupSmartItemsScrollViewer" Grid.Row="2" VerticalScrollBarVisibility="Auto">
            <StackPanel>
-            <Border Background="#202027" BorderBrush="#383842" BorderThickness="1" CornerRadius="8" Padding="10" Margin="0,0,0,7"><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><StackPanel><CheckBox Name="CleanupUserTempCheck" Content="User temporary files" Foreground="#F1F5F9" FontSize="12" FontWeight="SemiBold"/><TextBlock Text="Temporary files in your Windows user profile." Foreground="#CBD5E1" FontSize="11" Margin="22,3,0,0"/></StackPanel><TextBlock Name="CleanupUserTempInfo" Grid.Column="1" Text="Not scanned" Foreground="#D1D5DB" VerticalAlignment="Center" Margin="8,0,0,0" FontSize="10"/></Grid></Border>
-            <Border Background="#202027" BorderBrush="#383842" BorderThickness="1" CornerRadius="8" Padding="10" Margin="0,0,0,7"><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><StackPanel><CheckBox Name="CleanupWindowsTempCheck" Content="Windows temporary files" Foreground="#F1F5F9" FontSize="12" FontWeight="SemiBold"/><TextBlock Text="Temporary files under the Windows Temp folder." Foreground="#CBD5E1" FontSize="11" Margin="22,3,0,0"/></StackPanel><TextBlock Name="CleanupWindowsTempInfo" Grid.Column="1" Text="Not scanned" Foreground="#D1D5DB" VerticalAlignment="Center" Margin="8,0,0,0" FontSize="10"/></Grid></Border>
-            <Border Background="#202027" BorderBrush="#383842" BorderThickness="1" CornerRadius="8" Padding="10" Margin="0,0,0,7"><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><StackPanel><CheckBox Name="CleanupUpdateCheck" Content="Windows &amp; NVIDIA update leftovers" Foreground="#F1F5F9" FontSize="12" FontWeight="SemiBold"/><TextBlock Text="Windows Update downloads and old NVIDIA app update artifacts (30+ days)." Foreground="#CBD5E1" FontSize="11" Margin="22,3,0,0"/></StackPanel><TextBlock Name="CleanupUpdateInfo" Grid.Column="1" Text="Not scanned" Foreground="#D1D5DB" VerticalAlignment="Center" Margin="8,0,0,0" FontSize="10"/></Grid></Border>
-            <Border Background="#202027" BorderBrush="#383842" BorderThickness="1" CornerRadius="8" Padding="10" Margin="0,0,0,7"><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><StackPanel><CheckBox Name="CleanupWerCheck" Content="Windows error reports" Foreground="#F1F5F9" FontSize="12" FontWeight="SemiBold"/><TextBlock Text="Archived and queued Windows Error Reporting files." Foreground="#CBD5E1" FontSize="11" Margin="22,3,0,0"/></StackPanel><TextBlock Name="CleanupWerInfo" Grid.Column="1" Text="Not scanned" Foreground="#D1D5DB" VerticalAlignment="Center" Margin="8,0,0,0" FontSize="10"/></Grid></Border>
-            <Border Background="#202027" BorderBrush="#383842" BorderThickness="1" CornerRadius="8" Padding="10" Margin="0,0,0,7"><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><StackPanel><CheckBox Name="CleanupShaderCheck" Content="GPU shader cache" Foreground="#F1F5F9" FontSize="12" FontWeight="SemiBold"/><TextBlock Text="Rebuildable DirectX, NVIDIA, AMD and Intel shader caches (7+ days)." Foreground="#CBD5E1" FontSize="11" Margin="22,3,0,0"/></StackPanel><TextBlock Name="CleanupShaderInfo" Grid.Column="1" Text="Not scanned" Foreground="#D1D5DB" VerticalAlignment="Center" Margin="8,0,0,0" FontSize="10"/></Grid></Border>
-            <Border Background="#202027" BorderBrush="#383842" BorderThickness="1" CornerRadius="8" Padding="10" Margin="0,0,0,7"><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><StackPanel><CheckBox Name="CleanupAppCacheCheck" Content="Application caches" Foreground="#F1F5F9" FontSize="12" FontWeight="SemiBold"/><TextBlock Text="Recognized rebuildable caches for common browsers, chat, media, gaming and developer apps (7+ days)." Foreground="#CBD5E1" FontSize="11" Margin="22,3,0,0"/></StackPanel><TextBlock Name="CleanupAppCacheInfo" Grid.Column="1" Text="Not scanned" Foreground="#D1D5DB" VerticalAlignment="Center" Margin="8,0,0,0" FontSize="10"/></Grid></Border>
-            <Border Background="#202027" BorderBrush="#383842" BorderThickness="1" CornerRadius="8" Padding="10" Margin="0,0,0,7"><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><StackPanel><CheckBox Name="CleanupDeliveryCheck" Content="Delivery Optimization cache" Foreground="#F1F5F9" FontSize="12" FontWeight="SemiBold"/><TextBlock Text="Cached update delivery files that Windows can download again." Foreground="#CBD5E1" FontSize="11" Margin="22,3,0,0"/></StackPanel><TextBlock Name="CleanupDeliveryInfo" Grid.Column="1" Text="Not scanned" Foreground="#D1D5DB" VerticalAlignment="Center" Margin="8,0,0,0" FontSize="10"/></Grid></Border>
+            <Border Background="#202027" BorderBrush="#383842" BorderThickness="1" CornerRadius="8" Padding="10" Margin="0,0,0,7"><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><StackPanel><CheckBox Name="CleanupUserTempCheck" Style="{StaticResource AMRCleanupCheckStyle}" Content="User temporary files" Foreground="#F1F5F9" FontSize="12" FontWeight="SemiBold"/><TextBlock Text="Temporary files in your Windows user profile." Foreground="#CBD5E1" FontSize="11" Margin="22,3,0,0"/></StackPanel><TextBlock Name="CleanupUserTempInfo" Grid.Column="1" Text="Not scanned" Foreground="#D1D5DB" VerticalAlignment="Center" Margin="8,0,0,0" FontSize="10"/></Grid></Border>
+            <Border Background="#202027" BorderBrush="#383842" BorderThickness="1" CornerRadius="8" Padding="10" Margin="0,0,0,7"><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><StackPanel><CheckBox Name="CleanupWindowsTempCheck" Style="{StaticResource AMRCleanupCheckStyle}" Content="Windows temporary files" Foreground="#F1F5F9" FontSize="12" FontWeight="SemiBold"/><TextBlock Text="Temporary files under the Windows Temp folder." Foreground="#CBD5E1" FontSize="11" Margin="22,3,0,0"/></StackPanel><TextBlock Name="CleanupWindowsTempInfo" Grid.Column="1" Text="Not scanned" Foreground="#D1D5DB" VerticalAlignment="Center" Margin="8,0,0,0" FontSize="10"/></Grid></Border>
+            <Border Background="#202027" BorderBrush="#383842" BorderThickness="1" CornerRadius="8" Padding="10" Margin="0,0,0,7"><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><StackPanel><CheckBox Name="CleanupUpdateCheck" Style="{StaticResource AMRCleanupCheckStyle}" Content="Windows &amp; NVIDIA update leftovers" Foreground="#F1F5F9" FontSize="12" FontWeight="SemiBold"/><TextBlock Text="Windows Update downloads and old NVIDIA app update artifacts (30+ days)." Foreground="#CBD5E1" FontSize="11" Margin="22,3,0,0"/></StackPanel><TextBlock Name="CleanupUpdateInfo" Grid.Column="1" Text="Not scanned" Foreground="#D1D5DB" VerticalAlignment="Center" Margin="8,0,0,0" FontSize="10"/></Grid></Border>
+            <Border Background="#202027" BorderBrush="#383842" BorderThickness="1" CornerRadius="8" Padding="10" Margin="0,0,0,7"><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><StackPanel><CheckBox Name="CleanupWerCheck" Style="{StaticResource AMRCleanupCheckStyle}" Content="Windows error reports" Foreground="#F1F5F9" FontSize="12" FontWeight="SemiBold"/><TextBlock Text="Archived and queued Windows Error Reporting files." Foreground="#CBD5E1" FontSize="11" Margin="22,3,0,0"/></StackPanel><TextBlock Name="CleanupWerInfo" Grid.Column="1" Text="Not scanned" Foreground="#D1D5DB" VerticalAlignment="Center" Margin="8,0,0,0" FontSize="10"/></Grid></Border>
+            <Border Background="#202027" BorderBrush="#383842" BorderThickness="1" CornerRadius="8" Padding="10" Margin="0,0,0,7"><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><StackPanel><CheckBox Name="CleanupShaderCheck" Style="{StaticResource AMRCleanupCheckStyle}" Content="GPU shader cache" Foreground="#F1F5F9" FontSize="12" FontWeight="SemiBold"/><TextBlock Text="Rebuildable DirectX, NVIDIA, AMD and Intel shader caches (7+ days)." Foreground="#CBD5E1" FontSize="11" Margin="22,3,0,0"/></StackPanel><TextBlock Name="CleanupShaderInfo" Grid.Column="1" Text="Not scanned" Foreground="#D1D5DB" VerticalAlignment="Center" Margin="8,0,0,0" FontSize="10"/></Grid></Border>
+            <Border Background="#202027" BorderBrush="#383842" BorderThickness="1" CornerRadius="8" Padding="10" Margin="0,0,0,7"><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><StackPanel><CheckBox Name="CleanupAppCacheCheck" Style="{StaticResource AMRCleanupCheckStyle}" Content="Application caches" Foreground="#F1F5F9" FontSize="12" FontWeight="SemiBold"/><TextBlock Text="Recognized rebuildable caches for common browsers, chat, media, gaming and developer apps (7+ days)." Foreground="#CBD5E1" FontSize="11" Margin="22,3,0,0"/></StackPanel><TextBlock Name="CleanupAppCacheInfo" Grid.Column="1" Text="Not scanned" Foreground="#D1D5DB" VerticalAlignment="Center" Margin="8,0,0,0" FontSize="10"/></Grid></Border>
+            <Border Background="#202027" BorderBrush="#383842" BorderThickness="1" CornerRadius="8" Padding="10" Margin="0,0,0,7"><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><StackPanel><CheckBox Name="CleanupDeliveryCheck" Style="{StaticResource AMRCleanupCheckStyle}" Content="Delivery Optimization cache" Foreground="#F1F5F9" FontSize="12" FontWeight="SemiBold"/><TextBlock Text="Cached update delivery files that Windows can download again." Foreground="#CBD5E1" FontSize="11" Margin="22,3,0,0"/></StackPanel><TextBlock Name="CleanupDeliveryInfo" Grid.Column="1" Text="Not scanned" Foreground="#D1D5DB" VerticalAlignment="Center" Margin="8,0,0,0" FontSize="10"/></Grid></Border>
 
             <Border Background="#202027" BorderBrush="#52647A" BorderThickness="1" CornerRadius="8" Padding="10" Margin="0,2,0,8">
              <StackPanel>
@@ -6749,8 +6947,8 @@ Write-AMRLog ("Catalog item model: {0} ({1} items)." -f $(if ($script:AMRCatalog
       <Border Grid.Row="1" Background="#A8172638" BorderBrush="#526F91" BorderThickness="1" CornerRadius="14" Padding="8" Opacity="0">
       <Border.RenderTransform><TranslateTransform Y="16"/></Border.RenderTransform>
       <Border.Triggers><EventTrigger RoutedEvent="FrameworkElement.Loaded"><BeginStoryboard><Storyboard>
-       <DoubleAnimation Storyboard.TargetProperty="Opacity" From="0" To="1" Duration="0:0:0.78" BeginTime="0:0:0.10" DecelerationRatio="0.86"/>
-       <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.Y)" From="16" To="0" Duration="0:0:0.78" BeginTime="0:0:0.10" DecelerationRatio="0.86"/>
+       <DoubleAnimation Storyboard.TargetProperty="Opacity" From="0" To="1" Duration="0:0:0.936" BeginTime="0:0:0.10" DecelerationRatio="0.86"/>
+       <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.Y)" From="16" To="0" Duration="0:0:0.936" BeginTime="0:0:0.10" DecelerationRatio="0.86"/>
       </Storyboard></BeginStoryboard></EventTrigger></Border.Triggers>
       <TabControl Background="Transparent" BorderThickness="0">
        <TabControl.Resources>
@@ -7063,6 +7261,7 @@ namespace AMR { public static class AppIdentity {
 # --- 5. Window & Controls Mapping ---
 $reader = New-Object System.Xml.XmlNodeReader $xaml
 $script:Window = [Windows.Markup.XamlReader]::Load($reader)
+try { $controlCenterTab = $script:Window.FindName('ToolKitControlTab'); if ($controlCenterTab) { $controlCenterTab.Header = ([string]$script:AMRControlTabName + '  ' + [string][char]0x25B8) } } catch {}
 $script:AMRStartupPhaseTimings['XamlLoadedMs'] = [int]$script:AMRStartupStopwatch.ElapsedMilliseconds
 
 # --- AMR application identity: custom icon + restrained Windows glass caption ---
@@ -7248,7 +7447,8 @@ function C {
 $script:AMRUpdateJob = $null
 $script:AMRUpdateTimer = $null
 $script:AMRUpdateLastResults = @()
-$script:AMRUpdateBackupRoot = Join-Path $env:ProgramData 'AMR_Utility\Backups\WindowsUpdate'
+# A23: one folder only. Windows Update profile backups live next to Driver Backup under ProgramData\AMR-Utility\Backups.
+$script:AMRUpdateBackupRoot = Join-Path $script:BackupDir 'WindowsUpdate'
 
 function Get-AMRUpdateProfileSnapshot {
     $entries = @(
@@ -7386,6 +7586,76 @@ function Restore-AMRUpdateProfileBackup {
     if (-not $Quiet) { (C 'AMRUpdateActionStatus').Text='Previous Windows Update policy values restored from backup.'; Write-AMRLog ('Restored Windows Update profile backup: '+$Path) SUCCESS System; Update-AMRUpdateCenterStatus }
 }
 
+$script:AMRUpdateLastState = @{ Current = $null; Rerun = $false; Timer = $null }
+$script:AMRUpdateLastWorker = @'
+$result = [pscustomobject]@{ Text = 'No successful update recorded'; Error = '' }
+try {
+    $session = New-Object -ComObject Microsoft.Update.Session -ErrorAction Stop
+    $searcher = $session.CreateUpdateSearcher()
+    $historyCount = [int]$searcher.GetTotalHistoryCount()
+    if ($historyCount -gt 0) {
+        $take = [Math]::Min($historyCount,250)
+        $history = @($searcher.QueryHistory(0,$take))
+        $success = $history | Where-Object { [int]$_.Operation -eq 1 -and [int]$_.ResultCode -eq 2 -and $_.Date } | Sort-Object Date -Descending | Select-Object -First 1
+        if ($success) { $result.Text = ([datetime]$success.Date).ToString('yyyy-MM-dd HH:mm') }
+    }
+} catch { $result.Error = $_.Exception.Message }
+if ($result.Text -eq 'No successful update recorded') {
+    try {
+        $key = Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\Results\Install' -ErrorAction SilentlyContinue
+        if ($key -and $key.LastSuccessTime) {
+            $parsed = [datetime]::MinValue
+            if ([datetime]::TryParse([string]$key.LastSuccessTime,[ref]$parsed)) { $result.Text = $parsed.ToString('yyyy-MM-dd HH:mm') }
+        }
+    } catch {}
+}
+$result
+'@
+
+function Start-AMRUpdateLastSuccessRefresh {
+    $state = $script:AMRUpdateLastState
+    if ($state.Current) { $state.Rerun = $true; return }
+    $runspace = $null; $ps = $null
+    try {
+        $runspace = [runspacefactory]::CreateRunspace()
+        $runspace.ApartmentState = 'MTA'
+        $runspace.Open()
+        $ps = [powershell]::Create()
+        $ps.Runspace = $runspace
+        [void]$ps.AddScript($script:AMRUpdateLastWorker,$true)
+        $async = $ps.BeginInvoke()
+        $state.Current = [pscustomobject]@{ PowerShell = $ps; Runspace = $runspace; Async = $async; Started = [DateTime]::UtcNow }
+        if (-not $state.Timer) {
+            $state.Timer = New-Object System.Windows.Threading.DispatcherTimer
+            $state.Timer.Interval = [TimeSpan]::FromMilliseconds(250)
+            $state.Timer.Add_Tick({
+                $st = $script:AMRUpdateLastState
+                $job = $st.Current
+                if (-not $job) { $st.Timer.Stop(); return }
+                if (-not $job.Async.IsCompleted) { return }
+                $st.Timer.Stop()
+                $st.Current = $null
+                $text = ''; $err = ''
+                try {
+                    $out = @($job.PowerShell.EndInvoke($job.Async))
+                    if ($out.Count -gt 0) { $text = [string]$out[-1].Text; $err = [string]$out[-1].Error }
+                } catch { $err = $_.Exception.Message }
+                try { $job.PowerShell.Dispose() } catch {}
+                try { $job.Runspace.Close(); $job.Runspace.Dispose() } catch {}
+                if ($err) { Write-AMRLog ('Windows Update Agent history query unavailable: ' + $err) WARNING System }
+                if ($text) { try { (C 'AMRUpdateLastValue').Text = $text } catch {} }
+                if ($st.Rerun) { $st.Rerun = $false; try { Start-AMRUpdateLastSuccessRefresh } catch {} }
+            })
+        }
+        $state.Timer.Start()
+    } catch {
+        try { if ($ps) { $ps.Dispose() } } catch {}
+        try { if ($runspace) { $runspace.Close(); $runspace.Dispose() } } catch {}
+        $state.Current = $null
+        throw
+    }
+}
+
 function Update-AMRUpdateCenterStatus {
     # Service state
     try {
@@ -7396,29 +7666,11 @@ function Update-AMRUpdateCenterStatus {
         (C 'AMRUpdateServiceDetail').Text=('BITS: {0}' -f $(if($bits){[string]$bits.Status}else{'Unavailable'}))
     } catch { (C 'AMRUpdateServiceValue').Text='Unknown' }
 
-    # Query Windows Update Agent history, then use its legacy registry timestamp as fallback.
-    $last='No successful update recorded'
-    try {
-        $session=New-Object -ComObject Microsoft.Update.Session -ErrorAction Stop
-        $searcher=$session.CreateUpdateSearcher()
-        $historyCount=[int]$searcher.GetTotalHistoryCount()
-        if($historyCount -gt 0){
-            $take=[Math]::Min($historyCount,250)
-            $history=@($searcher.QueryHistory(0,$take))
-            $success=$history | Where-Object { [int]$_.Operation -eq 1 -and [int]$_.ResultCode -eq 2 -and $_.Date } | Sort-Object Date -Descending | Select-Object -First 1
-            if($success){$last=([datetime]$success.Date).ToString('yyyy-MM-dd HH:mm')}
-        }
-    } catch { Write-AMRLog ('Windows Update Agent history query unavailable: '+$_.Exception.Message) WARNING System }
-    if($last -eq 'No successful update recorded'){
-        try {
-            $key=Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\Results\Install' -ErrorAction SilentlyContinue
-            if($key -and $key.LastSuccessTime){
-                $parsed=[datetime]::MinValue
-                if([datetime]::TryParse([string]$key.LastSuccessTime,[ref]$parsed)){$last=$parsed.ToString('yyyy-MM-dd HH:mm')}
-            }
-        } catch {}
-    }
-    (C 'AMRUpdateLastValue').Text=$last
+    # A24: the Windows Update Agent history query (COM, up to 250 entries) took about 1.1 s ON THE UI THREAD
+    # at startup (log: deferred task 'UpdateCenterStatus' finished in 1111 ms). It now runs in a background
+    # worker and only the label text is applied on the UI thread when the result is ready. Same query, same
+    # registry fallback, same text format.
+    try { Start-AMRUpdateLastSuccessRefresh } catch { Write-AMRLog ('Could not start the Windows Update history refresh: '+$_.Exception.Message) WARNING System }
 
     # Multiple independent Windows restart indicators; 
     $pending=$false
@@ -8346,6 +8598,113 @@ foreach ($softwareConsoleButtonName in @(
 
 
 
+# --- Final-build UI helpers (presentation only; no behaviour, data or handler changes) ---
+$script:AMRTweakRowBaseColor = [System.Windows.Media.Color]::FromArgb(30,45,75,103)
+$script:AMRTweakRowSelectedColor = [System.Windows.Media.Color]::FromArgb(72,49,130,190)
+$script:AMRTweakRowHoverColor = [System.Windows.Media.Color]::FromArgb(48,68,125,180)
+$script:AMRTweakRowBaseEdge = [System.Windows.Media.Color]::FromRgb(41,79,110)
+$script:AMRTweakRowHoverEdge = [System.Windows.Media.Color]::FromRgb(120,190,245)
+
+$script:AMRActiveCards = New-Object 'System.Collections.Generic.HashSet[object]'
+$script:AMRCardBaseColor = [System.Windows.Media.Color]::FromRgb(102,143,192)
+$script:AMRCardAccentColor = [System.Windows.Media.Color]::FromRgb(134,181,230)
+$script:AMRApplyPulsing = New-Object 'System.Collections.Generic.HashSet[object]'
+
+function New-AMRTweakRowBorder {
+    param([System.Windows.Controls.Grid]$Grid,[System.Windows.Controls.CheckBox]$Check)
+    $rowStart = if ($Check.IsChecked -eq $true) { $script:AMRTweakRowSelectedColor } else { $script:AMRTweakRowBaseColor }
+    $rowBox = New-Object System.Windows.Controls.Border
+    $rowBox.Background = New-Object System.Windows.Media.SolidColorBrush($rowStart)
+    $rowBox.BorderBrush = New-Object System.Windows.Media.SolidColorBrush($script:AMRTweakRowBaseEdge)
+    $rowBox.BorderThickness = [System.Windows.Thickness]::new(0.6)
+    $rowBox.CornerRadius = [System.Windows.CornerRadius]::new(6)
+    $rowBox.Padding = [System.Windows.Thickness]::new(5,2,5,2)
+    $rowBox.Margin = [System.Windows.Thickness]::new(0,2,0,2)
+    $rowBox.Child = $Grid
+    $rowBox.Tag = $Check
+    $rowBox.Cursor = [System.Windows.Input.Cursors]::Hand
+    $rowBox.Add_MouseEnter({
+        $row = $this
+        $rowCheck = $row.Tag
+        $target = if ($rowCheck -and $rowCheck.IsChecked -eq $true) { $script:AMRTweakRowSelectedColor } else { $script:AMRTweakRowHoverColor }
+        $anim = New-Object System.Windows.Media.Animation.ColorAnimation($target,[System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(115)))
+        $anim.EasingFunction = New-Object System.Windows.Media.Animation.CubicEase
+        $row.Background.BeginAnimation([System.Windows.Media.SolidColorBrush]::ColorProperty,$anim)
+        $edge = New-Object System.Windows.Media.Animation.ColorAnimation($script:AMRTweakRowHoverEdge,[System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(115)))
+        $row.BorderBrush.BeginAnimation([System.Windows.Media.SolidColorBrush]::ColorProperty,$edge)
+    })
+    $rowBox.Add_MouseLeave({
+        $row = $this
+        $rowCheck = $row.Tag
+        $target = if ($rowCheck -and $rowCheck.IsChecked -eq $true) { $script:AMRTweakRowSelectedColor } else { $script:AMRTweakRowBaseColor }
+        $anim = New-Object System.Windows.Media.Animation.ColorAnimation($target,[System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(145)))
+        $anim.EasingFunction = New-Object System.Windows.Media.Animation.CubicEase
+        $row.Background.BeginAnimation([System.Windows.Media.SolidColorBrush]::ColorProperty,$anim)
+        $edge = New-Object System.Windows.Media.Animation.ColorAnimation($script:AMRTweakRowBaseEdge,[System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(145)))
+        $row.BorderBrush.BeginAnimation([System.Windows.Media.SolidColorBrush]::ColorProperty,$edge)
+    })
+    # Closures made inside a function cannot read $script: variables (they read as empty), so copy the colours into locals first.
+    $rowSelectedColorRef = $script:AMRTweakRowSelectedColor
+    $rowBaseColorRef = $script:AMRTweakRowBaseColor
+    $Check.Add_Checked({
+        $anim = New-Object System.Windows.Media.Animation.ColorAnimation($rowSelectedColorRef,[System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(180)))
+        $rowBox.Background.BeginAnimation([System.Windows.Media.SolidColorBrush]::ColorProperty,$anim)
+    }.GetNewClosure())
+    $Check.Add_Unchecked({
+        $anim = New-Object System.Windows.Media.Animation.ColorAnimation($rowBaseColorRef,[System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(160)))
+        $rowBox.Background.BeginAnimation([System.Windows.Media.SolidColorBrush]::ColorProperty,$anim)
+    }.GetNewClosure())
+    return $rowBox
+}
+
+function Add-AMRInfoButtonPulse {
+    # Momentary hover pulse for the small "i" buttons: grows on enter, settles back on leave. Not looping.
+    param([System.Windows.Controls.Button]$Button)
+    if (-not $Button) { return }
+    $Button.Cursor = [System.Windows.Input.Cursors]::Hand
+    $Button.RenderTransformOrigin = [System.Windows.Point]::new(0.5,0.5)
+    $Button.RenderTransform = New-Object System.Windows.Media.ScaleTransform(1,1)
+    $Button.Add_MouseEnter({
+        $pulseScale = $this.RenderTransform
+        $up = New-Object System.Windows.Media.Animation.DoubleAnimation(1.18,[System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(120)))
+        $up.EasingFunction = New-Object System.Windows.Media.Animation.CubicEase
+        $up.EasingFunction.EasingMode = [System.Windows.Media.Animation.EasingMode]::EaseOut
+        $pulseScale.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleXProperty,$up)
+        $pulseScale.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleYProperty,$up)
+    })
+    $Button.Add_MouseLeave({
+        $pulseScale = $this.RenderTransform
+        $down = New-Object System.Windows.Media.Animation.DoubleAnimation(1.0,[System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(140)))
+        $down.EasingFunction = New-Object System.Windows.Media.Animation.CubicEase
+        $down.EasingFunction.EasingMode = [System.Windows.Media.Animation.EasingMode]::EaseOut
+        $pulseScale.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleXProperty,$down)
+        $pulseScale.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleYProperty,$down)
+    })
+}
+
+function Add-AMRRestoreSheen {
+    # Restore Defaults (amber gold): a soft light band sweeps once across the button on hover; solid indigo at rest.
+    param([System.Windows.Controls.Button]$Button)
+    if (-not $Button) { return }
+    $baseC = [System.Windows.Media.Color]::FromRgb(90,68,22)
+    $hiC = [System.Windows.Media.Color]::FromRgb(140,106,34)
+    $sheen = New-Object System.Windows.Media.LinearGradientBrush
+    $sheen.StartPoint = [System.Windows.Point]::new(0,0.5)
+    $sheen.EndPoint = [System.Windows.Point]::new(1,0.5)
+    foreach ($stopDef in @(@($baseC,0.0),@($baseC,0.38),@($hiC,0.5),@($baseC,0.62),@($baseC,1.0))) {
+        [void]$sheen.GradientStops.Add((New-Object System.Windows.Media.GradientStop($stopDef[0],[double]$stopDef[1])))
+    }
+    $sheenShift = New-Object System.Windows.Media.TranslateTransform(-1.2,0)
+    $sheen.RelativeTransform = $sheenShift
+    $Button.Background = $sheen
+    $Button.Add_MouseEnter({
+        $sweep = New-Object System.Windows.Media.Animation.DoubleAnimation(-1.2,1.2,[System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(650)))
+        $sweep.EasingFunction = New-Object System.Windows.Media.Animation.CubicEase
+        $sweep.EasingFunction.EasingMode = [System.Windows.Media.Animation.EasingMode]::EaseInOut
+        $sheenShift.BeginAnimation([System.Windows.Media.TranslateTransform]::XProperty,$sweep)
+    }.GetNewClosure())
+}
+
 # Toolkit Tweaks UX: compact information affordances and a restrained check animation.
 # This is presentation-only: checkbox names, checked state, and execution handlers remain unchanged.
 $script:AMRTweakInfo = @{
@@ -8430,13 +8789,14 @@ foreach ($tweakName in $script:AMRBasicInfoNames) {
     $infoText = [string]$script:AMRTweakInfo[$tweakName]
     if ([string]::IsNullOrWhiteSpace($infoText)) { $infoText = [string]$tweakCheck.Content }
     $infoButton.Tag = $infoText
+    Add-AMRInfoButtonPulse -Button $infoButton
     $infoButton.Add_Click({
         $detail = [string]$infoButton.Tag
         [void](Show-AMRMessageGlass -Message $detail -Title 'AMR | Tweak Information' -Buttons OK -Icon Information)
     }.GetNewClosure())
     [System.Windows.Controls.Grid]::SetColumn($infoButton,1)
     [void]$rowGrid.Children.Add($infoButton)
-    $parentPanel.Children.Insert($childIndex,$rowGrid)
+    $parentPanel.Children.Insert($childIndex,(New-AMRTweakRowBorder -Grid $rowGrid -Check $tweakCheck))
 
     # Small spring-like check feedback without replacing the native checkbox template.
     $tweakCheck.RenderTransformOrigin = [System.Windows.Point]::new(0.5,0.5)
@@ -8485,31 +8845,40 @@ function Set-AMRTweaksPointerMotion {
             # animation. Translation is render-only and does not invalidate layout.
             $motion = $card.RenderTransform -as [System.Windows.Media.TranslateTransform]
             $cardRef = $card; $brushRef = $hoverBrush; $originalColor = $null
+            $activeCardsRef = $script:AMRActiveCards; $accentColorRef = $script:AMRCardAccentColor
             if ($hoverBrush) { $originalColor = $hoverBrush.Color }
             $motionRef = $motion
+            $shadowRef = $null; $shadowBaseOpacity = 0.42; $shadowBaseDepth = 2.0
+            if ($card.Effect -is [System.Windows.Media.Effects.DropShadowEffect] -and -not $card.Effect.IsFrozen) { $shadowRef = $card.Effect; $shadowBaseOpacity = $shadowRef.Opacity; $shadowBaseDepth = $shadowRef.ShadowDepth }
 
             $card.Add_MouseEnter({
                 if ($brushRef) {
                     $colorAnim = New-Object System.Windows.Media.Animation.ColorAnimation
-                    $colorAnim.To = [System.Windows.Media.Color]::FromRgb(139,198,244)
+                    $colorAnim.To = [System.Windows.Media.Color]::FromRgb(153,207,255)
                     $colorAnim.Duration = [System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(135))
                     $colorAnim.FillBehavior = [System.Windows.Media.Animation.FillBehavior]::HoldEnd
                     $brushRef.BeginAnimation([System.Windows.Media.SolidColorBrush]::ColorProperty,$colorAnim)
                 }
                 if ($motionRef) {
                     $lift = New-Object System.Windows.Media.Animation.DoubleAnimation
-                    $lift.To = -1.4
+                    $lift.To = -3.0
                     $lift.Duration = [System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(125))
                     $lift.EasingFunction = New-Object System.Windows.Media.Animation.CubicEase
                     $lift.EasingFunction.EasingMode = [System.Windows.Media.Animation.EasingMode]::EaseOut
                     $motionRef.BeginAnimation([System.Windows.Media.TranslateTransform]::YProperty,$lift)
+                }
+                if ($shadowRef) {
+                    $shadowOpacityUp = New-Object System.Windows.Media.Animation.DoubleAnimation(0.7,[System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(140)))
+                    $shadowDepthUp = New-Object System.Windows.Media.Animation.DoubleAnimation(5.0,[System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(140)))
+                    $shadowRef.BeginAnimation([System.Windows.Media.Effects.DropShadowEffect]::OpacityProperty,$shadowOpacityUp)
+                    $shadowRef.BeginAnimation([System.Windows.Media.Effects.DropShadowEffect]::ShadowDepthProperty,$shadowDepthUp)
                 }
             }.GetNewClosure())
 
             $card.Add_MouseLeave({
                 if ($brushRef -and $originalColor) {
                     $colorBack = New-Object System.Windows.Media.Animation.ColorAnimation
-                    $colorBack.To = $originalColor
+                    $colorBack.To = $(if ($activeCardsRef.Contains($cardRef)) { $accentColorRef } else { $originalColor })
                     $colorBack.Duration = [System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(155))
                     $colorBack.FillBehavior = [System.Windows.Media.Animation.FillBehavior]::HoldEnd
                     $brushRef.BeginAnimation([System.Windows.Media.SolidColorBrush]::ColorProperty,$colorBack)
@@ -8522,9 +8891,59 @@ function Set-AMRTweaksPointerMotion {
                     $settle.EasingFunction.EasingMode = [System.Windows.Media.Animation.EasingMode]::EaseOut
                     $motionRef.BeginAnimation([System.Windows.Media.TranslateTransform]::YProperty,$settle)
                 }
+                if ($shadowRef) {
+                    $shadowOpacityDown = New-Object System.Windows.Media.Animation.DoubleAnimation($shadowBaseOpacity,[System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(160)))
+                    $shadowDepthDown = New-Object System.Windows.Media.Animation.DoubleAnimation($shadowBaseDepth,[System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(160)))
+                    $shadowRef.BeginAnimation([System.Windows.Media.Effects.DropShadowEffect]::OpacityProperty,$shadowOpacityDown)
+                    $shadowRef.BeginAnimation([System.Windows.Media.Effects.DropShadowEffect]::ShadowDepthProperty,$shadowDepthDown)
+                }
             }.GetNewClosure())
             $card.Tag = 'AMR-TweakCardHoverAttached'
         }
+    }
+
+    # Header panel ("Windows Tweaks"): same live feel as the cards plus a soft blue glow while hovered.
+    $headerBox = $null
+    foreach ($headerChild in $Root.Children) { if ($headerChild -is [System.Windows.Controls.Border]) { $headerBox = $headerChild; break } }
+    if ($headerBox -and $headerBox.Tag -ne 'AMR-TweakHeaderHoverAttached') {
+        $headerBrush = $null
+        if ($headerBox.BorderBrush -is [System.Windows.Media.SolidColorBrush]) {
+            try { $headerBrush = $headerBox.BorderBrush.Clone(); $headerBox.BorderBrush = $headerBrush } catch { $headerBrush = $null }
+        }
+        $headerBaseColor = $null
+        if ($headerBrush) { $headerBaseColor = $headerBrush.Color }
+        $headerMove = New-Object System.Windows.Media.TranslateTransform(0,0)
+        $headerBox.RenderTransform = $headerMove
+        $headerGlow = New-Object System.Windows.Media.Effects.DropShadowEffect
+        $headerGlow.Color = [System.Windows.Media.Color]::FromRgb(58,143,216)
+        $headerGlow.BlurRadius = 22; $headerGlow.ShadowDepth = 0; $headerGlow.Opacity = 0
+        $headerBox.Add_MouseEnter({
+            $headerBox.Effect = $headerGlow
+            $hdrLift = New-Object System.Windows.Media.Animation.DoubleAnimation(-3.0,[System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(150)))
+            $hdrLift.EasingFunction = New-Object System.Windows.Media.Animation.CubicEase
+            $hdrLift.EasingFunction.EasingMode = [System.Windows.Media.Animation.EasingMode]::EaseOut
+            $headerMove.BeginAnimation([System.Windows.Media.TranslateTransform]::YProperty,$hdrLift)
+            $hdrGlowUp = New-Object System.Windows.Media.Animation.DoubleAnimation(0.5,[System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(170)))
+            $headerGlow.BeginAnimation([System.Windows.Media.Effects.DropShadowEffect]::OpacityProperty,$hdrGlowUp)
+            if ($headerBrush) {
+                $hdrEdgeUp = New-Object System.Windows.Media.Animation.ColorAnimation([System.Windows.Media.Color]::FromRgb(153,207,255),[System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(150)))
+                $headerBrush.BeginAnimation([System.Windows.Media.SolidColorBrush]::ColorProperty,$hdrEdgeUp)
+            }
+        }.GetNewClosure())
+        $headerBox.Add_MouseLeave({
+            $hdrSettle = New-Object System.Windows.Media.Animation.DoubleAnimation(0.0,[System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(180)))
+            $hdrSettle.EasingFunction = New-Object System.Windows.Media.Animation.CubicEase
+            $hdrSettle.EasingFunction.EasingMode = [System.Windows.Media.Animation.EasingMode]::EaseOut
+            $headerMove.BeginAnimation([System.Windows.Media.TranslateTransform]::YProperty,$hdrSettle)
+            $hdrGlowDown = New-Object System.Windows.Media.Animation.DoubleAnimation(0.0,[System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(200)))
+            $hdrGlowDown.Add_Completed({ if (-not $headerBox.IsMouseOver) { $headerBox.Effect = $null } }.GetNewClosure())
+            $headerGlow.BeginAnimation([System.Windows.Media.Effects.DropShadowEffect]::OpacityProperty,$hdrGlowDown)
+            if ($headerBrush -and $headerBaseColor) {
+                $hdrEdgeDown = New-Object System.Windows.Media.Animation.ColorAnimation($headerBaseColor,[System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(180)))
+                $headerBrush.BeginAnimation([System.Windows.Media.SolidColorBrush]::ColorProperty,$hdrEdgeDown)
+            }
+        }.GetNewClosure())
+        $headerBox.Tag = 'AMR-TweakHeaderHoverAttached'
     }
 
     # Light feedback for the controls: animate only their existing brush colors.
@@ -8545,10 +8964,19 @@ function Set-AMRTweaksPointerMotion {
             $buttonBaseColor = $null
             if ($buttonBrush) { $buttonBaseColor = $buttonBrush.Color }
             $buttonBrushRef = $buttonBrush; $buttonColorRef = $buttonBaseColor
+            $buttonHoverRef = [System.Windows.Media.Color]::FromRgb(151,207,250)
+            if ($buttonBaseColor) {
+                $buttonMix = 0.42
+                if ($buttonBaseColor.R -gt ($buttonBaseColor.G + 40) -and $buttonBaseColor.R -gt ($buttonBaseColor.B + 40)) { $buttonMix = 0.2 }
+                $buttonHoverRef = [System.Windows.Media.Color]::FromRgb(
+                    [byte][Math]::Min(255,[Math]::Round($buttonBaseColor.R + (255 - $buttonBaseColor.R) * $buttonMix)),
+                    [byte][Math]::Min(255,[Math]::Round($buttonBaseColor.G + (255 - $buttonBaseColor.G) * $buttonMix)),
+                    [byte][Math]::Min(255,[Math]::Round($buttonBaseColor.B + (255 - $buttonBaseColor.B) * $buttonMix)))
+            }
             $button.Add_MouseEnter({
                 if ($buttonBrushRef) {
                     $a = New-Object System.Windows.Media.Animation.ColorAnimation
-                    $a.To = [System.Windows.Media.Color]::FromRgb(151,207,250)
+                    $a.To = $buttonHoverRef
                     $a.Duration = [System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(115))
                     $buttonBrushRef.BeginAnimation([System.Windows.Media.SolidColorBrush]::ColorProperty,$a)
                 }
@@ -10186,6 +10614,17 @@ function Open-AMRProgramFilesFolder {
     }
 }
 
+function Get-AMRToolKitControlTabSelected {
+    # True while one of the Control Center pages (children under the Control Center entry) is the selected Tool Kit page.
+    $kit = C 'ToolKitSubTabs'
+    if (-not $kit -or -not $kit.SelectedItem) { return $false }
+    return ([string]$kit.SelectedItem.Tag -eq 'CCChild')
+}
+function Get-AMRToolKitEffectiveSub {
+    $kit = C 'ToolKitSubTabs'
+    if (-not $kit -or -not $kit.SelectedItem) { return 'Tweaks' }
+    return [string]$kit.SelectedItem.Header
+}
 function Get-AMRSmartSearchTarget {
     $main = C 'MainNavigationTabs'
     if (-not $main -or -not $main.SelectedItem) { return $null }
@@ -10193,7 +10632,7 @@ function Get-AMRSmartSearchTarget {
     if ($page -eq 'System') {
         $overview = C 'OverviewSubTabs'
         if ($overview -and $overview.SelectedItem -eq (C 'DriverCenterTab')) { return '__DriverSearch' }
-        if ($overview -and $overview.SelectedItem -and [string]$overview.SelectedItem.Header -eq 'Backups') { return 'BackupSearchBox' }
+        if ($overview -and $overview.SelectedItem -and [string]$overview.SelectedItem.Header -eq 'Backups') { return '__ContentFilter' }
     }
     if ($page -eq 'Software') { return 'SearchBox' }
     if ($page -eq 'Logs') { return 'DriverLogSearchBox' }
@@ -10206,9 +10645,8 @@ function Get-AMRSmartSearchTarget {
     }
     if ($page -eq 'Cleanup') { return 'CleanupSearchBox' }
     if ($page -eq 'Tool Kit') {
-        $kit = C 'ToolKitSubTabs'
-        $sub = if ($kit -and $kit.SelectedItem) { [string]$kit.SelectedItem.Header } else { 'Tweaks' }
-        $map = @{ Optimize='OptSearchBox'; Security='SecSearchBox'; System='SysSearchBox'; Networks='NetSearchBox'; Utilities='UtilSearchBox'; Tweaks='__ContentFilter'; Customization='__ContentFilter' }
+        $sub = Get-AMRToolKitEffectiveSub
+        $map = @{ Optimize='OptSearchBox'; Security='SecSearchBox'; System='SysSearchBox'; Networks='NetSearchBox'; Utilities='UtilSearchBox'; Backup='BackupSearchBox'; Tweaks='__ContentFilter'; Customization='__ContentFilter' }
         if ($map.ContainsKey($sub)) { return $map[$sub] }
     }
     return $null
@@ -10218,9 +10656,8 @@ function Get-AMRSmartCategoryTarget {
     if (-not $main -or -not $main.SelectedItem) { return $null }
     $page = [string]$main.SelectedItem.Header
     if ($page -eq 'Tool Kit') {
-        $kit = C 'ToolKitSubTabs'
-        $sub = if ($kit -and $kit.SelectedItem) { [string]$kit.SelectedItem.Header } else { 'Tweaks' }
-        $map = @{ Optimize='OptCategoryFilter'; Security='SecCategoryFilter'; System='SysCategoryFilter'; Networks='NetCategoryFilter'; Utilities='UtilCategoryFilter' }
+        $sub = Get-AMRToolKitEffectiveSub
+        $map = @{ Optimize='OptCategoryFilter'; Security='SecCategoryFilter'; System='SysCategoryFilter'; Networks='NetCategoryFilter'; Utilities='UtilCategoryFilter'; Backup='BackupCategoryFilter' }
         if ($map.ContainsKey($sub)) { return $map[$sub] }
     }
     if ($page -eq 'Backups' -or ($page -eq 'System' -and (C 'OverviewSubTabs') -and (C 'OverviewSubTabs').SelectedItem -and [string](C 'OverviewSubTabs').SelectedItem.Header -eq 'Backups')) {
@@ -10289,8 +10726,7 @@ function Update-AMRSmartSearchContextCore {
     $main = C 'MainNavigationTabs'
     $page = if ($main -and $main.SelectedItem) { [string]$main.SelectedItem.Header } else { 'current page' }
     if ($page -eq 'Tool Kit') {
-        $kit = C 'ToolKitSubTabs'
-        if ($kit -and $kit.SelectedItem) { $page += ' / ' + [string]$kit.SelectedItem.Header }
+        $page += ' / ' + (Get-AMRToolKitEffectiveSub)
     } elseif ($page -eq 'System' -or $page -eq 'Overview') {
         $overview = C 'OverviewSubTabs'
         if ($overview -and $overview.SelectedItem) {
@@ -10316,6 +10752,7 @@ function Update-AMRSmartSearchContextCore {
         '^Tool Kit / System$' { $placeholder = 'Search in System...'; break }
         '^Tool Kit / Networks$' { $placeholder = 'Search in Networks...'; break }
         '^Tool Kit / Utilities$' { $placeholder = 'Search in Utilities...'; break }
+        '^Tool Kit / Backup$' { $placeholder = 'Search backup tools by name or category...'; break }
         '^Tool Kit / Activation$' { $placeholder = 'Search Windows, Office, licensing services or KMS configuration...'; break }
         '^(Backups|System / Backups) / Backup Center$' { $placeholder = 'Search backup tools by name or category...'; break }
         '^System / Driver Center$' { $placeholder = 'Search driver names, devices, hardware IDs or versions...'; break }
@@ -10374,7 +10811,9 @@ function Update-AMRSmartSearchContextCore {
         return
     }
     if ($targetName -eq '__ContentFilter') {
+        $perfCf = Get-AMRPerfNow
         Set-AMRSmartContentFilter -Query ([string]$script:SmartSearchBox.Text)
+        Add-AMRPerfSince 'smart.contentFilterWalk' $perfCf
         $script:SmartSearchBox.IsEnabled = $true
         return
     }
@@ -10429,6 +10868,14 @@ try {
                 if ($activePage -eq 'About' -and $searchText.Trim() -match '^(?i:fil(?:e?s)?)$') {
                     Open-AMRProgramFilesFolder
                     return
+                }
+                # Backups-only shortcut: exactly "file" or "files" while System > Backups is the open page.
+                if ($activePage -eq 'System' -and $searchText.Trim() -match '^(?i:files?)$') {
+                    $shortcutTabs = C 'OverviewSubTabs'
+                    if ($shortcutTabs -and $shortcutTabs.SelectedItem -and [string]$shortcutTabs.SelectedItem.Header -eq 'Backups') {
+                        Open-AMRRestoreReceiptFolder
+                        return
+                    }
                 }
                 $targetName = Get-AMRSmartSearchTarget
                 if ($targetName -eq '__DriverSearch') {
@@ -10492,6 +10939,35 @@ try {
                 $fade,
                 [System.Windows.Media.Animation.HandoffBehavior]::SnapshotAndReplace
             )
+        } catch {}
+    }
+
+    # A5: gentle grow/shrink of the page box when the main page changes (System / Software / Tool Kit / Cleanup / Logs / About).
+    # Only a fresh ScaleTransform on the selected page root; no layout, size or content change. Skipped if the root already has its own transform.
+    function Invoke-AMRMainPageSizeTransition {
+        param([object]$TabItem)
+        try {
+            if (-not $TabItem) { return }
+            $root = $TabItem.Content
+            if (-not ($root -is [System.Windows.FrameworkElement])) { return }
+            $existing = $root.RenderTransform
+            $isFree = ($null -eq $existing) -or ($existing -eq [System.Windows.Media.Transform]::Identity) -or
+                      (($existing -is [System.Windows.Media.ScaleTransform]) -and $existing.ScaleX -eq 1.0 -and $existing.ScaleY -eq 1.0)
+            if (-not $isFree) { return }
+            $scale = New-Object System.Windows.Media.ScaleTransform(1.0,1.0)
+            $root.RenderTransformOrigin = New-Object System.Windows.Point(0.5,0.5)
+            $root.RenderTransform = $scale
+            $ease = New-Object System.Windows.Media.Animation.QuadraticEase
+            $ease.EasingMode = [System.Windows.Media.Animation.EasingMode]::EaseOut
+            foreach ($prop in @([System.Windows.Media.ScaleTransform]::ScaleXProperty,[System.Windows.Media.ScaleTransform]::ScaleYProperty)) {
+                $a = New-Object System.Windows.Media.Animation.DoubleAnimation
+                $a.From = 0.972
+                $a.To = 1.0
+                $a.Duration = [TimeSpan]::FromMilliseconds(280)
+                $a.EasingFunction = $ease
+                $a.FillBehavior = [System.Windows.Media.Animation.FillBehavior]::Stop
+                $scale.BeginAnimation($prop,$a,[System.Windows.Media.Animation.HandoffBehavior]::SnapshotAndReplace)
+            }
         } catch {}
     }
 
@@ -10661,9 +11137,124 @@ try {
         # Returning to this sub-tab will not replay the entrance.
         $script:AMRToolKitEntrancePlayed[$tabName] = $true
     } catch {
-        try { Write-AMRLog ("Tool Kit entrance animation skipped for {0}: {1}" -f $tabName,$_.Exception.Message) WARNING ToolKit } catch {}
+        try { Write-AMRLog ("Tool Kit entrance animation skipped for {0}: {1}" -f $tabName,$_.Exception.Message) WARNING System } catch {}
     }
 }
+
+    # Control Center group: the six pages are sidebar items under the Control Center entry.
+    # They drop down (height + fade, short stagger) when the group opens and fold back when another Tool Kit page is chosen.
+    $script:AMRControlCenterState = @{ Open = $false; Token = 0; Last = 'Optimize' }
+    function Get-AMRControlCenterChildren {
+        $kit = C 'ToolKitSubTabs'
+        if (-not $kit) { return @() }
+        return @($kit.Items | Where-Object { $_ -is [System.Windows.Controls.TabItem] -and [string]$_.Tag -eq 'CCChild' })
+    }
+    function Set-AMRControlCenterGroup {
+        param([bool]$Open)
+        try {
+            $state = $script:AMRControlCenterState
+            if ([bool]$state.Open -eq $Open) { return }
+            $state.Open = $Open
+            $state.Token = [int]$state.Token + 1
+            $token = [int]$state.Token
+            $isOpen = $Open
+            $items = @(Get-AMRControlCenterChildren)
+            $parent = C 'ToolKitControlTab'
+            if ($parent) {
+                $glyph = if ($Open) { [char]0x25BE } else { [char]0x25B8 }
+                $parent.Header = ([string]$script:AMRControlTabName + '  ' + [string]$glyph)
+                if ($Open) {
+                    $parent.Background = (New-Object System.Windows.Media.BrushConverter).ConvertFromString('#4B30567E')
+                    $parent.Foreground = (New-Object System.Windows.Media.BrushConverter).ConvertFromString('#EAF2FF')
+                } else {
+                    $parent.ClearValue([System.Windows.Controls.Control]::BackgroundProperty)
+                    $parent.ClearValue([System.Windows.Controls.Control]::ForegroundProperty)
+                }
+            }
+            $count = $items.Count
+            if ($count -eq 0) { return }
+            $ease = New-Object System.Windows.Media.Animation.QuadraticEase
+            $ease.EasingMode = [System.Windows.Media.Animation.EasingMode]::EaseOut
+            $ms = if ($Open) { 230 } else { 170 }
+            $lastAnim = $null
+            for ($n = 0; $n -lt $count; $n++) {
+                $it = $items[$n]
+                if ($Open -and $it.Visibility -ne [System.Windows.Visibility]::Visible) {
+                    $it.LayoutTransform = New-Object System.Windows.Media.ScaleTransform(1.0, 0.0)
+                    $it.Opacity = 0.0
+                    $it.Margin = New-Object System.Windows.Thickness(0, 0, 0, 0)
+                    $it.Visibility = [System.Windows.Visibility]::Visible
+                }
+                $scale = $it.LayoutTransform -as [System.Windows.Media.ScaleTransform]
+                if (-not $scale) {
+                    $scale = New-Object System.Windows.Media.ScaleTransform(1.0, 1.0)
+                    $it.LayoutTransform = $scale
+                }
+                $order = if ($Open) { $n } else { $count - 1 - $n }
+                $begin = [TimeSpan]::FromMilliseconds(26 * $order)
+                $toScale = if ($Open) { 1.0 } else { 0.0 }
+                $toMargin = if ($Open) { 8.0 } else { 0.0 }
+
+                $aScale = New-Object System.Windows.Media.Animation.DoubleAnimation
+                $aScale.To = $toScale
+                $aScale.Duration = [TimeSpan]::FromMilliseconds($ms)
+                $aScale.BeginTime = $begin
+                $aScale.EasingFunction = $ease
+                $aFade = New-Object System.Windows.Media.Animation.DoubleAnimation
+                $aFade.To = $toScale
+                $aFade.Duration = [TimeSpan]::FromMilliseconds($ms)
+                $aFade.BeginTime = $begin
+                $aFade.EasingFunction = $ease
+                $aMargin = New-Object System.Windows.Media.Animation.ThicknessAnimation
+                $aMargin.To = New-Object System.Windows.Thickness(0, 0, 0, $toMargin)
+                $aMargin.Duration = [TimeSpan]::FromMilliseconds($ms)
+                $aMargin.BeginTime = $begin
+                $aMargin.EasingFunction = $ease
+
+                $scale.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleYProperty, $aScale, [System.Windows.Media.Animation.HandoffBehavior]::SnapshotAndReplace)
+                $it.BeginAnimation([System.Windows.UIElement]::OpacityProperty, $aFade, [System.Windows.Media.Animation.HandoffBehavior]::SnapshotAndReplace)
+                $it.BeginAnimation([System.Windows.FrameworkElement]::MarginProperty, $aMargin, [System.Windows.Media.Animation.HandoffBehavior]::SnapshotAndReplace)
+                if ($order -eq ($count - 1)) { $lastAnim = $aMargin }
+            }
+            if ($lastAnim) {
+                # Runs when the last (latest-starting) item finishes: drop the animation clocks and set the resting values.
+                # Only locals are used inside the closure (script-scope variables do not resolve there).
+                $lastAnim.Add_Completed({
+                    param($sender, $evt)
+                    if ([int]$state.Token -ne $token) { return }
+                    foreach ($x in $items) {
+                        $x.BeginAnimation([System.Windows.UIElement]::OpacityProperty, $null)
+                        $x.BeginAnimation([System.Windows.FrameworkElement]::MarginProperty, $null)
+                        $sc = $x.LayoutTransform -as [System.Windows.Media.ScaleTransform]
+                        if ($sc) { $sc.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleYProperty, $null) }
+                        $x.LayoutTransform = [System.Windows.Media.Transform]::Identity
+                        $x.Opacity = 1.0
+                        $x.Margin = New-Object System.Windows.Thickness(0, 0, 0, 8)
+                        if (-not $isOpen) { $x.Visibility = [System.Windows.Visibility]::Collapsed }
+                    }
+                }.GetNewClosure())
+            }
+        } catch {
+            try { Write-AMRLog ("Control Center group animation fallback: " + $_.Exception.Message) WARNING System } catch {}
+            try {
+                foreach ($x in @(Get-AMRControlCenterChildren)) {
+                    $x.BeginAnimation([System.Windows.UIElement]::OpacityProperty, $null)
+                    $x.BeginAnimation([System.Windows.FrameworkElement]::MarginProperty, $null)
+                    $x.LayoutTransform = [System.Windows.Media.Transform]::Identity
+                    $x.Opacity = 1.0
+                    $x.Margin = New-Object System.Windows.Thickness(0, 0, 0, 8)
+                    $x.Visibility = if ($Open) { [System.Windows.Visibility]::Visible } else { [System.Windows.Visibility]::Collapsed }
+                }
+            } catch {}
+        }
+    }
+    function Invoke-AMRControlCenterEntered {
+        try {
+            $kit = C 'ToolKitSubTabs'
+            if (-not $kit -or -not $kit.SelectedItem) { return }
+            if ([string]$kit.SelectedItem.Header -eq 'Backup' -and [string]$kit.SelectedItem.Tag -eq 'CCChild') { Request-AMRBackupViewRefresh }
+        } catch {}
+    }
 
 $kitTabs = C 'ToolKitSubTabs'
     if ($kitTabs) {
@@ -10671,9 +11262,35 @@ $kitTabs = C 'ToolKitSubTabs'
         $kitTabs.Add_SelectionChanged({
             # Only process a selection made by ToolKitSubTabs itself.
             if ($_.OriginalSource -ne $this) { return }
+            $selItem = $this.SelectedItem
+            if ($selItem) {
+                if ([object]::ReferenceEquals($selItem,(C 'ToolKitControlTab'))) {
+                    # Control Center entry: open its group and land on the last used page (Optimize the first time).
+                    Set-AMRControlCenterGroup -Open $true
+                    $wanted = $null
+                    $kids = @(Get-AMRControlCenterChildren)
+                    foreach ($k in $kids) { if ([string]$k.Header -eq [string]$script:AMRControlCenterState.Last) { $wanted = $k } }
+                    if (-not $wanted -and $kids.Count -gt 0) { $wanted = $kids[0] }
+                    if ($wanted) { $this.SelectedItem = $wanted; return }
+                } elseif ([string]$selItem.Tag -eq 'CCChild') {
+                    $script:AMRControlCenterState.Last = [string]$selItem.Header
+                    Set-AMRControlCenterGroup -Open $true
+                } else {
+                    Set-AMRControlCenterGroup -Open $false
+                }
+            }
+            $perfKit = Get-AMRPerfNow
             Invoke-AMRNavigationTilePressAnimation -Element $this.SelectedItem
+            Add-AMRPerfSince 'kit.sel.pressAnim' $perfKit
+            $perfKit = Get-AMRPerfNow
             Update-AMRSmartSearchContext
+            Add-AMRPerfSince 'kit.sel.smartContext' $perfKit
+            $perfKit = Get-AMRPerfNow
             Invoke-AMRToolKitEntranceAnimation -TabItem $this.SelectedItem
+            Add-AMRPerfSince 'kit.sel.entranceAnim' $perfKit
+            $perfKit = Get-AMRPerfNow
+            Invoke-AMRControlCenterEntered
+            Add-AMRPerfSince 'kit.sel.entered' $perfKit
         })
     }
     function Invoke-AMRCleanupSubTabAnimation {
@@ -10729,7 +11346,8 @@ $kitTabs = C 'ToolKitSubTabs'
             if ($null -eq $script:AMRCleanupEntrancePlayed) {
                 $script:AMRCleanupEntrancePlayed = @{}
             }
-            if ($script:AMRCleanupEntrancePlayed.ContainsKey($tabName)) { return }
+            # A3: the Smart page entrance replays on every entry; the other sub-tabs keep the once-per-session behavior.
+            if ($tabName -ne 'Smart' -and $script:AMRCleanupEntrancePlayed.ContainsKey($tabName)) { return }
 
             $target = C $targetName
             if (-not ($target -is [System.Windows.UIElement])) { return }
@@ -10843,6 +11461,7 @@ $kitTabs = C 'ToolKitSubTabs'
         $mainTabs.Add_SelectionChanged({
             if ($_.OriginalSource -ne $this) { return }
             $activeSection = if ($this.SelectedItem) { [string]$this.SelectedItem.Header } else { '' }
+            Invoke-AMRMainPageSizeTransition -TabItem $this.SelectedItem
             if($activeSection -ne 'Backups'){$script:AMRBackupEntranceLastKey=$null}
             if ($activeSection -eq 'Cleanup') {
                 $activeCleanupTabs = C 'CleanupSubTabs'
@@ -10878,6 +11497,12 @@ $kitTabs = C 'ToolKitSubTabs'
                         }
                     }
                 }
+            } elseif ($activeSection -eq 'Tool Kit') {
+                # A4: same small tile slide-in System uses when its main tab is entered (same helper, same values).
+                $activeKitTabs = C 'ToolKitSubTabs'
+                if ($activeKitTabs -and $activeKitTabs.SelectedItem) {
+                    Invoke-AMRNavigationTilePressAnimation -Element $activeKitTabs.SelectedItem
+                }
             } elseif ($activeSection -eq 'Backups') {
                 $activeBackupTabs = C 'BackupSubTabs'
                 if ($activeBackupTabs -and $activeBackupTabs.SelectedItem) {
@@ -10909,6 +11534,11 @@ $kitTabs = C 'ToolKitSubTabs'
     $script:StartupIconTimer = $null
     $script:StartupIconQueue = $null
     $script:StartupPackageIconIndex = @{}
+    $script:StartupInstalledMatchIndex = $null
+    $script:StartupCacheComplete = $false
+    $script:StartupInstalledMatchIndexSource = $null
+    $script:StartupBrushProto = @{}
+    $script:StartupIconFileMaps = @{}
     $script:StartupBrowserShortcutIconIndex = @{}
 
     $overviewTabs = C 'OverviewSubTabs'
@@ -10944,7 +11574,14 @@ $kitTabs = C 'ToolKitSubTabs'
                             Set-AMRPerfMark 'startups.firstRefresh'
                             try { Start-AMRRefreshButtonAnimation -Button (C 'AMRStartupRefreshBtn') } catch {}
                             Add-AMRPerfSince 'startups.refreshButtonAnim' $perfFirst
-                            Refresh-AMRStartupManager -RefreshInventory
+                            $cachedStartupEntries=$null
+                            try { $cachedStartupEntries=Get-AMRStartupCachedEntries } catch {}
+                            if ($cachedStartupEntries) {
+                                $script:StartupCacheComplete = $true
+                                Refresh-AMRStartupManager -Entries $cachedStartupEntries -SkipDeferredCim
+                            } else {
+                                Refresh-AMRStartupManager -RefreshInventory
+                            }
                             Add-AMRPerfSince 'startups.firstRefreshTotalSync' $perfFirst
                             $script:StartupAutoFirstRefreshDone = $true
                         } catch {
@@ -11489,15 +12126,104 @@ try{$span=[TimeSpan]::FromMilliseconds([double][AMRLiveSensorNativeV3]::GetTickC
 $script:OverviewGpuTelemetryWorker = @'
 $ErrorActionPreference='Stop'
 $gpuPercent=$null;$gpuError='';$gpuSource='unavailable'
+# A1: native PDH sampling (pdh.dll, same counter '\GPU Engine(*)\Utilization Percentage', two collections 1 s apart, same engine types, maximum of the
+# newest sample, clamped 0-100). It replaces the Get-Counter cmdlet pipeline (about 0.8 s CPU per sample in the A22 log). Any failure falls back
+# to the previous Get-Counter code, then to WMI, exactly as before. Three consecutive native failures disable the native path for the session.
+$gpuNativeDone=$false
+try{
+ if([string][AppDomain]::CurrentDomain.GetData('AMRGpuPdhDisabled') -ne '1'){
+  if(-not ('AMRGpuPdhNative' -as [type])){
+   Add-Type -Language CSharp -ErrorAction Stop -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+using System.Threading;
+public static class AMRGpuPdhNative {
+    [DllImport("pdh.dll", CharSet = CharSet.Unicode)] private static extern uint PdhOpenQueryW(string dataSource, IntPtr userData, out IntPtr query);
+    [DllImport("pdh.dll", CharSet = CharSet.Unicode)] private static extern uint PdhAddEnglishCounterW(IntPtr query, string fullCounterPath, IntPtr userData, out IntPtr counter);
+    [DllImport("pdh.dll")] private static extern uint PdhCollectQueryData(IntPtr query);
+    [DllImport("pdh.dll", CharSet = CharSet.Unicode)] private static extern uint PdhGetFormattedCounterArrayW(IntPtr counter, uint format, ref uint bufferSize, out uint itemCount, IntPtr buffer);
+    [DllImport("pdh.dll")] private static extern uint PdhCloseQuery(IntPtr query);
+    [StructLayout(LayoutKind.Sequential)] private struct FmtValue { public uint Status; public double Value; }
+    [StructLayout(LayoutKind.Sequential)] private struct Item { public IntPtr Name; public FmtValue Fmt; }
+    private const uint PDH_FMT_DOUBLE = 0x00000200;
+    private const uint PDH_MORE_DATA = 0x800007D2;
+    private static bool IsEngine(string name) {
+        return name.IndexOf("engtype_3D", StringComparison.OrdinalIgnoreCase) >= 0
+            || name.IndexOf("engtype_Compute", StringComparison.OrdinalIgnoreCase) >= 0
+            || name.IndexOf("engtype_Copy", StringComparison.OrdinalIgnoreCase) >= 0
+            || name.IndexOf("engtype_VideoDecode", StringComparison.OrdinalIgnoreCase) >= 0
+            || name.IndexOf("engtype_VideoEncode", StringComparison.OrdinalIgnoreCase) >= 0;
+    }
+    public static int ItemSize() { return Marshal.SizeOf(typeof(Item)); }
+    // Walks a PDH_FMT_COUNTERVALUE_ITEM_W array already in memory; returns the maximum valid engine value or -1 when none.
+    public static double MaxEngineValue(IntPtr buffer, uint count) {
+        int stride = Marshal.SizeOf(typeof(Item));
+        double max = -1.0;
+        for (int i = 0; i < (int)count; i++) {
+            Item it = (Item)Marshal.PtrToStructure(new IntPtr(buffer.ToInt64() + (long)i * stride), typeof(Item));
+            if (it.Name == IntPtr.Zero) continue;
+            string name = Marshal.PtrToStringUni(it.Name);
+            if (name == null || !IsEngine(name)) continue;
+            if (it.Fmt.Status != 0 && it.Fmt.Status != 1) continue;
+            if (it.Fmt.Value > max) max = it.Fmt.Value;
+        }
+        return max;
+    }
+    public static double SampleMaxEngineUtilization(int intervalMs) {
+        IntPtr query;
+        uint r = PdhOpenQueryW(null, IntPtr.Zero, out query);
+        if (r != 0) throw new InvalidOperationException("PdhOpenQuery 0x" + r.ToString("X"));
+        try {
+            IntPtr counter;
+            r = PdhAddEnglishCounterW(query, "\\GPU Engine(*)\\Utilization Percentage", IntPtr.Zero, out counter);
+            if (r != 0) throw new InvalidOperationException("PdhAddEnglishCounter 0x" + r.ToString("X"));
+            r = PdhCollectQueryData(query);
+            if (r != 0) throw new InvalidOperationException("PdhCollectQueryData(1) 0x" + r.ToString("X"));
+            Thread.Sleep(intervalMs);
+            r = PdhCollectQueryData(query);
+            if (r != 0) throw new InvalidOperationException("PdhCollectQueryData(2) 0x" + r.ToString("X"));
+            uint size = 0, count = 0;
+            r = PdhGetFormattedCounterArrayW(counter, PDH_FMT_DOUBLE, ref size, out count, IntPtr.Zero);
+            if (r != PDH_MORE_DATA) {
+                if (r == 0 || r == 0x800007D5) return -1.0;
+                throw new InvalidOperationException("PdhGetFormattedCounterArray(size) 0x" + r.ToString("X"));
+            }
+            IntPtr buffer = Marshal.AllocHGlobal((int)size);
+            try {
+                r = PdhGetFormattedCounterArrayW(counter, PDH_FMT_DOUBLE, ref size, out count, buffer);
+                if (r != 0) throw new InvalidOperationException("PdhGetFormattedCounterArray 0x" + r.ToString("X"));
+                return MaxEngineValue(buffer, count);
+            } finally { Marshal.FreeHGlobal(buffer); }
+        } finally { PdhCloseQuery(query); }
+    }
+}
+"@
+  }
+  $nativeMax=[AMRGpuPdhNative]::SampleMaxEngineUtilization(1000)
+  if($nativeMax -ge 0){
+   $gpuPercent=[Math]::Round([Math]::Max(0,[Math]::Min(100,[double]$nativeMax)),1);$gpuSource='GPU Engine PDH · 1-second sample';$gpuNativeDone=$true
+   [AppDomain]::CurrentDomain.SetData('AMRGpuPdhFailures','0')
+  }
+ }
+}catch{
+ try{ $nativeFailures=0;[void][int]::TryParse([string][AppDomain]::CurrentDomain.GetData('AMRGpuPdhFailures'),[ref]$nativeFailures);$nativeFailures++;[AppDomain]::CurrentDomain.SetData('AMRGpuPdhFailures',[string]$nativeFailures);if($nativeFailures -ge 3){[AppDomain]::CurrentDomain.SetData('AMRGpuPdhDisabled','1')} }catch{}
+}
+if(-not $gpuNativeDone){
 try{
  # PDH samples over a one-second window are more representative than a single
  # formatted-counter read, which can briefly report stale or spiky engine values.
  $gpuCounter=Get-Counter -Counter '\GPU Engine(*)\Utilization Percentage' -SampleInterval 1 -MaxSamples 2 -ErrorAction Stop
- $gpuSamples=@($gpuCounter.CounterSamples | Where-Object {$_.InstanceName -match 'engtype_(3D|Compute|Copy|VideoDecode|VideoEncode)' -and $null -ne $_.CookedValue})
- if($gpuSamples.Count -gt 0){
-  $latestStamp=($gpuSamples | Measure-Object -Property Timestamp -Maximum).Maximum
-  $latestSamples=@($gpuSamples | Where-Object {$_.Timestamp -eq $latestStamp} | ForEach-Object {[double]$_.CookedValue})
-  if($latestSamples.Count -gt 0){$gpuPercent=[Math]::Round([Math]::Max(0,[Math]::Min(100,(($latestSamples | Measure-Object -Maximum).Maximum))),1);$gpuSource='GPU Engine PDH · 1-second sample'}
+ # A24: same selection and result as before (valid engine types, newest timestamp, maximum value, clamped
+ # 0-100) but computed with two plain loops instead of four pipelines over every engine instance
+ # (A22 log: this worker costs about 0.8 s CPU and about 290 gen0 GCs per sample).
+ $engRx=New-Object System.Text.RegularExpressions.Regex('engtype_(3D|Compute|Copy|VideoDecode|VideoEncode)',[System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+ $allSamples=$gpuCounter.CounterSamples
+ $latestStamp=[DateTime]::MinValue;$validCount=0
+ foreach($sm in $allSamples){ if($null -ne $sm.CookedValue -and $engRx.IsMatch([string]$sm.InstanceName)){ $validCount++; if($sm.Timestamp -gt $latestStamp){$latestStamp=$sm.Timestamp} } }
+ if($validCount -gt 0){
+  $maxVal=$null
+  foreach($sm in $allSamples){ if($null -ne $sm.CookedValue -and $sm.Timestamp -eq $latestStamp -and $engRx.IsMatch([string]$sm.InstanceName)){ $cv=[double]$sm.CookedValue; if($null -eq $maxVal -or $cv -gt $maxVal){$maxVal=$cv} } }
+  if($null -ne $maxVal){$gpuPercent=[Math]::Round([Math]::Max(0,[Math]::Min(100,$maxVal)),1);$gpuSource='GPU Engine PDH · 1-second sample'}
  }
  if($null -eq $gpuPercent){throw 'GPU PDH sampling returned no valid engine instances'}
 }catch{
@@ -11507,6 +12233,7 @@ try{
   $gpuValues=@($gpuRows | Where-Object {$_.Name -match 'engtype_(3D|Compute|Copy|VideoDecode|VideoEncode)' -and $null -ne $_.UtilizationPercentage} | ForEach-Object {[double]$_.UtilizationPercentage})
   if($gpuValues.Count -gt 0){$gpuPercent=[Math]::Round([Math]::Max(0,[Math]::Min(100,(($gpuValues | Measure-Object -Maximum).Maximum))),1);$gpuSource='GPU Engine WMI fallback';$gpuError=''}else{throw 'GPU WMI fallback returned no utilization instances'}
  }catch{$gpuError+='; WMI fallback: '+$_.Exception.Message}
+}
 }
 [pscustomobject]@{GPUPercent=$gpuPercent;GPUSensorError=$gpuError;GPUSensorSource=$gpuSource;Timestamp=(Get-Date)}
 '@
@@ -11844,27 +12571,52 @@ $ramSlotsText='Module-level RAM details not queried';
 }
 '@
 
+# A21: Overview control cache. The named controls never change after the window is built, so one FindName per name is enough (null is never cached).
+$script:OvControlCache = @{}
+function OvC {
+    param([string]$Name)
+    $hit = $script:OvControlCache[$Name]
+    if ($null -ne $hit) { return $hit }
+    $found = $script:Window.FindName($Name)
+    if ($null -ne $found) { $script:OvControlCache[$Name] = $found }
+    return $found
+}
+# A21: shared frozen brushes for the Overview bars and gauges (same colours as before, created once).
+$script:OvBrushCache = @{}
+$script:OvGaugeGeometryText = @{}
+function Get-AMROvBrush {
+    param([int]$Red,[int]$Green,[int]$Blue)
+    $cacheKey = '{0},{1},{2}' -f $Red,$Green,$Blue
+    $cachedBrush = $script:OvBrushCache[$cacheKey]
+    if ($null -eq $cachedBrush) {
+        $cachedBrush = [System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.Color]::FromRgb([byte]$Red,[byte]$Green,[byte]$Blue))
+        $cachedBrush.Freeze()
+        $script:OvBrushCache[$cacheKey] = $cachedBrush
+    }
+    return $cachedBrush
+}
+
 function Set-AMROverviewProgress {
     param([string]$Name,[object]$Value)
-    $bar = C $Name
+    $bar = OvC $Name
     if (-not $bar -or $null -eq $Value) { return }
     try {
         $target = [Math]::Max(0,[Math]::Min(100,[double]$Value))
         if([Math]::Abs($target-[double]$bar.Value) -lt 0.05){return}
-        $animation = New-Object System.Windows.Media.Animation.DoubleAnimation
+        $animation = [System.Windows.Media.Animation.DoubleAnimation]::new()
         $animation.From = [double]$bar.Value
         $animation.To = $target
         $animation.Duration = [TimeSpan]::FromMilliseconds(420)
-        $animation.EasingFunction = New-Object System.Windows.Media.Animation.QuadraticEase
+        $animation.EasingFunction = [System.Windows.Media.Animation.QuadraticEase]::new()
         if($Name -match 'CPU' -or $Name -match 'Memory'){
-            if($target -ge 85){$bar.Foreground=[System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.Color]::FromRgb(218,104,104))}
-            elseif($target -ge 65){$bar.Foreground=[System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.Color]::FromRgb(211,169,103))}
-            elseif($Name -match 'Memory'){$bar.Foreground=[System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.Color]::FromRgb(85,196,161))}
-            else{$bar.Foreground=[System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.Color]::FromRgb(86,166,232))}
+            if($target -ge 85){$bar.Foreground=(Get-AMROvBrush 218 104 104)}
+            elseif($target -ge 65){$bar.Foreground=(Get-AMROvBrush 211 169 103)}
+            elseif($Name -match 'Memory'){$bar.Foreground=(Get-AMROvBrush 85 196 161)}
+            else{$bar.Foreground=(Get-AMROvBrush 86 166 232)}
         } elseif($Name -match 'Drive|Storage'){
-            if($target -ge 90){$bar.Foreground=[System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.Color]::FromRgb(218,104,104))}
-            elseif($target -ge 80){$bar.Foreground=[System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.Color]::FromRgb(211,169,103))}
-            else{$bar.Foreground=[System.Windows.Media.SolidColorBrush]::new([System.Windows.Media.Color]::FromRgb(111,168,201))}
+            if($target -ge 90){$bar.Foreground=(Get-AMROvBrush 218 104 104)}
+            elseif($target -ge 80){$bar.Foreground=(Get-AMROvBrush 211 169 103)}
+            else{$bar.Foreground=(Get-AMROvBrush 111 168 201)}
         }
         $bar.BeginAnimation([System.Windows.Controls.Primitives.RangeBase]::ValueProperty,$animation)
     } catch { try { $bar.Value = [double]$Value } catch {} }
@@ -11873,41 +12625,41 @@ function Set-AMROverviewProgress {
 function Set-AMROverviewUnavailable {
     param([string]$Reason = 'Sensor data unavailable')
     foreach ($name in @('ovCPUUsageValue','ovMemoryUsageValue','ovGPUUsageValue','ovNetworkStatusValue')) {
-        $control = C $name
+        $control = OvC $name
         if ($control) { $control.Text = 'N/A' }
     }
     foreach ($name in @('ovCPUUsageDetail','ovMemoryUsageDetail','ovGPUUsageDetail','ovNetworkStatusDetail')) {
-        $control = C $name
+        $control = OvC $name
         if ($control) { $control.Text = $Reason }
     }
     # Preserve the local identity snapshot; only live sensor values are marked unavailable.
     foreach ($name in @('ovCPUUsageBar','ovMemoryUsageBar')) {
-        $control = C $name
+        $control = OvC $name
         if ($control) { try { $control.BeginAnimation([System.Windows.Controls.Primitives.RangeBase]::ValueProperty,$null); $control.Value = 0 } catch {} }
     }
     Set-AMRCircularGauge 'ovCpuGaugeArc' 'ovLiveCPUValue' $null
     Set-AMRCircularGauge 'ovMemoryGaugeArc' 'ovLiveMemoryValue' $null
     Set-AMRCircularGauge 'ovGpuGaugeArc' 'ovLiveGPUValue' $null
     foreach($name in @('ovLiveCPUDetail','ovLiveMemoryDetail','ovLiveGPUDetail','ovNetworkRateDetail','ovLiveNetworkRates')){
-        $control=C $name;if($control){$control.Text=$Reason}
+        $control=OvC $name;if($control){$control.Text=$Reason}
     }
-    $networkControl=C 'ovLiveNetworkStatus';if($networkControl){$networkControl.Text='Sensor unavailable'}
-    $storageDetail=C 'ovSystemDriveStorageDetail';if($storageDetail){$storageDetail.Text='System drive sensor unavailable'}
-    $storageValue=C 'ovSystemDriveStorageValue';if($storageValue){$storageValue.Text='N/A'}
-    $storageBar=C 'ovSystemDriveStorageBar';if($storageBar){$storageBar.BeginAnimation([System.Windows.Controls.Primitives.RangeBase]::ValueProperty,$null);$storageBar.Value=0}
+    $networkControl=OvC 'ovLiveNetworkStatus';if($networkControl){$networkControl.Text='Sensor unavailable'}
+    $storageDetail=OvC 'ovSystemDriveStorageDetail';if($storageDetail){$storageDetail.Text='System drive sensor unavailable'}
+    $storageValue=OvC 'ovSystemDriveStorageValue';if($storageValue){$storageValue.Text='N/A'}
+    $storageBar=OvC 'ovSystemDriveStorageBar';if($storageBar){$storageBar.BeginAnimation([System.Windows.Controls.Primitives.RangeBase]::ValueProperty,$null);$storageBar.Value=0}
 }
 
 function Set-AMRCircularGauge {
     param([string]$PathName,[string]$ValueName,[object]$Value)
-    $path=C $PathName; $label=C $ValueName
+    $path=OvC $PathName; $label=OvC $ValueName
     if($null -eq $Value -or -not $path -or -not $label) {
         if($label){$label.Text='N/A'}
-        if($path){$path.Data=[System.Windows.Media.Geometry]::Parse('M 52,4 L 52,4')}
+        if($path){$path.Data=[System.Windows.Media.Geometry]::Parse('M 52,4 L 52,4'); $script:OvGaugeGeometryText.Remove($PathName)}
         return
     }
     $pct=[Math]::Max(0,[Math]::Min(100,[double]$Value))
     $label.Text=('{0:N0}%' -f $pct)
-    if($pct -lt 0.5) { $path.Data=[System.Windows.Media.Geometry]::Parse('M 52,4 L 52,4'); return }
+    if($pct -lt 0.5) { $path.Data=[System.Windows.Media.Geometry]::Parse('M 52,4 L 52,4'); $script:OvGaugeGeometryText.Remove($PathName); return }
     $drawPct=[Math]::Min(99.9,$pct)
     $angle=$drawPct*3.6*[Math]::PI/180.0
     $x=52.0+48.0*[Math]::Sin($angle)
@@ -11926,15 +12678,15 @@ function Set-AMRCircularGauge {
         elseif($pct -ge 80){$path.Stroke=[System.Windows.Media.Brushes]::Goldenrod}
         else{$path.Stroke=[System.Windows.Media.Brushes]::LightSteelBlue}
     }
-    try { $geometryText=[string]::Format([Globalization.CultureInfo]::InvariantCulture,'M 52,4 A 48,48 0 {0} 1 {1:0.###},{2:0.###}',$large,$x,$y); $path.Data=[System.Windows.Media.Geometry]::Parse($geometryText) } catch {}
+    try { $geometryText=[string]::Format([Globalization.CultureInfo]::InvariantCulture,'M 52,4 A 48,48 0 {0} 1 {1:0.###},{2:0.###}',$large,$x,$y); if($script:OvGaugeGeometryText[$PathName] -ne $geometryText){ $path.Data=[System.Windows.Media.Geometry]::Parse($geometryText); $script:OvGaugeGeometryText[$PathName]=$geometryText } } catch {}
 }
 
 function Set-AMRHistoryPolyline {
     param([string]$CanvasName,[string]$LineName,[object[]]$Values,[double]$Maximum=100)
-    $canvas=C $CanvasName; $line=C $LineName
+    $canvas=OvC $CanvasName; $line=OvC $LineName
     if(-not $canvas -or -not $line){return}
-    $points=New-Object System.Windows.Media.PointCollection
-    $items=@($Values)
+    $points=[System.Windows.Media.PointCollection]::new()
+    $items=$Values
     if($items.Count -lt 2){$line.Points=$points;return}
     $width=[double]$canvas.ActualWidth; $height=[double]$canvas.ActualHeight
     if($width -lt 10){$width=360}; if($height -lt 10){$height=100}
@@ -11944,7 +12696,7 @@ function Set-AMRHistoryPolyline {
         $x=($i/([Math]::Max(1,$items.Count-1)))*$width
         $y=$height-(([Math]::Max(0,[double]$items[$i])/$Maximum)*($height-5))-2
         $y=[Math]::Max(2,[Math]::Min($height-2,$y))
-        [void]$points.Add((New-Object System.Windows.Point -ArgumentList $x,$y))
+        [void]$points.Add([System.Windows.Point]::new($x,$y))
     }
     $line.Points=$points
 }
@@ -11976,45 +12728,49 @@ function Update-AMROverviewHistory {
     $entry=[pscustomobject]@{Timestamp=$now;CPU=$cpu;Memory=$memory;GPU=$gpuValue;Download=$rxRate;Upload=$txRate;DriveC=$driveValue}
     [void]$state.History.Add($entry)
     while($state.History.Count -gt 0 -and $state.History[0].Timestamp -lt $now.AddSeconds(-60)){$state.History.RemoveAt(0)}; while($state.History.Count -gt 60){$state.History.RemoveAt(0)}
-    $cpuValues=@($state.History | ForEach-Object {$_.CPU})
+    $histCount=$state.History.Count
+    $cpuValues=New-Object 'object[]' $histCount; $gpuValues=New-Object 'object[]' $histCount
+    $downloadValues=New-Object 'object[]' $histCount; $uploadValues=New-Object 'object[]' $histCount
+    $networkMax=1.0; $anyRate=$false; $maxRate=0.0
+    for($hi=0;$hi -lt $histCount;$hi++){
+        $he=$state.History[$hi]
+        $cpuValues[$hi]=$he.CPU; $gpuValues[$hi]=$he.GPU; $downloadValues[$hi]=$he.Download; $uploadValues[$hi]=$he.Upload
+        if($null -ne $he.Download){$anyRate=$true;if([double]$he.Download -gt $maxRate){$maxRate=[double]$he.Download}}
+        if($null -ne $he.Upload){$anyRate=$true;if([double]$he.Upload -gt $maxRate){$maxRate=[double]$he.Upload}}
+    }
+    if($anyRate){$networkMax=[Math]::Max(0.1,$maxRate*1.15)}
     Set-AMRHistoryPolyline 'ovCpuHistoryCanvas' 'ovCpuHistoryLine' $cpuValues 100
-    $gpuValues=@($state.History | ForEach-Object {$_.GPU})
     Set-AMRHistoryPolyline 'ovGpuHistoryCanvas' 'ovGpuHistoryLine' $gpuValues 100
-    $downloadValues=@($state.History | ForEach-Object {$_.Download})
-    $uploadValues=@($state.History | ForEach-Object {$_.Upload})
-    $validRates=@($downloadValues+$uploadValues | Where-Object {$null -ne $_})
-    $networkMax=1.0
-    if($validRates.Count -gt 0){$networkMax=[Math]::Max(0.1,(($validRates | Measure-Object -Maximum).Maximum)*1.15)}
     Set-AMRHistoryPolyline 'ovNetworkHistoryCanvas' 'ovNetworkDownloadLine' $downloadValues $networkMax
     Set-AMRHistoryPolyline 'ovNetworkHistoryCanvas' 'ovNetworkUploadLine' $uploadValues $networkMax
     Set-AMRCircularGauge 'ovCpuGaugeArc' 'ovLiveCPUValue' $cpu
     Set-AMRCircularGauge 'ovMemoryGaugeArc' 'ovLiveMemoryValue' $memory
     $gpuValue=$Snapshot.GPUPercent
     Set-AMRCircularGauge 'ovGpuGaugeArc' 'ovLiveGPUValue' $gpuValue
-    if($null -ne $gpuValue){(C 'ovLiveGPUDetail').Text=('GPU engine utilization · {0}' -f [string]$Snapshot.GPUSensorSource)}else{(C 'ovLiveGPUDetail').Text='GPU utilization unavailable: '+[string]$Snapshot.GPUSensorError}
-    if($null -ne $cpu){(C 'ovLiveCPUDetail').Text=('GetSystemTimes · {0:N0} logical processors' -f $Snapshot.Threads)}else{(C 'ovLiveCPUDetail').Text='Unavailable: '+[string]$Snapshot.CPUSensorError}
-    if($null -ne $memory){(C 'ovLiveMemoryDetail').Text=('{0:N1} GB used of {1:N1} GB total' -f ($Snapshot.UsedMB/1024),($Snapshot.TotalMB/1024));(C 'ovRAMAvailable').Text=('Available RAM: {0:N1} GB' -f ($Snapshot.FreeMB/1024))}else{(C 'ovLiveMemoryDetail').Text='Unavailable: '+[string]$Snapshot.MemorySensorError;(C 'ovRAMAvailable').Text='Available RAM: unavailable'}
+    if($null -ne $gpuValue){(OvC 'ovLiveGPUDetail').Text=('GPU engine utilization · {0}' -f [string]$Snapshot.GPUSensorSource)}else{(OvC 'ovLiveGPUDetail').Text='GPU utilization unavailable: '+[string]$Snapshot.GPUSensorError}
+    if($null -ne $cpu){(OvC 'ovLiveCPUDetail').Text=('GetSystemTimes · {0:N0} logical processors' -f $Snapshot.Threads)}else{(OvC 'ovLiveCPUDetail').Text='Unavailable: '+[string]$Snapshot.CPUSensorError}
+    if($null -ne $memory){(OvC 'ovLiveMemoryDetail').Text=('{0:N1} GB used of {1:N1} GB total' -f ($Snapshot.UsedMB/1024),($Snapshot.TotalMB/1024));(OvC 'ovRAMAvailable').Text=('Available RAM: {0:N1} GB' -f ($Snapshot.FreeMB/1024))}else{(OvC 'ovLiveMemoryDetail').Text='Unavailable: '+[string]$Snapshot.MemorySensorError;(OvC 'ovRAMAvailable').Text='Available RAM: unavailable'}
     if($null -ne $rxRate -and $null -ne $txRate){
-        (C 'ovNetworkRateDetail').Text=('Download {0:N2} MB/s · Upload {1:N2} MB/s' -f $rxRate,$txRate)
-        (C 'ovLiveNetworkRates').Text=('Download: {0:N2} MB/s  ·  Upload: {1:N2} MB/s' -f $rxRate,$txRate)
+        (OvC 'ovNetworkRateDetail').Text=('Download {0:N2} MB/s · Upload {1:N2} MB/s' -f $rxRate,$txRate)
+        (OvC 'ovLiveNetworkRates').Text=('Download: {0:N2} MB/s  ·  Upload: {1:N2} MB/s' -f $rxRate,$txRate)
     }else{
         if($null -eq $Snapshot.NetRxBytes -or $null -eq $Snapshot.NetTxBytes){
             $rateError=if($Snapshot.NetworkSensorError){[string]$Snapshot.NetworkSensorError}else{'Network byte counters unavailable'}
-            (C 'ovNetworkRateDetail').Text='Throughput sensor unavailable: '+$rateError
-            (C 'ovLiveNetworkRates').Text='Download: unavailable  ·  Upload: unavailable'
+            (OvC 'ovNetworkRateDetail').Text='Throughput sensor unavailable: '+$rateError
+            (OvC 'ovLiveNetworkRates').Text='Download: unavailable  ·  Upload: unavailable'
         }else{
-            (C 'ovNetworkRateDetail').Text='Waiting for two valid network counter samples'
-            (C 'ovLiveNetworkRates').Text='Download: N/A  ·  Upload: N/A (sampling)'
+            (OvC 'ovNetworkRateDetail').Text='Waiting for two valid network counter samples'
+            (OvC 'ovLiveNetworkRates').Text='Download: N/A  ·  Upload: N/A (sampling)'
         }
     }
     $status=if($Snapshot.PSObject.Properties['NetworkStatus']){[string]$Snapshot.NetworkStatus}else{'Sensor unavailable'}
-    (C 'ovLiveNetworkStatus').Text=$status
-    (C 'ovLiveNetworkAdapter').Text='Adapter: '+[string]$Snapshot.NetworkAdapter
-    (C 'ovLiveNetworkIP').Text='IPv4: '+[string]$Snapshot.IPv4
-    (C 'ovLiveNetworkGateway').Text='Gateway: '+[string]$Snapshot.Gateway
-    (C 'ovLiveActivityStatus').Text=('Last sample: {0}' -f $now.ToString('HH:mm:ss'))
-    if($null -ne $Snapshot.Processes){(C 'ovProcesses').Text=('Running processes: {0:N0}' -f $Snapshot.Processes)}else{(C 'ovProcesses').Text='Running processes: unavailable'}
-    if($null -ne $Snapshot.ProcessThreads){(C 'ovLiveThreads').Text=('Threads: {0:N0}' -f $Snapshot.ProcessThreads)}else{(C 'ovLiveThreads').Text='Threads: unavailable'}
+    (OvC 'ovLiveNetworkStatus').Text=$status
+    (OvC 'ovLiveNetworkAdapter').Text='Adapter: '+[string]$Snapshot.NetworkAdapter
+    (OvC 'ovLiveNetworkIP').Text='IPv4: '+[string]$Snapshot.IPv4
+    (OvC 'ovLiveNetworkGateway').Text='Gateway: '+[string]$Snapshot.Gateway
+    (OvC 'ovLiveActivityStatus').Text=('Last sample: {0}' -f $now.ToString('HH:mm:ss'))
+    if($null -ne $Snapshot.Processes){(OvC 'ovProcesses').Text=('Running processes: {0:N0}' -f $Snapshot.Processes)}else{(OvC 'ovProcesses').Text='Running processes: unavailable'}
+    if($null -ne $Snapshot.ProcessThreads){(OvC 'ovLiveThreads').Text=('Threads: {0:N0}' -f $Snapshot.ProcessThreads)}else{(OvC 'ovLiveThreads').Text='Threads: unavailable'}
 }
 
 function Apply-AMROverviewSnapshot {
@@ -12038,104 +12794,106 @@ function Apply-AMROverviewSnapshot {
     else{$Snapshot.CPUPercent=$cpuPercent}
     $memoryPercent = $Snapshot.MemoryPercent
     if ($null -ne $cpuPercent) {
-        (C 'ovCPUUsageValue').Text = ('{0:N1}%' -f [double]$cpuPercent)
-        (C 'ovCPUUsageDetail').Text = ('Live CPU load  •  {0} logical processors' -f $Snapshot.Threads)
-        (C 'ovCPULoad').Text = ('Current load: {0:N1}%' -f [double]$cpuPercent)
+        (OvC 'ovCPUUsageValue').Text = ('{0:N1}%' -f [double]$cpuPercent)
+        (OvC 'ovCPUUsageDetail').Text = ('Live CPU load  •  {0} logical processors' -f $Snapshot.Threads)
+        (OvC 'ovCPULoad').Text = ('Current load: {0:N1}%' -f [double]$cpuPercent)
         Set-AMROverviewProgress 'ovCPUUsageBar' $cpuPercent
     } else {
-        if($Snapshot.CPUSensorError){(C 'ovCPUUsageValue').Text='N/A';(C 'ovCPUUsageDetail').Text='CPU sensor unavailable: '+[string]$Snapshot.CPUSensorError;(C 'ovCPULoad').Text='CPU usage: unavailable'}
-        else{(C 'ovCPUUsageValue').Text='Sampling…';(C 'ovCPUUsageDetail').Text='Collecting the second real GetSystemTimes sample';(C 'ovCPULoad').Text='CPU usage: sampling'}
-        $cpuBar=C 'ovCPUUsageBar';if($cpuBar){$cpuBar.BeginAnimation([System.Windows.Controls.Primitives.RangeBase]::ValueProperty,$null);$cpuBar.Value=0}
+        if($Snapshot.CPUSensorError){(OvC 'ovCPUUsageValue').Text='N/A';(OvC 'ovCPUUsageDetail').Text='CPU sensor unavailable: '+[string]$Snapshot.CPUSensorError;(OvC 'ovCPULoad').Text='CPU usage: unavailable'}
+        else{(OvC 'ovCPUUsageValue').Text='Sampling…';(OvC 'ovCPUUsageDetail').Text='Collecting the second real GetSystemTimes sample';(OvC 'ovCPULoad').Text='CPU usage: sampling'}
+        $cpuBar=OvC 'ovCPUUsageBar';if($cpuBar){$cpuBar.BeginAnimation([System.Windows.Controls.Primitives.RangeBase]::ValueProperty,$null);$cpuBar.Value=0}
     }
     if ($null -ne $memoryPercent) {
-        (C 'ovMemoryUsageValue').Text = ('{0:N1}%' -f [double]$memoryPercent)
-        (C 'ovMemoryUsageDetail').Text = ('{0:N1} GB used of {1:N1} GB' -f ($Snapshot.UsedMB/1024),($Snapshot.TotalMB/1024))
+        (OvC 'ovMemoryUsageValue').Text = ('{0:N1}%' -f [double]$memoryPercent)
+        (OvC 'ovMemoryUsageDetail').Text = ('{0:N1} GB used of {1:N1} GB' -f ($Snapshot.UsedMB/1024),($Snapshot.TotalMB/1024))
         Set-AMROverviewProgress 'ovMemoryUsageBar' $memoryPercent
-        (C 'ovRAMTotal').Text = ('Installed RAM: {0:N1} GB' -f ($Snapshot.TotalMB/1024))
-        (C 'ovRAMUsage').Text = ''
-        (C 'ovOverviewRAMAvailable').Text = ''
-        (C 'ovRAMAvailable').Text = ('Available RAM: {0:N1} GB' -f ($Snapshot.FreeMB/1024))
+        (OvC 'ovRAMTotal').Text = ('Installed RAM: {0:N1} GB' -f ($Snapshot.TotalMB/1024))
+        (OvC 'ovRAMUsage').Text = ''
+        (OvC 'ovOverviewRAMAvailable').Text = ''
+        (OvC 'ovRAMAvailable').Text = ('Available RAM: {0:N1} GB' -f ($Snapshot.FreeMB/1024))
     } else {
-        (C 'ovMemoryUsageValue').Text = 'N/A'; (C 'ovMemoryUsageDetail').Text = 'Memory data unavailable'; (C 'ovRAMTotal').Text = 'Total RAM: unavailable'; (C 'ovRAMUsage').Text = ''; (C 'ovOverviewRAMAvailable').Text = ''; (C 'ovRAMAvailable').Text = 'Available RAM: unavailable'
-        $memoryBar=C 'ovMemoryUsageBar';if($memoryBar){$memoryBar.BeginAnimation([System.Windows.Controls.Primitives.RangeBase]::ValueProperty,$null);$memoryBar.Value=0}
+        (OvC 'ovMemoryUsageValue').Text = 'N/A'; (OvC 'ovMemoryUsageDetail').Text = 'Memory data unavailable'; (OvC 'ovRAMTotal').Text = 'Total RAM: unavailable'; (OvC 'ovRAMUsage').Text = ''; (OvC 'ovOverviewRAMAvailable').Text = ''; (OvC 'ovRAMAvailable').Text = 'Available RAM: unavailable'
+        $memoryBar=OvC 'ovMemoryUsageBar';if($memoryBar){$memoryBar.BeginAnimation([System.Windows.Controls.Primitives.RangeBase]::ValueProperty,$null);$memoryBar.Value=0}
     }
     $driveC = @($Snapshot.DiskRows | Where-Object { $_.Name -match '^C:' } | Select-Object -First 1)
     if($driveC.Count -gt 0){
         $systemDrive=$driveC[0]
-        (C 'ovSystemDriveStorageDetail').Text=('C: {0:N1} GB free of {1:N1} GB' -f $systemDrive.FreeGB,$systemDrive.TotalGB)
-        (C 'ovSystemDriveStorageValue').Text=('{0:N0}% used' -f $systemDrive.UsedPercent)
+        (OvC 'ovSystemDriveStorageDetail').Text=('C: {0:N1} GB free of {1:N1} GB' -f $systemDrive.FreeGB,$systemDrive.TotalGB)
+        (OvC 'ovSystemDriveStorageValue').Text=('{0:N0}% used' -f $systemDrive.UsedPercent)
         Set-AMROverviewProgress 'ovSystemDriveStorageBar' $systemDrive.UsedPercent
     } else {
-        (C 'ovSystemDriveStorageDetail').Text='C: unavailable'
-        (C 'ovSystemDriveStorageValue').Text='N/A'
-        $storageBar=C 'ovSystemDriveStorageBar';if($storageBar){$storageBar.Value=0}
+        (OvC 'ovSystemDriveStorageDetail').Text='C: unavailable'
+        (OvC 'ovSystemDriveStorageValue').Text='N/A'
+        $storageBar=OvC 'ovSystemDriveStorageBar';if($storageBar){$storageBar.Value=0}
     }
     $networkState=if($Snapshot.PSObject.Properties['NetworkStatus']){[string]$Snapshot.NetworkStatus}elseif($Snapshot.NetworkConnected){'Active interface'}else{'Sensor unavailable'}
-    (C 'ovNetworkStatusValue').Text=$networkState
-    (C 'ovNetworkStatusDetail').Text=if($null -ne $Snapshot.LinkMbps){('{0:N0} Mbps · {1}' -f $Snapshot.LinkMbps,[string]$Snapshot.NetworkAdapter)}elseif($Snapshot.PSObject.Properties['NetworkSensorError']){[string]$Snapshot.NetworkSensorError}else{'Network sensor initializing'}
+    (OvC 'ovNetworkStatusValue').Text=$networkState
+    (OvC 'ovNetworkStatusDetail').Text=if($null -ne $Snapshot.LinkMbps){('{0:N0} Mbps · {1}' -f $Snapshot.LinkMbps,[string]$Snapshot.NetworkAdapter)}elseif($Snapshot.PSObject.Properties['NetworkSensorError']){[string]$Snapshot.NetworkSensorError}else{'Network sensor initializing'}
     # GPU value is merged from its isolated worker; unavailable providers stay explicit.
     $gpuPercent=$null
     if($Snapshot.PSObject.Properties['GPUPercent'] -and $null -ne $Snapshot.GPUPercent){$gpuPercent=[double]$Snapshot.GPUPercent}
     if($null -ne $gpuPercent){
-        (C 'ovGPUUsageValue').Text=('{0:N1}%' -f $gpuPercent)
-        (C 'ovGPUUsageDetail').Text=if($Snapshot.GPUSensorSource){[string]$Snapshot.GPUSensorSource}else{'Windows GPU engine utilization'}
+        (OvC 'ovGPUUsageValue').Text=('{0:N1}%' -f $gpuPercent)
+        (OvC 'ovGPUUsageDetail').Text=if($Snapshot.GPUSensorSource){[string]$Snapshot.GPUSensorSource}else{'Windows GPU engine utilization'}
         Set-AMROverviewProgress 'ovGPUUsageBar' $gpuPercent
     }else{
-        (C 'ovGPUUsageValue').Text='N/A'
-        (C 'ovGPUUsageDetail').Text=if($Snapshot.GPUSensorError){'Unavailable: '+[string]$Snapshot.GPUSensorError}else{'Waiting for GPU engine sample'}
+        (OvC 'ovGPUUsageValue').Text='N/A'
+        (OvC 'ovGPUUsageDetail').Text=if($Snapshot.GPUSensorError){'Unavailable: '+[string]$Snapshot.GPUSensorError}else{'Waiting for GPU engine sample'}
     }
 
     if(-not $FastOnly){
-    (C 'ovOS').Text = [string]$Snapshot.OSName
-    (C 'ovBuild').Text = 'Build: ' + [string]$Snapshot.Build
-    (C 'ovPCName').Text = [string]$Snapshot.PCName
-    (C 'ovArch').Text = [string]$Snapshot.Architecture
-    (C 'ovDeviceType').Text = [string]$Snapshot.DeviceType
-    (C 'ovLastBoot').Text = 'Last boot: ' + [string]$Snapshot.LastBoot
-    (C 'ovCPU').Text = [string]$Snapshot.CPUName
-    (C 'ovThreads').Text = ('Logical processors: {0}' -f $Snapshot.Threads)
+    (OvC 'ovOS').Text = [string]$Snapshot.OSName
+    (OvC 'ovBuild').Text = 'Build: ' + [string]$Snapshot.Build
+    (OvC 'ovPCName').Text = [string]$Snapshot.PCName
+    (OvC 'ovArch').Text = [string]$Snapshot.Architecture
+    (OvC 'ovDeviceType').Text = [string]$Snapshot.DeviceType
+    (OvC 'ovLastBoot').Text = 'Last boot: ' + [string]$Snapshot.LastBoot
+    (OvC 'ovCPU').Text = [string]$Snapshot.CPUName
+    (OvC 'ovThreads').Text = ('Logical processors: {0}' -f $Snapshot.Threads)
     if($Snapshot.InventoryUpdated){
-        (C 'ovGPU').Text = [string]$Snapshot.GPUName
-        (C 'ovOverviewGPUDetails').Text = 'Graphics details: ' + [string]$Snapshot.GPUMemory
-        (C 'ovGPUDetails').Text = 'Graphics details: ' + [string]$Snapshot.GPUMemory
-        (C 'ovOverviewDisplay').Text = 'Active display: ' + [string]$Snapshot.Display
-        (C 'ovDisplay').Text = 'Display: ' + [string]$Snapshot.Display
+        (OvC 'ovGPU').Text = [string]$Snapshot.GPUName
+        (OvC 'ovOverviewGPUDetails').Text = 'Graphics details: ' + [string]$Snapshot.GPUMemory
+        (OvC 'ovGPUDetails').Text = 'Graphics details: ' + [string]$Snapshot.GPUMemory
+        (OvC 'ovOverviewDisplay').Text = 'Active display: ' + [string]$Snapshot.Display
+        (OvC 'ovDisplay').Text = 'Display: ' + [string]$Snapshot.Display
     }
-    (C 'ovMobo').Text = [string]$Snapshot.Board
-    (C 'ovBIOS').Text = 'BIOS: ' + [string]$Snapshot.BIOS
-    (C 'ovBIOSDate').Text = 'BIOS date: ' + [string]$Snapshot.BIOSDate
-    (C 'ovProcesses').Text = if($null -ne $Snapshot.Processes -and $null -ne $Snapshot.ProcessThreads){'Running processes: {0:N0}  •  Threads: {1:N0}' -f $Snapshot.Processes,$Snapshot.ProcessThreads}elseif($null -ne $Snapshot.Processes){'Running processes: {0:N0}' -f $Snapshot.Processes}else{'Running processes: unavailable'}
-    $batteryCard = C 'ovBatteryCard'
+    (OvC 'ovMobo').Text = [string]$Snapshot.Board
+    (OvC 'ovBIOS').Text = 'BIOS: ' + [string]$Snapshot.BIOS
+    (OvC 'ovBIOSDate').Text = 'BIOS date: ' + [string]$Snapshot.BIOSDate
+    (OvC 'ovProcesses').Text = if($null -ne $Snapshot.Processes -and $null -ne $Snapshot.ProcessThreads){'Running processes: {0:N0}  •  Threads: {1:N0}' -f $Snapshot.Processes,$Snapshot.ProcessThreads}elseif($null -ne $Snapshot.Processes){'Running processes: {0:N0}' -f $Snapshot.Processes}else{'Running processes: unavailable'}
+    $batteryCard = OvC 'ovBatteryCard'
     if ($batteryCard) {
         $batteryCard.Visibility = if ($Snapshot.HasBattery) { [System.Windows.Visibility]::Visible } else { [System.Windows.Visibility]::Collapsed }
-        if ($Snapshot.HasBattery) { (C 'ovBatteryStatus').Text = 'Battery: ' + [string]$Snapshot.Battery; (C 'ovBatteryHealth').Text = 'Battery health: ' + [string]$Snapshot.BatteryHealth; (C 'ovBatteryCapacity').Text = [string]$Snapshot.BatteryCapacity }
+        if ($Snapshot.HasBattery) { (OvC 'ovBatteryStatus').Text = 'Battery: ' + [string]$Snapshot.Battery; (OvC 'ovBatteryHealth').Text = 'Battery health: ' + [string]$Snapshot.BatteryHealth; (OvC 'ovBatteryCapacity').Text = [string]$Snapshot.BatteryCapacity }
     }
     }
     try {
         $otherDriveRows=@($Snapshot.DiskRows | Where-Object { $_.Name -match '^[A-Z]:' } | Sort-Object Name)
         $diskSignature=(@($otherDriveRows | ForEach-Object {'{0}:{1}:{2}' -f $_.Name,$_.UsedPercent,$_.FreeGB}) -join '|')
         if($diskSignature -ne $script:OverviewTelemetryState.DiskSignature){
-            (C 'ovDisks').ItemsSource=$otherDriveRows
-            $emptyDriveHint=C 'ovDisksEmpty';if($emptyDriveHint){$emptyDriveHint.Visibility=if($otherDriveRows.Count -gt 0){[System.Windows.Visibility]::Collapsed}else{[System.Windows.Visibility]::Visible}}
+            (OvC 'ovDisks').ItemsSource=$otherDriveRows
+            $emptyDriveHint=OvC 'ovDisksEmpty';if($emptyDriveHint){$emptyDriveHint.Visibility=if($otherDriveRows.Count -gt 0){[System.Windows.Visibility]::Collapsed}else{[System.Windows.Visibility]::Visible}}
             $script:OverviewTelemetryState.DiskSignature=$diskSignature
         }
     } catch { Write-AMRLog ('LIVE_SENSOR [DiskUI] update failed: '+$_.Exception.Message) WARNING Overview }
-    (C 'ovOverviewUptime').Text = 'System uptime: ' + [string]$Snapshot.Uptime
-    (C 'ovUptime').Text = 'System uptime: ' + [string]$Snapshot.Uptime
-    (C 'ovOverviewProcesses').Text = if($null -ne $Snapshot.Processes -and $null -ne $Snapshot.ProcessThreads){'Processes: {0:N0}  •  Threads: {1:N0}' -f $Snapshot.Processes,$Snapshot.ProcessThreads}elseif($null -ne $Snapshot.Processes){'Processes: {0:N0}' -f $Snapshot.Processes}else{'Processes: unavailable'}
+    (OvC 'ovOverviewUptime').Text = 'System uptime: ' + [string]$Snapshot.Uptime
+    (OvC 'ovUptime').Text = 'System uptime: ' + [string]$Snapshot.Uptime
+    (OvC 'ovOverviewProcesses').Text = if($null -ne $Snapshot.Processes -and $null -ne $Snapshot.ProcessThreads){'Processes: {0:N0}  •  Threads: {1:N0}' -f $Snapshot.Processes,$Snapshot.ProcessThreads}elseif($null -ne $Snapshot.Processes){'Processes: {0:N0}' -f $Snapshot.Processes}else{'Processes: unavailable'}
     $sampleStamp=(Get-Date).ToString('HH:mm:ss')
-    (C 'ovLastRefresh').Text = ''
-    $liveRefreshStatus=C 'ovLiveRefreshStatus';if($liveRefreshStatus){$liveRefreshStatus.Text='Last sample: '+$sampleStamp}
+    (OvC 'ovLastRefresh').Text = ''
+    $liveRefreshStatus=OvC 'ovLiveRefreshStatus';if($liveRefreshStatus){$liveRefreshStatus.Text='Last sample: '+$sampleStamp}
     $shouldLogSensors=$false
     if($Snapshot.PSObject.Properties['NetworkStatus']){
+        $perfHist = Get-AMRPerfNow
         Update-AMROverviewHistory -Snapshot $Snapshot
+        Add-AMRPerfSince 'ov.apply.history' $perfHist
         if($script:OverviewTelemetryState.History.Count -gt 0){
             $latestOverviewSample=$script:OverviewTelemetryState.History[$script:OverviewTelemetryState.History.Count-1]
             if($null -ne $latestOverviewSample.Download -and $null -ne $latestOverviewSample.Upload){
-                (C 'ovNetworkStatusDetail').Text=('↓ {0:N2} MB/s  ↑ {1:N2} MB/s' -f $latestOverviewSample.Download,$latestOverviewSample.Upload)
+                (OvC 'ovNetworkStatusDetail').Text=('↓ {0:N2} MB/s  ↑ {1:N2} MB/s' -f $latestOverviewSample.Download,$latestOverviewSample.Upload)
             }
         }
-        if($null -eq $Snapshot.CPUPercent){$cpuGaugeValue=C 'ovLiveCPUValue';if($cpuGaugeValue){$cpuGaugeValue.Text=if($Snapshot.CPUSensorError){'N/A'}else{'Sampling…'}}}
+        if($null -eq $Snapshot.CPUPercent){$cpuGaugeValue=OvC 'ovLiveCPUValue';if($cpuGaugeValue){$cpuGaugeValue.Text=if($Snapshot.CPUSensorError){'N/A'}else{'Sampling…'}}}
         $nowForLog=Get-Date
         $shouldLogSensors=(($nowForLog-$script:OverviewTelemetryState.LastSensorLog).TotalSeconds -ge 30)
         if($shouldLogSensors){
@@ -12283,25 +13041,25 @@ public static class AMROverviewNativeMemory {
 function Apply-AMROverviewInventorySnapshot {
     param([Parameter(Mandatory=$true)][object]$Snapshot)
     try {
-        (C 'ovOS').Text=[string]$Snapshot.OSName
-        (C 'ovBuild').Text='Build: '+[string]$Snapshot.Build
-        (C 'ovPCName').Text=[string]$Snapshot.PCName
+        (OvC 'ovOS').Text=[string]$Snapshot.OSName
+        (OvC 'ovBuild').Text='Build: '+[string]$Snapshot.Build
+        (OvC 'ovPCName').Text=[string]$Snapshot.PCName
         $deviceModelText=('{0} {1}' -f [string]$Snapshot.Manufacturer,[string]$Snapshot.Model).Trim()
         if([string]::IsNullOrWhiteSpace($deviceModelText)){$deviceModelText='Model not reported by firmware'}
-        (C 'ovDeviceModel').Text='Model: '+$deviceModelText
-        (C 'ovArch').Text=[string]$Snapshot.Architecture
-        (C 'ovDeviceType').Text=[string]$Snapshot.DeviceType
-        (C 'ovLastBoot').Text='Last boot: '+[string]$Snapshot.LastBoot
-        (C 'ovCPU').Text=[string]$Snapshot.CPUName
-        (C 'ovThreads').Text='Logical processors: '+[string]$Snapshot.Threads
-        (C 'ovMobo').Text=[string]$Snapshot.Board
-        (C 'ovBIOS').Text='BIOS: '+[string]$Snapshot.BIOS
-        (C 'ovBIOSDate').Text='BIOS date: '+[string]$Snapshot.BIOSDate
-        (C 'ovGPU').Text=[string]$Snapshot.GPUName
-        (C 'ovOverviewGPUDetails').Text='Graphics details: '+[string]$Snapshot.GPUMemory
-        (C 'ovGPUDetails').Text='Graphics details: '+[string]$Snapshot.GPUMemory
-        (C 'ovOverviewDisplay').Text='Active display: '+[string]$Snapshot.Display
-        (C 'ovDisplay').Text='Display: '+[string]$Snapshot.Display
+        (OvC 'ovDeviceModel').Text='Model: '+$deviceModelText
+        (OvC 'ovArch').Text=[string]$Snapshot.Architecture
+        (OvC 'ovDeviceType').Text=[string]$Snapshot.DeviceType
+        (OvC 'ovLastBoot').Text='Last boot: '+[string]$Snapshot.LastBoot
+        (OvC 'ovCPU').Text=[string]$Snapshot.CPUName
+        (OvC 'ovThreads').Text='Logical processors: '+[string]$Snapshot.Threads
+        (OvC 'ovMobo').Text=[string]$Snapshot.Board
+        (OvC 'ovBIOS').Text='BIOS: '+[string]$Snapshot.BIOS
+        (OvC 'ovBIOSDate').Text='BIOS date: '+[string]$Snapshot.BIOSDate
+        (OvC 'ovGPU').Text=[string]$Snapshot.GPUName
+        (OvC 'ovOverviewGPUDetails').Text='Graphics details: '+[string]$Snapshot.GPUMemory
+        (OvC 'ovGPUDetails').Text='Graphics details: '+[string]$Snapshot.GPUMemory
+        (OvC 'ovOverviewDisplay').Text='Active display: '+[string]$Snapshot.Display
+        (OvC 'ovDisplay').Text='Display: '+[string]$Snapshot.Display
         Write-AMRLog 'LIVE_SENSOR [Inventory] source=Windows registry/PnP/Security providers status=success' INFO Overview
     } catch { Write-AMRLog ('LIVE_SENSOR [Inventory] status=partial error='+$_.Exception.Message) WARNING Overview }
 }
@@ -12879,6 +13637,43 @@ Enable-AMRRefreshButtonPressFeedback -Button (C 'RefreshOverviewBtn')
 Enable-AMRRefreshButtonPressFeedback -Button (C 'RefreshLivePerformanceBtn')
 Enable-AMRRefreshButtonPressFeedback -Button (C 'AMRStartupRefreshBtn')
 
+# Startup Refresh hover: gentle lift, tiny grow and a quarter-turn of the arrow, 220 ms in and out. Transforms only, no new effects.
+function Enable-AMRStartupRefreshHover {
+    param([Parameter(Mandatory=$true)]$Button)
+    $hoverMs=220
+    $Button.Add_MouseEnter({
+        try {
+            $group=$Button.RenderTransform
+            $ease=[System.Windows.Media.Animation.CubicEase]::new();$ease.EasingMode=[System.Windows.Media.Animation.EasingMode]::EaseOut
+            $snap=[System.Windows.Media.Animation.HandoffBehavior]::SnapshotAndReplace
+            $lift=[System.Windows.Media.Animation.DoubleAnimation]::new(-1.5,[TimeSpan]::FromMilliseconds($hoverMs));$lift.EasingFunction=$ease
+            $group.Children[0].BeginAnimation([System.Windows.Media.TranslateTransform]::YProperty,$lift,$snap)
+            $grow=[System.Windows.Media.Animation.DoubleAnimation]::new(1.04,[TimeSpan]::FromMilliseconds($hoverMs));$grow.EasingFunction=$ease
+            $group.Children[2].BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleXProperty,$grow,$snap)
+            $group.Children[2].BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleYProperty,$grow,$snap)
+            $glyph=$Button.Content.Children[0]
+            $turn=[System.Windows.Media.Animation.DoubleAnimation]::new(0,90,[TimeSpan]::FromMilliseconds($hoverMs));$turn.EasingFunction=$ease
+            $glyph.RenderTransform.BeginAnimation([System.Windows.Media.RotateTransform]::AngleProperty,$turn,$snap)
+        } catch {}
+    }.GetNewClosure())
+    $Button.Add_MouseLeave({
+        try {
+            $group=$Button.RenderTransform
+            $ease=[System.Windows.Media.Animation.CubicEase]::new();$ease.EasingMode=[System.Windows.Media.Animation.EasingMode]::EaseOut
+            $snap=[System.Windows.Media.Animation.HandoffBehavior]::SnapshotAndReplace
+            $lift=[System.Windows.Media.Animation.DoubleAnimation]::new(0,[TimeSpan]::FromMilliseconds($hoverMs));$lift.EasingFunction=$ease
+            $group.Children[0].BeginAnimation([System.Windows.Media.TranslateTransform]::YProperty,$lift,$snap)
+            $grow=[System.Windows.Media.Animation.DoubleAnimation]::new(1.0,[TimeSpan]::FromMilliseconds($hoverMs));$grow.EasingFunction=$ease
+            $group.Children[2].BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleXProperty,$grow,$snap)
+            $group.Children[2].BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleYProperty,$grow,$snap)
+            $glyph=$Button.Content.Children[0]
+            $turn=[System.Windows.Media.Animation.DoubleAnimation]::new(0,[TimeSpan]::FromMilliseconds($hoverMs));$turn.EasingFunction=$ease
+            $glyph.RenderTransform.BeginAnimation([System.Windows.Media.RotateTransform]::AngleProperty,$turn,$snap)
+        } catch {}
+    }.GetNewClosure())
+}
+try { Enable-AMRStartupRefreshHover -Button (C 'AMRStartupRefreshBtn') } catch { try { Write-AMRLog ('Startup refresh hover skipped: ' + $_.Exception.Message) WARNING System } catch {} }
+
 (C 'RefreshOverviewBtn').Add_Click({ Start-AMRRefreshButtonAnimation -Button (C 'RefreshOverviewBtn'); Start-AMROverviewTelemetry -Force })
 (C 'RefreshLivePerformanceBtn').Add_Click({ Start-AMRRefreshButtonAnimation -Button (C 'RefreshLivePerformanceBtn'); Start-AMROverviewTelemetry -Force; $liveStatus=C 'ovLiveRefreshStatus'; if($liveStatus){$liveStatus.Text='Refresh requested…'} })
 
@@ -13168,7 +13963,7 @@ function Update-AMRDriverRestorePointStatusCore {
             $reason = [string]$_.Exception.Message
             (C 'DriverRestorePointStatus').Text = ('Saved checkpoint #{0} · inventory check unavailable: {1}' -f $savedState.SequenceNumber,$reason)
         } else {
-            (C 'DriverRestorePointStatus').Text = 'No verified driver restore point is recorded. Use Create Restore Point whenever you want to save a recovery point.'
+            (C 'DriverRestorePointStatus').Text = 'No verified driver restore point is recorded. Use Smart Create whenever you want to save a recovery point.'
         }
         (C 'DriverSmartRestoreBtn').IsEnabled = $true
     }
@@ -13369,13 +14164,13 @@ function Complete-AMRDriverRestorePointWorker {
                 Write-AMRLog ('AMR driver restore point creation failed: '+[string]$_.Exception.Message) ERROR Overview
             } finally {
                 $script:DriverRestorePointStartedAt=$null
-                $button.Content='＋  Create Restore Point';$button.IsEnabled=$true
+                $button.Content='＋  Smart Create';$button.IsEnabled=$true
                 if($cancelButton){$cancelButton.Visibility='Collapsed';$cancelButton.IsEnabled=$false}
             }
         }).GetNewClosure())
         $script:DriverManagedTimer=$poll;$poll.Start()
     } catch {
-        $button.Content='＋  Create Restore Point';$button.IsEnabled=$true
+        $button.Content='＋  Smart Create';$button.IsEnabled=$true
         if($progressBar){$progressBar.IsIndeterminate=$false;$progressBar.Value=0}
         if($percentText){$percentText.Text='—'}
         if($progressText){$progressText.Text=('Could not start — '+[string]$_.Exception.Message)}
@@ -13401,7 +14196,7 @@ function Complete-AMRDriverRestorePointWorker {
         try { Release-AMRDriverOperationLock } catch {}
         try { Update-AMRDriverActionButtons } catch {}
     }
-    $button=C 'DriverCreateRestorePointBtn';if($button){$button.Content='＋  Create Restore Point';$button.IsEnabled=$true}
+    $button=C 'DriverCreateRestorePointBtn';if($button){$button.Content='＋  Smart Create';$button.IsEnabled=$true}
     $progressBar=C 'DriverRestorePointProgressBar';if($progressBar){$progressBar.IsIndeterminate=$false;$progressBar.Value=0}
     $percentText=C 'DriverRestorePointPercent';if($percentText){$percentText.Text='Cancelled'}
     $progressText=C 'DriverRestorePointProgressText';if($progressText){$progressText.Text='AMR worker cancelled. Windows may still finish a request already accepted; check System Protection before retrying.'}
@@ -13411,7 +14206,432 @@ function Complete-AMRDriverRestorePointWorker {
     $script:DriverRestorePointStartedAt=$null
     Update-AMRDriverRestorePointStatus
 })
+# --- Recovery Center: floating restore-point window (view only; never starts a restore) ---
+$script:AMRRecoveryPointWindow = $null
+$script:AMRRestoreAssist = $null
+
+function Get-AMRRecoveryPointInfo {
+    $info = [ordered]@{ Found=$false; Name=''; Sequence=''; When=''; Origin=''; Problem='' }
+    try {
+        $record = Get-AMRRecordedDriverRestorePoint -InventoryTimeoutSec 8
+        $info.Found = $true
+        $info.Name = [string]$record.Point.Description
+        $info.Sequence = [string]$record.Point.SequenceNumber
+        $created = $null
+        try { $created = [datetime]$record.State.CreationTime } catch {}
+        if ($created -is [datetime]) { $info.When = ($created.ToString('d',[System.Globalization.CultureInfo]::CurrentCulture) + '  ' + $created.ToString('t',[System.Globalization.CultureInfo]::CurrentCulture)) }
+        $info.Origin = $(if ([bool]$record.State.IsReusedExisting) { 'EXISTING WINDOWS POINT (REUSED BY AMR)' } else { 'AMR DRIVER SAFETY POINT' })
+        return [pscustomobject]$info
+    } catch { $info.Problem = [string]$_.Exception.Message }
+    # Receipt missing or not verifiable: show the newest AMR-named Windows point, for display only.
+    try {
+        $named = @(Get-AMRComputerRestorePoints -TimeoutSec 8 | Where-Object { [string]$_.Description -match '^Driver Safety - AMR-[A-Fa-f0-9]{8} - \d{8}-\d{6}$' })
+        if ($named.Count -gt 0) {
+            $newest = @($named | Sort-Object { [long]$_.SequenceNumber } -Descending)[0]
+            $info.Found = $true
+            $info.Name = [string]$newest.Description
+            $info.Sequence = [string]$newest.SequenceNumber
+            $when = ConvertFrom-AMRRestorePointTime $newest.CreationTime
+            if ($when -is [datetime]) { $info.When = ($when.ToString('d',[System.Globalization.CultureInfo]::CurrentCulture) + '  ' + $when.ToString('t',[System.Globalization.CultureInfo]::CurrentCulture)) }
+            $info.Origin = 'NEWEST AMR POINT FOUND IN WINDOWS'
+        }
+    } catch { if ([string]::IsNullOrWhiteSpace($info.Problem)) { $info.Problem = [string]$_.Exception.Message } }
+    return [pscustomobject]$info
+}
+
+# Background helper for the Windows System Restore window. Navigation only: it can select the
+# second restore option, tick "show more points" and select ONE matching list row. It never
+# invokes any button (no Next, no Finish) and never starts a restore. Any failure ends it quietly.
+$script:AMRRestoreAssistScript = @'
+param([string]$Description,[int]$TimeoutSec,$State)
+try {
+    Add-Type -AssemblyName UIAutomationClient
+    Add-Type -AssemblyName UIAutomationTypes
+} catch { $State.Stage = 'unavailable'; return }
+$AE = [System.Windows.Automation.AutomationElement]
+$CT = [System.Windows.Automation.ControlType]
+$TS = [System.Windows.Automation.TreeScope]
+$deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSec)
+$seenWindow = $false; $radioDone = $false; $nextDone = $false; $radioAt = [DateTime]::UtcNow; $nextAt = [DateTime]::UtcNow; $moreDone = $false; $zeroScans = 0
+while ([DateTime]::UtcNow -lt $deadline -and -not $State.Cancel) {
+    try {
+        $win = $null
+        foreach ($proc in @(Get-Process -Name rstrui -ErrorAction SilentlyContinue)) {
+            $cond = New-Object System.Windows.Automation.PropertyCondition($AE::ProcessIdProperty,[int]$proc.Id)
+            $win = $AE::RootElement.FindFirst($TS::Children,$cond)
+            if ($win) { break }
+        }
+        if (-not $win) { if ($seenWindow) { break } else { Start-Sleep -Milliseconds 400; continue } }
+        $seenWindow = $true
+        $listCond = New-Object System.Windows.Automation.PropertyCondition($AE::ControlTypeProperty,$CT::ListItem)
+        $items = $win.FindAll($TS::Descendants,$listCond)
+        if ($items.Count -gt 0) {
+            $rowMatches = New-Object System.Collections.ArrayList
+            foreach ($item in $items) {
+                $texts = New-Object System.Collections.ArrayList
+                [void]$texts.Add([string]$item.Current.Name)
+                foreach ($part in $item.FindAll($TS::Descendants,[System.Windows.Automation.Condition]::TrueCondition)) { [void]$texts.Add([string]$part.Current.Name) }
+                foreach ($text in $texts) {
+                    if (-not [string]::IsNullOrWhiteSpace($text) -and $text.IndexOf($Description,[System.StringComparison]::OrdinalIgnoreCase) -ge 0) { [void]$rowMatches.Add($item); break }
+                }
+            }
+            if ($rowMatches.Count -eq 1) {
+                $pattern = $null
+                if ($rowMatches[0].TryGetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern,[ref]$pattern)) {
+                    $pattern.Select()
+                    Start-Sleep -Milliseconds 150
+                    if ($pattern.Current.IsSelected) { $State.Stage = 'row-selected'; break }
+                }
+                $State.Stage = 'row-not-found'; break
+            }
+            if ($rowMatches.Count -gt 1) { $State.Stage = 'row-not-found'; break }
+            # No match yet: older points are hidden until the single "show more" check box is ticked.
+            if (-not $moreDone) {
+                $moreDone = $true
+                $boxCond = New-Object System.Windows.Automation.PropertyCondition($AE::ControlTypeProperty,$CT::CheckBox)
+                $boxes = $win.FindAll($TS::Descendants,$boxCond)
+                if ($boxes.Count -eq 1) {
+                    $toggle = $null
+                    if ($boxes[0].TryGetCurrentPattern([System.Windows.Automation.TogglePattern]::Pattern,[ref]$toggle)) {
+                        if ($toggle.Current.ToggleState -eq [System.Windows.Automation.ToggleState]::Off) { $toggle.Toggle() }
+                    }
+                }
+                Start-Sleep -Milliseconds 600; continue
+            }
+            $zeroScans++
+            if ($zeroScans -ge 3) { $State.Stage = 'row-not-found'; break }
+        } elseif (-not $radioDone) {
+            $radioCond = New-Object System.Windows.Automation.PropertyCondition($AE::ControlTypeProperty,$CT::RadioButton)
+            $radios = $win.FindAll($TS::Descendants,$radioCond)
+            if ($radios.Count -eq 2) {
+                $radioDone = $true
+                $pattern = $null
+                if ($radios[1].TryGetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern,[ref]$pattern)) {
+                    if (-not $pattern.Current.IsSelected) { $pattern.Select() }
+                    $State.Stage = 'radio-selected'
+                    $radioAt = [DateTime]::UtcNow
+                } else { $State.Detail = 'second radio option has no selection pattern' }
+            } elseif ($radios.Count -gt 0) { $State.Detail = 'page 1 shows ' + $radios.Count + ' radio option(s), expected 2' }
+        } elseif (-not $nextDone -and ([DateTime]::UtcNow - $radioAt).TotalMilliseconds -ge 700) {
+            # Page 1 only (two radio options, no list yet, second option selected): press the wizard's default button, which is Next here.
+            # Finish is never pressed: this branch needs the two-radio page, and the confirm page has no radios.
+            $nextDone = $true
+            $radioCond2 = New-Object System.Windows.Automation.PropertyCondition($AE::ControlTypeProperty,$CT::RadioButton)
+            $radios2 = $win.FindAll($TS::Descendants,$radioCond2)
+            $secondSelected = $false
+            if ($radios2.Count -eq 2) {
+                $selPattern = $null
+                if ($radios2[1].TryGetCurrentPattern([System.Windows.Automation.SelectionItemPattern]::Pattern,[ref]$selPattern)) { $secondSelected = [bool]$selPattern.Current.IsSelected }
+            }
+            if ($secondSelected) {
+                $btnCond = New-Object System.Windows.Automation.PropertyCondition($AE::ControlTypeProperty,$CT::Button)
+                $enabledBtns = New-Object System.Collections.ArrayList
+                $btnDesc = New-Object System.Collections.ArrayList
+                foreach ($btn in $win.FindAll($TS::Descendants,$btnCond)) {
+                    if (-not $btn.Current.IsEnabled) { continue }
+                    $isDefault = $false
+                    $legacy = $null
+                    if ($btn.TryGetCurrentPattern([System.Windows.Automation.LegacyIAccessiblePattern]::Pattern,[ref]$legacy)) {
+                        if (([int]$legacy.Current.State -band 0x00400000) -ne 0) { $isDefault = $true }
+                    }
+                    [void]$enabledBtns.Add([pscustomobject]@{ El = $btn; Id = [string]$btn.Current.AutomationId; Name = [string]$btn.Current.Name; Default = $isDefault })
+                    [void]$btnDesc.Add(('{0}|id={1}|default={2}' -f $btn.Current.Name,$btn.Current.AutomationId,$isDefault))
+                }
+                $State.Detail = 'enabled buttons on page 1: ' + ($btnDesc -join '; ')
+                # Fallbacks in order, page 1 only. Finish is never chosen: this page has Next and Cancel only.
+                $pick = $null; $method = ''
+                $found = @($enabledBtns | Where-Object { $_.Default })
+                if ($found.Count -eq 1) { $pick = $found[0]; $method = 'default-flag' }
+                if (-not $pick) { $found = @($enabledBtns | Where-Object { $_.Id -eq '12324' }); if ($found.Count -eq 1) { $pick = $found[0]; $method = 'wizard-id-12324' } }
+                if (-not $pick) { $found = @($enabledBtns | Where-Object { $_.Name -match '^\s*&?Next' }); if ($found.Count -eq 1) { $pick = $found[0]; $method = 'name-next' } }
+                if (-not $pick) { $found = @($enabledBtns | Where-Object { $_.Id -ne '2' -and $_.Name -notmatch '(?i)cancel|help|back|close|finish' }); if ($found.Count -eq 1) { $pick = $found[0]; $method = 'not-cancel' } }
+                $pressed = $false
+                if ($pick) {
+                    $invoke = $null
+                    if ($pick.El.TryGetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern,[ref]$invoke)) {
+                        try { $invoke.Invoke(); $pressed = $true } catch {}
+                    }
+                }
+                if (-not $pressed) {
+                    # Last resort: Enter presses the wizard's default button. Only sent when the Windows System Restore window really has the focus.
+                    try {
+                        Add-Type -AssemblyName System.Windows.Forms
+                        $win.SetFocus()
+                        Start-Sleep -Milliseconds 250
+                        $focused = $AE::FocusedElement
+                        if ($focused -and [int]$focused.Current.ProcessId -eq [int]$win.Current.ProcessId) {
+                            [System.Windows.Forms.SendKeys]::SendWait('{ENTER}')
+                            $pressed = $true; $method = 'enter-key'
+                        }
+                    } catch {}
+                }
+                if ($pressed) { $State.Method = $method; $State.Stage = 'next-pressed'; $nextAt = [DateTime]::UtcNow }
+                else { $State.Stage = 'next-manual' }
+            }
+        } elseif ($nextDone -and $State.Stage -eq 'next-pressed' -and ([DateTime]::UtcNow - $nextAt).TotalSeconds -ge 8) {
+            $State.Stage = 'next-manual'
+        }
+    } catch {}
+    Start-Sleep -Milliseconds 500
+}
+if ($State.Stage -eq 'row-selected') {
+    # The AMR floating window closes itself now; hand the focus back to the Windows System Restore window so nothing covers it.
+    try {
+        $closeDeadline = [DateTime]::UtcNow.AddSeconds(4)
+        while ([DateTime]::UtcNow -lt $closeDeadline -and -not $State.Closed) { Start-Sleep -Milliseconds 100 }
+        Start-Sleep -Milliseconds 150
+        foreach ($proc in @(Get-Process -Name rstrui -ErrorAction SilentlyContinue)) {
+            $cond = New-Object System.Windows.Automation.PropertyCondition($AE::ProcessIdProperty,[int]$proc.Id)
+            $win = $AE::RootElement.FindFirst($TS::Children,$cond)
+            if ($win) { $win.SetFocus(); break }
+        }
+    } catch {}
+}
+if ($State.Stage -eq 'radio-selected' -or $State.Stage -eq 'next-pressed' -or $State.Stage -eq 'next-manual' -or $State.Stage -eq '') { $State.Stage = 'ended-' + $State.Stage }
+'@
+
+function Start-AMRRestoreWindowAssist {
+    param([string]$Description)
+    if ([string]::IsNullOrWhiteSpace($Description)) { return }
+    if ($script:AMRRestoreAssist -and $script:AMRRestoreAssist.State) { try { $script:AMRRestoreAssist.State.Cancel = $true } catch {} }
+    $assistState = [hashtable]::Synchronized(@{ Stage = ''; Cancel = $false; Closed = $false; Detail = ''; Method = '' })
+    $assistShell = [powershell]::Create()
+    [void]$assistShell.AddScript($script:AMRRestoreAssistScript).AddArgument($Description).AddArgument(180).AddArgument($assistState)
+    $assistHandle = $assistShell.BeginInvoke()
+    # Closures made inside a function read $script: variables as empty, so keep the window and the log state in locals.
+    $assistWindow = $script:AMRRecoveryPointWindow
+    $assistLog = @{ Last = ''; Detail = '' }
+    try {
+        $assistAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+        Write-AMRLog ('Recovery helper started (AMR elevated={0}).' -f $assistAdmin) INFO Backup
+    } catch {}
+    $assistTimer = New-Object System.Windows.Threading.DispatcherTimer
+    $assistTimer.Interval = [TimeSpan]::FromMilliseconds(700)
+    $script:AMRRestoreAssist = [pscustomobject]@{ State = $assistState; Shell = $assistShell; Handle = $assistHandle; Timer = $assistTimer }
+    $assistTimer.Add_Tick({
+        try {
+            $stage = [string]$assistState.Stage
+            $note = $null
+            try { if ($assistWindow) { $note = $assistWindow.FindName('RpNote') } } catch {}
+            try {
+                $stageDetail = [string]$assistState.Detail
+                if ($stage -ne $assistLog.Last -or $stageDetail -ne $assistLog.Detail) {
+                    $assistLog.Last = $stage; $assistLog.Detail = $stageDetail
+                    if ($stage -ne '' -or $stageDetail -ne '') { Write-AMRLog ('Recovery helper stage: {0}; method={1}; {2}' -f $stage,[string]$assistState.Method,$stageDetail) INFO Backup }
+                }
+            } catch {}
+            if ($note) {
+                switch -Wildcard ($stage) {
+                    'radio-selected' { $note.Text = 'Windows is open. The second option is selected for you.'; $note.Visibility = 'Visible' }
+                    'next-pressed'   { $note.Text = 'Windows is moving to the list. Your restore point will be selected for you.'; $note.Visibility = 'Visible' }
+                    'next-manual'    { $note.Text = 'The second option is selected for you. Click Next and your point will be selected in the list.'; $note.Visibility = 'Visible' }
+                    'row-selected'   { $note.Text = 'Your restore point is selected in the Windows list. Check that the name and time match, then continue in Windows.'; $note.Visibility = 'Visible' }
+                    'row-not-found'  { $note.Text = 'Could not mark the point automatically. Choose the one that matches the name and time shown above.'; $note.Visibility = 'Visible' }
+                    'ended-*'        { $note.Text = 'The point was not marked automatically. Choose the one that matches the name and time shown above.'; $note.Visibility = 'Visible' }
+                }
+            }
+            # Job done (point selected in the Windows list): the floating window removes itself. Every other outcome keeps it open as the fallback.
+            if ($stage -eq 'row-selected' -and $assistWindow) {
+                $doneWindow = $assistWindow
+                try { $doneWindow.Topmost = $false } catch {}
+                try { $assistState.Closed = $true } catch {}
+                try { $doneWindow.Close() } catch {}
+            }
+            if ($assistHandle.IsCompleted) {
+                $assistTimer.Stop()
+                try { $assistShell.EndInvoke($assistHandle) | Out-Null } catch {}
+                try { $assistShell.Dispose() } catch {}
+            }
+        } catch {}
+    }.GetNewClosure())
+    $assistTimer.Start()
+}
+
+function Update-AMRRecoveryPointWindowInfo {
+    $window = $script:AMRRecoveryPointWindow
+    if (-not $window) { return }
+    $info = Get-AMRRecoveryPointInfo
+    $window = $script:AMRRecoveryPointWindow
+    if (-not $window) { return }
+    $nameBlock = $window.FindName('RpName'); $whenBlock = $window.FindName('RpWhen'); $badge = $window.FindName('RpBadge'); $note = $window.FindName('RpNote'); $copyButton = $window.FindName('RpCopy')
+    if ($info.Found) {
+        $nameBlock.Text = [string]$info.Name
+        $whenBlock.Text = ('#' + [string]$info.Sequence + $(if ($info.When) { '   |   ' + [string]$info.When } else { '' }))
+        $badge.Text = [string]$info.Origin
+        $copyButton.IsEnabled = $true
+        $window.Tag = [string]$info.Name
+    } else {
+        $nameBlock.Text = 'No AMR restore point found yet'
+        $whenBlock.Text = 'Use Smart Create first. Windows System Restore can still be opened.'
+        $badge.Text = 'NOTHING TO MARK'
+        $copyButton.IsEnabled = $false
+        $window.Tag = ''
+    }
+}
+
+function Show-AMRRecoveryPointWindow {
+    if ($script:AMRRecoveryPointWindow) {
+        try { [void]$script:AMRRecoveryPointWindow.Activate(); return } catch { $script:AMRRecoveryPointWindow = $null }
+    }
+    $windowXamlTemplate = @'
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        WindowStyle="None" ResizeMode="NoResize" ShowInTaskbar="False" Topmost="True" SizeToContent="Height" Width="356"
+        AllowsTransparency="@@TRANSPARENT@@" Background="@@WINBG@@" FontFamily="Segoe UI" WindowStartupLocation="Manual">
+ <Window.Resources>
+  <Style x:Key="RpButton" TargetType="Button">
+   <Setter Property="Cursor" Value="Hand"/><Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+   <Setter Property="Height" Value="32"/><Setter Property="Padding" Value="12,0"/><Setter Property="Margin" Value="0,0,8,0"/>
+   <Setter Property="FontSize" Value="11"/><Setter Property="FontWeight" Value="SemiBold"/>
+   <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="Button">
+    <Border x:Name="Face" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="1" CornerRadius="9" Padding="{TemplateBinding Padding}" RenderTransformOrigin="0.5,0.5">
+     <Border.RenderTransform><ScaleTransform x:Name="FaceScale" ScaleX="1" ScaleY="1"/></Border.RenderTransform>
+     <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" TextElement.Foreground="{TemplateBinding Foreground}"/>
+    </Border>
+    <ControlTemplate.Triggers>
+     <Trigger Property="IsMouseOver" Value="True">
+      <Setter TargetName="Face" Property="BorderBrush" Value="#F0D9A0"/>
+      <Setter TargetName="Face" Property="Effect"><Setter.Value><DropShadowEffect Color="#D8B56D" BlurRadius="12" ShadowDepth="0" Opacity="0.45"/></Setter.Value></Setter>
+      <Trigger.EnterActions><BeginStoryboard x:Name="In"><Storyboard><DoubleAnimation Storyboard.TargetName="FaceScale" Storyboard.TargetProperty="ScaleX" To="1.04" Duration="0:0:0.12"/><DoubleAnimation Storyboard.TargetName="FaceScale" Storyboard.TargetProperty="ScaleY" To="1.04" Duration="0:0:0.12"/></Storyboard></BeginStoryboard></Trigger.EnterActions>
+      <Trigger.ExitActions><RemoveStoryboard BeginStoryboardName="In"/></Trigger.ExitActions>
+     </Trigger>
+     <Trigger Property="IsEnabled" Value="False"><Setter TargetName="Face" Property="Opacity" Value="0.45"/></Trigger>
+    </ControlTemplate.Triggers>
+   </ControlTemplate></Setter.Value></Setter>
+  </Style>
+ </Window.Resources>
+ <Border x:Name="RpRoot" CornerRadius="14" BorderThickness="1" BorderBrush="#88E9D8B5" Margin="@@MARGIN@@" Opacity="0" RenderTransformOrigin="0.5,0.5">
+  <Border.Background><LinearGradientBrush StartPoint="0,0" EndPoint="1,1"><GradientStop Color="@@BG1@@" Offset="0"/><GradientStop Color="@@BG2@@" Offset="1"/></LinearGradientBrush></Border.Background>
+  <Border.RenderTransform><TranslateTransform Y="8"/></Border.RenderTransform>
+  <Border.Triggers><EventTrigger RoutedEvent="FrameworkElement.Loaded"><BeginStoryboard><Storyboard><DoubleAnimation Storyboard.TargetProperty="Opacity" From="0" To="1" Duration="0:0:0.18"/><DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.Y)" From="8" To="0" Duration="0:0:0.18" DecelerationRatio="0.8"/></Storyboard></BeginStoryboard></EventTrigger></Border.Triggers>
+  <Grid>
+   <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+   <Grid x:Name="RpTitleBar" Grid.Row="0" Margin="18,12,10,4" Background="Transparent">
+    <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+    <TextBlock Text="RECOVERY POINT" FontSize="13" FontWeight="Bold" Foreground="#E9D8B5" VerticalAlignment="Center"/>
+    <Button x:Name="RpClose" Grid.Column="1" Content="&#x2715;" Width="28" Height="28" Cursor="Hand" FocusVisualStyle="{x:Null}" Foreground="#CBD5E1" Background="Transparent" BorderThickness="0">
+     <Button.Template><ControlTemplate TargetType="Button">
+      <Border x:Name="CloseFace" CornerRadius="14" Background="#00000000" BorderBrush="#00000000" BorderThickness="1"><ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" TextElement.Foreground="{TemplateBinding Foreground}"/></Border>
+      <ControlTemplate.Triggers>
+       <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="CloseFace" Property="Background" Value="#55E5646B"/><Setter TargetName="CloseFace" Property="BorderBrush" Value="#99E5646B"/></Trigger>
+       <Trigger Property="IsPressed" Value="True"><Setter TargetName="CloseFace" Property="Background" Value="#88B52A38"/></Trigger>
+      </ControlTemplate.Triggers>
+     </ControlTemplate></Button.Template>
+    </Button>
+   </Grid>
+   <StackPanel Grid.Row="1" Margin="18,2,18,6">
+    <TextBlock x:Name="RpBadge" Text="LOOKING FOR YOUR RESTORE POINT" FontSize="10" FontWeight="Bold" Foreground="#D8B56D"/>
+    <TextBlock x:Name="RpName" Text="Finding your restore point..." FontSize="14" FontWeight="Bold" Foreground="#F4EBD3" TextWrapping="Wrap" Margin="0,4,0,0"/>
+    <TextBlock x:Name="RpWhen" Text="" FontSize="12" Foreground="#CFCABF" Margin="0,3,0,0" TextWrapping="Wrap"/>
+    <Border Height="1" Background="#33D8B56D" Margin="0,10,0,10"/>
+    <TextBlock x:Name="RpHint" Text="In the Windows window, choose the restore point with this exact name and time." FontSize="11" Foreground="#B8C2CE" TextWrapping="Wrap"/>
+    <TextBlock x:Name="RpNote" Text="" FontSize="11" Foreground="#E2C68E" TextWrapping="Wrap" Margin="0,8,0,0" Visibility="Collapsed"/>
+   </StackPanel>
+   <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="18,6,18,16">
+    <Button x:Name="RpOpen" Content="Open Windows System Restore" Style="{StaticResource RpButton}" Background="#D93B382F" Foreground="#EDE2C9" BorderBrush="#9C865A"/>
+    <Button x:Name="RpCopy" Content="Copy name" Style="{StaticResource RpButton}" Background="#303846" Foreground="#E2E8F0" BorderBrush="#526176" IsEnabled="False"/>
+   </StackPanel>
+  </Grid>
+ </Border>
+</Window>
+'@
+    $tiers = @('A','B')
+    try { if (([int]([System.Windows.Media.RenderCapability]::Tier -shr 16)) -lt 2) { $tiers = @('B') } } catch {}
+    $window = $null
+    foreach ($tier in $tiers) {
+        try {
+            $xaml = $windowXamlTemplate
+            if ($tier -eq 'A') { $xaml = $xaml.Replace('@@TRANSPARENT@@','True').Replace('@@WINBG@@','Transparent').Replace('@@MARGIN@@','6').Replace('@@BG1@@','#F0202B3A').Replace('@@BG2@@','#F0111823') }
+            else { $xaml = $xaml.Replace('@@TRANSPARENT@@','False').Replace('@@WINBG@@','#FF141B27').Replace('@@MARGIN@@','0').Replace('@@BG1@@','#FF202B3A').Replace('@@BG2@@','#FF111823') }
+            $window = [System.Windows.Markup.XamlReader]::Parse($xaml)
+            break
+        } catch {
+            $window = $null
+            try { Write-AMRDriverDiagnostic -Severity WARNING -Operation RecoveryCenter -Stage WindowTierFallback -Message ('Recovery point window style {0} failed: {1}' -f $tier,$_.Exception.Message) -Source 'AMRRecoveryPoint' } catch {}
+        }
+    }
+    if (-not $window) {
+        Show-AMRMessageGlass 'The Recovery Center window could not be created. Windows System Restore can still be opened from the Start menu.' 'Recovery Center' OK Warning | Out-Null
+        return
+    }
+    try { if ($script:Window -and $script:Window.IsVisible) { $window.Owner = $script:Window } } catch {}
+    # Centre it over the AMR window (screen centre when AMR is maximized or minimized). Re-centred once the real height is known.
+    $script:AMRCenterRecoveryWindow = {
+        param($target)
+        try {
+            $width = [double]$target.ActualWidth; if ($width -le 0) { $width = 356 }
+            $height = [double]$target.ActualHeight; if ($height -le 0) { $height = 300 }
+            $vsLeft = [System.Windows.SystemParameters]::VirtualScreenLeft; $vsTop = [System.Windows.SystemParameters]::VirtualScreenTop
+            $vsWidth = [System.Windows.SystemParameters]::VirtualScreenWidth; $vsHeight = [System.Windows.SystemParameters]::VirtualScreenHeight
+            $main = $script:Window
+            if ($main -and $main.IsVisible -and $main.WindowState -eq [System.Windows.WindowState]::Normal -and $main.ActualWidth -gt 0) {
+                $left = $main.Left + (($main.ActualWidth - $width) / 2)
+                $top = $main.Top + (($main.ActualHeight - $height) / 2)
+            } else {
+                $work = [System.Windows.SystemParameters]::WorkArea
+                $left = $work.Left + (($work.Width - $width) / 2)
+                $top = $work.Top + (($work.Height - $height) / 2)
+            }
+            $target.Left = [Math]::Min([Math]::Max($vsLeft,$left),($vsLeft + $vsWidth - $width))
+            $target.Top = [Math]::Min([Math]::Max($vsTop,$top),($vsTop + $vsHeight - $height))
+        } catch {}
+    }
+    & $script:AMRCenterRecoveryWindow $window
+    $window.Add_ContentRendered({ param($s,$e) & $script:AMRCenterRecoveryWindow $s })
+    $window.Add_PreviewKeyDown({ param($s,$e) if ($e.Key -eq [System.Windows.Input.Key]::Escape) { $e.Handled = $true; $s.Close() } })
+    $window.FindName('RpTitleBar').Add_MouseLeftButtonDown({ param($s,$e) try { [System.Windows.Window]::GetWindow($s).DragMove() } catch {} })
+    $window.FindName('RpClose').Add_Click({ param($s,$e) try { [System.Windows.Window]::GetWindow($s).Close() } catch {} })
+    $window.FindName('RpCopy').Add_Click({
+        param($s,$e)
+        try {
+            $win = [System.Windows.Window]::GetWindow($s)
+            if (-not [string]::IsNullOrWhiteSpace([string]$win.Tag)) { [System.Windows.Clipboard]::SetText([string]$win.Tag); $s.Content = 'Copied' }
+        } catch {}
+    })
+    $window.FindName('RpOpen').Add_Click({
+        param($s,$e)
+        $win = [System.Windows.Window]::GetWindow($s)
+        $note = $win.FindName('RpNote')
+        try {
+            $restoreExe = Join-Path ([Environment]::GetFolderPath('System')) 'rstrui.exe'
+            if (-not (Test-Path -LiteralPath $restoreExe -PathType Leaf)) { $restoreExe = Join-Path $env:windir 'sysnative\rstrui.exe' }
+            if (-not (Test-Path -LiteralPath $restoreExe -PathType Leaf)) { throw 'rstrui.exe was not found on this PC.' }
+            [void](Start-Process -FilePath $restoreExe -PassThru -ErrorAction Stop)
+            # Never sit on top of the Windows window: drop Topmost once it is launched.
+            try { $win.Topmost = $false } catch {}
+            Write-AMRLog 'Opened Windows System Restore from the Recovery Center.' INFO Overview
+            if (-not [string]::IsNullOrWhiteSpace([string]$win.Tag)) { Start-AMRRestoreWindowAssist -Description ([string]$win.Tag) }
+        } catch {
+            $note.Text = 'Windows System Restore could not be opened: ' + $_.Exception.Message
+            $note.Visibility = 'Visible'
+            Write-AMRLog ('Recovery Center could not open System Restore: ' + $_.Exception.Message) WARNING Overview
+        }
+    })
+    $window.Add_Closed({
+        try { if ($script:AMRRestoreAssist -and $script:AMRRestoreAssist.State) { $script:AMRRestoreAssist.State.Cancel = $true; $script:AMRRestoreAssist.State.Closed = $true } } catch {}
+        $script:AMRRecoveryPointWindow = $null
+    })
+    $script:AMRRecoveryPointWindow = $window
+    $window.Show()
+    # Fill in the point after the window has painted; the lookup is bounded (8 s) like Smart Restore's.
+    [void]$window.Dispatcher.BeginInvoke([System.Windows.Threading.DispatcherPriority]::Background,[Action]{ try { Update-AMRRecoveryPointWindowInfo } catch { try { Write-AMRLog ('Recovery point lookup failed: ' + $_.Exception.Message) WARNING Overview } catch {} } })
+}
+
+# Hidden shortcut on System > Backups only: typing "file" or "files" in Smart Search opens the receipt folder.
+function Open-AMRRestoreReceiptFolder {
+    try {
+        $receipt = [string]$script:DriverRestorePointStateFile
+        if ([string]::IsNullOrWhiteSpace($receipt)) { return }
+        $folder = Split-Path -Parent $receipt
+        if (-not (Test-Path -LiteralPath $folder -PathType Container)) { New-Item -ItemType Directory -Path $folder -Force -ErrorAction Stop | Out-Null }
+        if (Test-Path -LiteralPath $receipt -PathType Leaf) { [void](Start-Process -FilePath 'explorer.exe' -ArgumentList ('/select,"{0}"' -f $receipt)) }
+        else { [void](Start-Process -FilePath 'explorer.exe' -ArgumentList ('"{0}"' -f $folder)) }
+    } catch {
+        try { Write-AMRLog ('Could not open the restore point files folder: ' + $_.Exception.Message) WARNING Overview } catch {}
+    }
+}
+
 (C 'DriverSmartRestoreBtn').Add_Click({ Invoke-AMRDriverSmartRestore })
+(C 'DriverRecoveryCenterBtn').Add_Click({ Show-AMRRecoveryPointWindow })
 
 # Driver Backup buttons: matched neutral-glass hover and press feedback for both actions.
 foreach($driverActionButtonName in @('DriverCreateRestorePointBtn','DriverSmartRestoreBtn')){
@@ -13420,7 +14640,7 @@ foreach($driverActionButtonName in @('DriverCreateRestorePointBtn','DriverSmartR
     $driverActionButton.RenderTransformOrigin=[System.Windows.Point]::new(0.5,0.5)
     $driverActionButton.RenderTransform=[System.Windows.Media.ScaleTransform]::new(1.0,1.0)
     $driverActionButton.Add_MouseEnter({
-        try{
+        try{if($this.Style){return};
             if(-not $this.IsEnabled){return}
             $hoverColor='#A0788796'
             $brush=[System.Windows.Media.SolidColorBrush]::new($this.Background.Color);$this.Background=$brush
@@ -13431,7 +14651,7 @@ foreach($driverActionButtonName in @('DriverCreateRestorePointBtn','DriverSmartR
         }catch{}
     }.GetNewClosure())
     $driverActionButton.Add_MouseLeave({
-        try{
+        try{if($this.Style){return};
             $baseColor='#805E6B78'
             $edgeColor='#D0DAE4'
             $brush=[System.Windows.Media.SolidColorBrush]::new($this.Background.Color);$this.Background=$brush
@@ -13442,10 +14662,10 @@ foreach($driverActionButtonName in @('DriverCreateRestorePointBtn','DriverSmartR
         }catch{}
     }.GetNewClosure())
     $driverActionButton.Add_PreviewMouseDown({
-        try{if(-not $this.IsEnabled){return};$a=New-Object System.Windows.Media.Animation.DoubleAnimation;$a.To=0.986;$a.Duration=[TimeSpan]::FromMilliseconds(65);$this.RenderTransform.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleXProperty,$a);$this.RenderTransform.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleYProperty,$a)}catch{}
+        try{if($this.Style){return};if(-not $this.IsEnabled){return};$a=New-Object System.Windows.Media.Animation.DoubleAnimation;$a.To=0.986;$a.Duration=[TimeSpan]::FromMilliseconds(65);$this.RenderTransform.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleXProperty,$a);$this.RenderTransform.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleYProperty,$a)}catch{}
     }.GetNewClosure())
     $driverActionButton.Add_PreviewMouseUp({
-        try{if(-not $this.IsEnabled -or -not $this.IsMouseOver){return};$a=New-Object System.Windows.Media.Animation.DoubleAnimation;$a.To=1.018;$a.Duration=[TimeSpan]::FromMilliseconds(90);$this.RenderTransform.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleXProperty,$a);$this.RenderTransform.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleYProperty,$a)}catch{}
+        try{if($this.Style){return};if(-not $this.IsEnabled -or -not $this.IsMouseOver){return};$a=New-Object System.Windows.Media.Animation.DoubleAnimation;$a.To=1.018;$a.Duration=[TimeSpan]::FromMilliseconds(90);$this.RenderTransform.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleXProperty,$a);$this.RenderTransform.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleYProperty,$a)}catch{}
     }.GetNewClosure())
 }
 
@@ -17273,6 +18493,7 @@ $hoverTriggerXaml
 
 function Invoke-AMRGlassDialogTier {
     param([string]$Tier,[string]$Message,[string]$Title,[string]$Buttons,[string]$Icon)
+    $perfDlg = Get-AMRPerfNow
     $state = @{ Result = $(if ($Buttons -eq 'YesNo') { 'No' } else { 'OK' }) }
     $window = New-Object System.Windows.Window
     $window.WindowStyle = 'None'
@@ -17382,6 +18603,7 @@ function Invoke-AMRGlassDialogTier {
     $window.Content = $root
     $defaultButton = $buttonList[$buttonList.Count - 1]
     $window.Add_ContentRendered({ try { $defaultButton.Focus() | Out-Null } catch {} }.GetNewClosure())
+    Add-AMRPerfSince ('dialog.build.tier' + $Tier) $perfDlg
     [void]$window.ShowDialog()
     return [string]$state['Result']
 }
@@ -20076,7 +21298,7 @@ function Start-AMRDriverManagedWorker {
                 try { Stop-AMRDriverManagedWorker -Force } catch { Write-AMRDiagnostic -Severity 'ERROR' -Area 'DriverCenter' -Operation 'ManagedWorkerTimeoutRecovery' -Message ([string]$_.Exception.Message) }
                 (C 'DriverActionStatus').Text=('The {0} operation timed out and its AMR worker was stopped. Review Diagnostics before retrying.' -f $timedOutOperation)
                 if($timedOutOperation -eq 'RestorePoint'){
-                    $restoreButton=C 'DriverCreateRestorePointBtn';if($restoreButton){$restoreButton.Content='＋  Create Restore Point';$restoreButton.IsEnabled=$true}
+                    $restoreButton=C 'DriverCreateRestorePointBtn';if($restoreButton){$restoreButton.Content='＋  Smart Create';$restoreButton.IsEnabled=$true}
                     $restoreBar=C 'DriverRestorePointProgressBar';if($restoreBar){$restoreBar.IsIndeterminate=$false;$restoreBar.Value=0}
                     $restorePercent=C 'DriverRestorePointPercent';if($restorePercent){$restorePercent.Text='Timed out'}
                     $restoreText=C 'DriverRestorePointProgressText';if($restoreText){$restoreText.Text='Timed out — Windows did not return within 10 minutes. The AMR worker was stopped; check System Protection before retrying.'}
@@ -22433,6 +23655,11 @@ $script:InstalledScanState = @{
     RescanRequested = $false
     CacheLoaded = $false
 }
+$script:InstalledCacheSignature = ''
+$script:InstalledCacheSavedUtc = [DateTime]::MinValue
+$script:InstalledScanSignatureAtStart = ''
+# A1: the light change check (every 10 min, on window activation and on entry) replaces the old 12 h age rule; this long limit is only a safety net.
+$script:InstalledCacheMaxAgeHours = 100
 
 # Persistent snapshot: the last completed inventory is loaded immediately on the
 # next launch, while a fresh scan refreshes it in the background.
@@ -22453,9 +23680,36 @@ function Get-AMRInstalledCatalogFingerprint {
 function Import-AMRInstalledInventoryCache {
     param([switch]$Quiet)
     $cachePath = [string]$script:InstalledInventoryCacheFile
-    if (-not (Test-Path -LiteralPath $cachePath -PathType Leaf)) { return $false }
+    # A1: the JSON read + parse + per-record fixups ran in a worker started at the top of the script; the UI only validates and applies.
+    $prefetched = $null
+    $prefetchJob = $script:AMRInstalledCachePrefetchJob
+    $script:AMRInstalledCachePrefetchJob = $null
+    if ($null -ne $prefetchJob) {
+        $perfIc = Get-AMRPerfNow
+        $pf = Complete-AMRStartupPrefetchWorker -Job $prefetchJob -WaitMs 20000
+        Add-AMRPerfSince 'installed.cacheImport.prefetchWait' $perfIc
+        if ($pf.Ok -and @($pf.Items).Count -gt 0) {
+            $pfFirst = @($pf.Items)[0]
+            if ($pfFirst -and $pfFirst.PSObject.Properties['Status']) { $prefetched = $pfFirst }
+        }
+        try { Write-AMRLog ('Installed cache prefetch: status={0}; read {1} ms, parse {2} ms, fixups {3} ms in the worker; waited {4} ms on the UI thread.' -f $(if ($prefetched) { $prefetched.Status } else { 'unavailable' }),$(if ($prefetched) { $prefetched.ReadMs } else { 0 }),$(if ($prefetched) { $prefetched.ParseMs } else { 0 }),$(if ($prefetched) { $prefetched.FixupMs } else { 0 }),$pf.WaitedMs) INFO Software } catch {}
+    }
+    if ($null -ne $prefetched -and [string]$prefetched.Status -eq 'missing') { return $false }
+    $usePrefetched = ($null -ne $prefetched -and [string]$prefetched.Status -eq 'ok')
+    if (-not $usePrefetched) {
+        if (-not (Test-Path -LiteralPath $cachePath -PathType Leaf)) { return $false }
+    }
     try {
-        $cache = Get-Content -LiteralPath $cachePath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        $perfIc = Get-AMRPerfNow
+        $fixupDone = $false
+        if ($usePrefetched) {
+            $cache = $prefetched.Cache
+            $fixupDone = [bool]$prefetched.FixupDone
+        } else {
+            $cache = Get-Content -LiteralPath $cachePath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        }
+        Add-AMRPerfSince 'installed.cacheImport.readJson' $perfIc
+        $perfIc = Get-AMRPerfNow
         if ([int]$cache.SchemaVersion -ne 1) { return $false }
         $fingerprint = Get-AMRInstalledCatalogFingerprint
         if ([string]::IsNullOrWhiteSpace($fingerprint) -or [string]$cache.CatalogFingerprint -ne $fingerprint) { return $false }
@@ -22466,6 +23720,7 @@ function Import-AMRInstalledInventoryCache {
         for ($index = 0; $index -lt $script:SoftwareCatalog.Count; $index++) {
             $script:SoftwareCatalog[$index].IsInstalled = [bool]$flags[$index]
         }
+        if (-not $fixupDone) {
         foreach ($record in $records) {
             if (-not $record.PSObject.Properties['Icon']) { $record | Add-Member -NotePropertyName Icon -NotePropertyValue $null }
             else { $record.Icon = $null }
@@ -22473,12 +23728,22 @@ function Import-AMRInstalledInventoryCache {
             if (-not $record.PSObject.Properties['DetailsExpanded']) { $record | Add-Member -NotePropertyName DetailsExpanded -NotePropertyValue $false } else { $record.DetailsExpanded = $false }
             if (-not $record.PSObject.Properties['Category']) { $record | Add-Member -NotePropertyName Category -NotePropertyValue '' }
         }
+        }
+        Add-AMRPerfSince 'installed.cacheImport.flagsAndRecordFixup' $perfIc
+        $perfIc = Get-AMRPerfNow
         $records = @(Remove-AMRDuplicateInstalledInventoryRecords -Records $records)
+        Add-AMRPerfSince 'installed.cacheImport.dedupe' $perfIc
+        $perfIc = Get-AMRPerfNow
         $visibleCount = Set-AMRInstalledAppPresentation -Records $records
+        Add-AMRPerfSince 'installed.cacheImport.presentation' $perfIc
         $script:InstalledScanState.Inventory = @($records)
         $script:InstalledScanState.Count = [int]$visibleCount
         $script:InstalledScanState.Ready = $true
         $script:InstalledScanState.CacheLoaded = $true
+        try {
+            if ($cache.PSObject.Properties['ChangeSignature']) { $script:InstalledCacheSignature = [string]$cache.ChangeSignature }
+            if ($cache.PSObject.Properties['SavedAtUtc']) { $script:InstalledCacheSavedUtc = [DateTime]::Parse([string]$cache.SavedAtUtc,[Globalization.CultureInfo]::InvariantCulture,[Globalization.DateTimeStyles]::RoundtripKind).ToUniversalTime() }
+        } catch { $script:InstalledCacheSignature = ''; $script:InstalledCacheSavedUtc = [DateTime]::MinValue }
         if (-not $Quiet) {
             Write-AMRLog ("Loaded cached installed-app snapshot: {0} total record(s), {1} removable user-facing app(s). A background refresh has been scheduled." -f $records.Count,$visibleCount) INFO Software
         }
@@ -22489,28 +23754,286 @@ function Import-AMRInstalledInventoryCache {
     }
 }
 
+function Get-AMRInstalledChangeSignature {
+    # Cheap change detector for the installed-app catalog (no process launch, no AppX/winget call).
+    # Hashes the NAMES of the entries that appear/disappear when an app is installed or removed:
+    # the four Uninstall registry views, the per-user and machine AppX package registrations,
+    # and the Chocolatey / Scoop package folders. Missing keys simply contribute nothing.
+    try {
+        $sb = New-Object System.Text.StringBuilder
+        $regSources = @(
+            @('LM','Software\Microsoft\Windows\CurrentVersion\Uninstall'),
+            @('LM','Software\Wow6432Node\Microsoft\Windows\CurrentVersion\Uninstall'),
+            @('CU','Software\Microsoft\Windows\CurrentVersion\Uninstall'),
+            @('CU','Software\Wow6432Node\Microsoft\Windows\CurrentVersion\Uninstall'),
+            @('CU','Software\Classes\Local Settings\Software\Microsoft\Windows\CurrentVersion\AppModel\Repository\Packages'),
+            @('LM','Software\Microsoft\Windows\CurrentVersion\Appx\AppxAllUserStore\Applications')
+        )
+        foreach ($src in $regSources) {
+            $names = @()
+            try {
+                $root = if ($src[0] -eq 'LM') { [Microsoft.Win32.Registry]::LocalMachine } else { [Microsoft.Win32.Registry]::CurrentUser }
+                $key = $root.OpenSubKey([string]$src[1])
+                if ($key) { try { $names = @($key.GetSubKeyNames()) } finally { $key.Close() } }
+            } catch { $names = @() }
+            if ([string]$src[1] -match 'AppModel\\Repository\\Packages$' -or [string]$src[1] -match 'AppxAllUserStore\\Applications$') {
+                # A1: an AppX/MSIX package name embeds its version (Name_Version_Arch__Publisher). Drop the version so a Store app UPDATE
+                # (new version, same app) is not treated as an install/uninstall; a real install or removal still changes the name set.
+                try { $names = @($names | ForEach-Object { [regex]::Replace([string]$_,'^([^_]+)_[^_]+_','$1_') } | Sort-Object -Unique) } catch { }
+            }
+            [void]$sb.Append('R|').Append([string]$src[0]).Append('|').Append([string]$src[1]).Append('|').Append($names.Count).Append("`n")
+            foreach ($n in ($names | Sort-Object)) { [void]$sb.Append($n).Append("`n") }
+        }
+        $dirs = New-Object 'System.Collections.Generic.List[string]'
+        if ($env:ChocolateyInstall) { $dirs.Add((Join-Path $env:ChocolateyInstall 'lib')) }
+        if ($env:ProgramData) { $dirs.Add((Join-Path $env:ProgramData 'chocolatey\lib')) }
+        if ($env:SCOOP) { $dirs.Add((Join-Path $env:SCOOP 'apps')) }
+        if ($env:USERPROFILE) { $dirs.Add((Join-Path $env:USERPROFILE 'scoop\apps')) }
+        foreach ($d in ($dirs | Select-Object -Unique)) {
+            $names = @()
+            try { if ([System.IO.Directory]::Exists($d)) { $names = @([System.IO.Directory]::GetDirectories($d) | ForEach-Object { [System.IO.Path]::GetFileName($_) }) } } catch { $names = @() }
+            [void]$sb.Append('D|').Append($d).Append('|').Append($names.Count).Append("`n")
+            foreach ($n in ($names | Sort-Object)) { [void]$sb.Append($n).Append("`n") }
+        }
+        $bytes = [System.Text.Encoding]::UTF8.GetBytes($sb.ToString())
+        $sha = [System.Security.Cryptography.SHA256]::Create()
+        try { return ([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-','').ToLowerInvariant() }
+        finally { $sha.Dispose() }
+    } catch { return '' }
+}
+
+function Test-AMRInstalledRefreshNeeded {
+    # True when the persisted catalog may be out of date and a full scan is justified.
+    # False when the saved catalog is valid, younger than the age limit, and nothing was installed/removed.
+    param([string]$Context = '')
+    $perf = Get-AMRPerfNow
+    $needed = $true; $reason = 'no-saved-catalog'
+    try {
+        if ($script:InstalledScanState.CacheLoaded -and $script:InstalledScanState.Ready) {
+            if ([string]::IsNullOrWhiteSpace([string]$script:InstalledCacheSignature)) { $reason = 'no-saved-signature' }
+            elseif (([DateTime]::UtcNow - [DateTime]$script:InstalledCacheSavedUtc).TotalHours -ge [double]$script:InstalledCacheMaxAgeHours -or ([DateTime]::UtcNow - [DateTime]$script:InstalledCacheSavedUtc).TotalHours -lt 0) { $reason = 'older-than-limit' }
+            else {
+                $current = Get-AMRInstalledChangeSignature
+                if ([string]::IsNullOrWhiteSpace($current)) { $reason = 'signature-unavailable' }
+                elseif ($current -ne [string]$script:InstalledCacheSignature) { $reason = 'apps-changed' }
+                else { $needed = $false; $reason = 'unchanged' }
+            }
+        }
+    } catch { $needed = $true; $reason = 'check-failed' }
+    Add-AMRPerfSince 'installed.changeCheck' $perf
+    Write-AMRLog ('Installed catalog check ({0}): refresh={1}; reason={2}.' -f $Context,$needed,$reason) INFO Software
+    return $needed
+}
+
+# A1: the cache write (copy of every record, ConvertTo-Json, file write) ran on the UI thread (656 ms and 360 ms stalls right after a scan in the A24 log).
+# It now runs in a worker; the UI only builds a small request (fingerprint, flags, record references).
+$script:AMRInstalledCacheSaveWorkerText = @'
+param([string]$Path,[string]$Fingerprint,[string]$SavedAtUtc,[string]$Signature,[int]$Count,[object[]]$Flags,[object[]]$Inventory)
+$ErrorActionPreference = 'Stop'
+$watch = [System.Diagnostics.Stopwatch]::StartNew()
+$temporaryPath = $Path + '.tmp'
+try {
+    $snapshot = $null
+    for ($attempt = 0; $attempt -lt 3 -and $null -eq $snapshot; $attempt++) {
+        try { $snapshot = @($Inventory | ForEach-Object { $_ | Select-Object * -ExcludeProperty Icon }) }
+        catch { Start-Sleep -Milliseconds 40 }
+    }
+    if ($null -eq $snapshot) { throw 'Could not copy the installed inventory records.' }
+    $snapshotMs = $watch.ElapsedMilliseconds
+    $payload = [ordered]@{
+        SchemaVersion = 1
+        CatalogFingerprint = $Fingerprint
+        SavedAtUtc = $SavedAtUtc
+        ChangeSignature = $Signature
+        Count = $Count
+        InstalledFlags = $Flags
+        Inventory = $snapshot
+    }
+    $json = ConvertTo-Json -InputObject $payload -Depth 7
+    $jsonMs = $watch.ElapsedMilliseconds - $snapshotMs
+    Set-Content -LiteralPath $temporaryPath -Value $json -Encoding UTF8 -ErrorAction Stop
+    Move-Item -LiteralPath $temporaryPath -Destination $Path -Force -ErrorAction Stop
+    [pscustomobject]@{ Ok = $true; Error = ''; SnapshotMs = $snapshotMs; JsonMs = $jsonMs; TotalMs = $watch.ElapsedMilliseconds; Chars = $json.Length }
+} catch {
+    try { if ([System.IO.File]::Exists($temporaryPath)) { [System.IO.File]::Delete($temporaryPath) } } catch {}
+    [pscustomobject]@{ Ok = $false; Error = $_.Exception.Message; SnapshotMs = 0; JsonMs = 0; TotalMs = $watch.ElapsedMilliseconds; Chars = 0 }
+}
+'@
+$script:AMRInstalledCacheSaveState = @{ Job = $null; Timer = $null; Pending = $null; NewSignature = ''; PrevSignature = ''; PrevSavedUtc = [DateTime]::MinValue }
+
+function Start-AMRInstalledCacheSaveWorker {
+    param($Request)
+    $saveState = $script:AMRInstalledCacheSaveState
+    $runspace = $null; $ps = $null
+    try {
+        $saveState.PrevSignature = [string]$script:InstalledCacheSignature
+        $saveState.PrevSavedUtc = [DateTime]$script:InstalledCacheSavedUtc
+        $saveState.NewSignature = [string]$Request.Signature
+        $runspace = [runspacefactory]::CreateRunspace()
+        $runspace.ApartmentState = 'MTA'
+        $runspace.Open()
+        $ps = [powershell]::Create()
+        $ps.Runspace = $runspace
+        [void]$ps.AddScript($script:AMRInstalledCacheSaveWorkerText,$true)
+        [void]$ps.AddArgument([string]$script:InstalledInventoryCacheFile)
+        [void]$ps.AddArgument([string]$Request.Fingerprint)
+        [void]$ps.AddArgument([string]$Request.SavedAtUtc)
+        [void]$ps.AddArgument([string]$Request.Signature)
+        [void]$ps.AddArgument([int]$Request.Count)
+        [void]$ps.AddArgument([object[]]$Request.Flags)
+        [void]$ps.AddArgument([object[]]$Request.Inventory)
+        $saveState.Job = [pscustomobject]@{ PowerShell = $ps; Runspace = $runspace; Async = $ps.BeginInvoke() }
+        # Same in-memory values the synchronous save set after writing; reverted below if the write fails.
+        $script:InstalledCacheSignature = [string]$Request.Signature
+        $script:InstalledCacheSavedUtc = [DateTime]::UtcNow
+        if (-not $saveState.Timer) {
+            $saveState.Timer = New-Object System.Windows.Threading.DispatcherTimer
+            $saveState.Timer.Interval = [TimeSpan]::FromMilliseconds(250)
+            $saveState.Timer.Add_Tick({ try { Complete-AMRInstalledCacheSave } catch {} })
+        }
+        $saveState.Timer.Start()
+        return $true
+    } catch {
+        try { if ($ps) { $ps.Dispose() } } catch {}
+        try { if ($runspace) { $runspace.Close(); $runspace.Dispose() } } catch {}
+        $saveState.Job = $null
+        Write-AMRLog "Could not start the installed-app cache save worker: $($_.Exception.Message)" WARNING Software
+        return $false
+    }
+}
+
+function Complete-AMRInstalledCacheSave {
+    $saveState = $script:AMRInstalledCacheSaveState
+    $job = $saveState.Job
+    if (-not $job) { if ($saveState.Timer) { $saveState.Timer.Stop() }; return }
+    if (-not $job.Async.IsCompleted) { return }
+    $saveState.Timer.Stop()
+    $saveState.Job = $null
+    $result = $null
+    $endError = ''
+    try { $result = @($job.PowerShell.EndInvoke($job.Async)) | Select-Object -First 1 } catch { $endError = $_.Exception.Message }
+    try { $job.PowerShell.Dispose() } catch {}
+    try { $job.Runspace.Close(); $job.Runspace.Dispose() } catch {}
+    if ($result -and $result.PSObject.Properties['Ok'] -and [bool]$result.Ok) {
+        Write-AMRLog ('Installed-app cache saved in the background: copy {0} ms, json {1} ms, total {2} ms, {3} chars.' -f $result.SnapshotMs,$result.JsonMs,$result.TotalMs,$result.Chars) INFO Software
+    } else {
+        $failure = if ($result -and $result.PSObject.Properties['Error']) { [string]$result.Error } else { $endError }
+        if ([string]$script:InstalledCacheSignature -eq [string]$saveState.NewSignature) {
+            $script:InstalledCacheSignature = [string]$saveState.PrevSignature
+            $script:InstalledCacheSavedUtc = [DateTime]$saveState.PrevSavedUtc
+        }
+        Write-AMRLog "Could not save installed-app cache: $failure" WARNING Software
+    }
+    $pending = $saveState.Pending
+    $saveState.Pending = $null
+    if ($pending) { [void](Start-AMRInstalledCacheSaveWorker -Request $pending) }
+}
+
 function Save-AMRInstalledInventoryCache {
     try {
         $fingerprint = Get-AMRInstalledCatalogFingerprint
         if ([string]::IsNullOrWhiteSpace($fingerprint)) { return $false }
-        $cachePayload = [ordered]@{
-            SchemaVersion = 1
-            CatalogFingerprint = $fingerprint
+        $request = [pscustomobject]@{
+            Fingerprint = $fingerprint
             SavedAtUtc = [DateTime]::UtcNow.ToString('o')
+            Signature = [string]$script:InstalledScanSignatureAtStart
             Count = [int]$script:InstalledScanState.Count
-            InstalledFlags = @($script:SoftwareCatalog | ForEach-Object { [bool]$_.IsInstalled })
-            Inventory = @($script:InstalledScanState.Inventory | ForEach-Object { $_ | Select-Object * -ExcludeProperty Icon })
+            Flags = @($script:SoftwareCatalog | ForEach-Object { [bool]$_.IsInstalled })
+            Inventory = @($script:InstalledScanState.Inventory)
         }
-        $json = ConvertTo-Json -InputObject $cachePayload -Depth 7
-        $temporaryPath = $script:InstalledInventoryCacheFile + '.tmp'
-        Set-Content -LiteralPath $temporaryPath -Value $json -Encoding UTF8 -ErrorAction Stop
-        Move-Item -LiteralPath $temporaryPath -Destination $script:InstalledInventoryCacheFile -Force -ErrorAction Stop
-        return $true
+        if ($script:AMRInstalledCacheSaveState.Job) { $script:AMRInstalledCacheSaveState.Pending = $request; return $true }
+        return (Start-AMRInstalledCacheSaveWorker -Request $request)
     } catch {
-        try { if (Test-Path -LiteralPath ($script:InstalledInventoryCacheFile + '.tmp')) { Remove-Item -LiteralPath ($script:InstalledInventoryCacheFile + '.tmp') -Force -ErrorAction SilentlyContinue } } catch {}
         Write-AMRLog "Could not save installed-app cache: $($_.Exception.Message)" WARNING Software
         return $false
     }
+}
+
+# A1: light change check for the Installed catalog. It computes the same cheap change signature as Test-AMRInstalledRefreshNeeded
+# (registry key NAMES for the Uninstall and AppX views plus Chocolatey/Scoop folder names; no process, no AppX/winget call) in a
+# worker, every 10 minutes and whenever the window is activated (at most once per 30 s). Only a changed signature starts the
+# existing full refresh; the UI thread only compares two strings.
+$script:AMRInstalledWatch = @{ Runspace = $null; Job = $null; Timer = $null; PollTimer = $null; FollowUpTimer = $null; LastStartUtc = [DateTime]::MinValue; LastRefreshSig = ''; Started = $false }
+function Start-AMRInstalledLightCheck {
+    param([string]$Reason = 'periodic')
+    $w = $script:AMRInstalledWatch
+    if ($w.Job) { return }
+    $state = $script:InstalledScanState
+    if (-not $state.Ready -or $state.Current) { return }
+    if ([string]::IsNullOrWhiteSpace([string]$script:InstalledCacheSignature)) { return }
+    if (([DateTime]::UtcNow - [DateTime]$w.LastStartUtc).TotalSeconds -lt 30) { return }
+    $w.LastStartUtc = [DateTime]::UtcNow
+    $ps = $null
+    try {
+        if (-not $w.Runspace) {
+            $rs = [runspacefactory]::CreateRunspace()
+            $rs.ApartmentState = 'MTA'
+            $rs.Open()
+            $w.Runspace = $rs
+        }
+        $funcText = (Get-Command Get-AMRInstalledChangeSignature -ErrorAction Stop).ScriptBlock.ToString()
+        $workerText = "function Get-AMRInstalledChangeSignature {`n" + $funcText + "`n}`n`$sw = [System.Diagnostics.Stopwatch]::StartNew()`n`$sig = Get-AMRInstalledChangeSignature`n[pscustomobject]@{ Signature = [string]`$sig; Ms = [int]`$sw.ElapsedMilliseconds }"
+        $ps = [powershell]::Create()
+        $ps.Runspace = $w.Runspace
+        [void]$ps.AddScript($workerText,$true)
+        $w.Job = [pscustomobject]@{ PowerShell = $ps; Async = $ps.BeginInvoke(); Reason = $Reason }
+        if (-not $w.Timer) {
+            $w.Timer = New-Object System.Windows.Threading.DispatcherTimer
+            $w.Timer.Interval = [TimeSpan]::FromMilliseconds(250)
+            $w.Timer.Add_Tick({ try { Complete-AMRInstalledLightCheck } catch {} })
+        }
+        $w.Timer.Start()
+    } catch {
+        try { if ($ps) { $ps.Dispose() } } catch {}
+        $w.Job = $null
+        Write-AMRLog ('Installed light check could not start: ' + $_.Exception.Message) WARNING Software
+    }
+}
+function Complete-AMRInstalledLightCheck {
+    $w = $script:AMRInstalledWatch
+    $job = $w.Job
+    if (-not $job) { if ($w.Timer) { $w.Timer.Stop() }; return }
+    if (-not $job.Async.IsCompleted) { return }
+    $w.Timer.Stop()
+    $w.Job = $null
+    $sig = ''; $ms = -1
+    try { $r = @($job.PowerShell.EndInvoke($job.Async)) | Select-Object -First 1; if ($r) { $sig = [string]$r.Signature; $ms = [int]$r.Ms } } catch {}
+    try { $job.PowerShell.Dispose() } catch {}
+    $state = $script:InstalledScanState
+    if ([string]::IsNullOrWhiteSpace($sig)) { return }
+    if (-not $state.Ready -or $state.Current) { return }
+    if ($sig -eq [string]$script:InstalledCacheSignature) {
+        Write-AMRLog ('Installed light check ({0}, {1} ms in the worker): no install or removal detected.' -f $job.Reason,$ms) INFO Software
+        return
+    }
+    if ($sig -eq [string]$w.LastRefreshSig) {
+        Write-AMRLog ('Installed light check ({0}): signature differs from the saved one but a refresh was already run for it; not repeating.' -f $job.Reason) INFO Software
+        return
+    }
+    $w.LastRefreshSig = $sig
+    Write-AMRLog ('Installed light check ({0}, {1} ms in the worker): an install or removal was detected; refreshing the installed catalog now.' -f $job.Reason,$ms) INFO Software
+    Start-AMRInstalledCatalogScan -Refresh
+    # One more check 60 s later catches anything installed while this refresh was running.
+    try {
+        if (-not $w.FollowUpTimer) {
+            $w.FollowUpTimer = New-Object System.Windows.Threading.DispatcherTimer
+            $w.FollowUpTimer.Interval = [TimeSpan]::FromSeconds(60)
+            $w.FollowUpTimer.Add_Tick({ try { $script:AMRInstalledWatch.FollowUpTimer.Stop(); Start-AMRInstalledLightCheck -Reason 'follow-up' } catch {} })
+        }
+        $w.FollowUpTimer.Stop(); $w.FollowUpTimer.Start()
+    } catch {}
+}
+function Start-AMRInstalledChangeWatcher {
+    $w = $script:AMRInstalledWatch
+    if ($w.Started) { return }
+    $w.Started = $true
+    $w.LastStartUtc = [DateTime]::UtcNow
+    $w.PollTimer = New-Object System.Windows.Threading.DispatcherTimer
+    $w.PollTimer.Interval = [TimeSpan]::FromMinutes(10)
+    $w.PollTimer.Add_Tick({ try { Start-AMRInstalledLightCheck -Reason 'periodic' } catch {} })
+    $w.PollTimer.Start()
+    $script:Window.Add_Activated({ try { Start-AMRInstalledLightCheck -Reason 'window-activated' } catch {} })
+    Write-AMRLog 'Installed change watcher started: light signature check every 10 minutes and on window activation (worker thread).' INFO Software
 }
 
 # ----------------------------------------------------------
@@ -22816,6 +24339,7 @@ function Start-AMRInstalledLocalIconRefresh {
         $State.Runspace = $Runspace
         $State.PowerShell = $PowerShell
         $State.Async = $Async
+        $State.StartedUtc = [DateTime]::UtcNow
 
         # Delivery timer: it keeps running until the worker has finished AND every decoded icon was
         # delivered, no matter which surface is showing. It never cancels because the user left Installed.
@@ -22854,9 +24378,10 @@ function Start-AMRInstalledLocalIconRefresh {
                         }
                     ).Count
                     $State.WorkerOk = $true
+                    $workerSecs = 0.0; try { $workerSecs = ([DateTime]::UtcNow - [DateTime]$State.StartedUtc).TotalSeconds } catch {}
                     Write-AMRLog (
-                        'Local icon discovery completed. Records: {0}; icons available: {1}. Frozen icons are delivered progressively and kept for later visits.' -f
-                        $Entries.Count,$State.RunAvailable
+                        'Local icon discovery completed in {2:N1} s. Records: {0}; icons available: {1}. Frozen icons are delivered progressively and kept for later visits.' -f
+                        $Entries.Count,$State.RunAvailable,$workerSecs
                     ) INFO Software
                 }
                 catch {
@@ -24284,6 +25809,9 @@ function Start-AMRInstalledCatalogScan {
         return
     }
 
+    # Taken BEFORE the scan so an app installed while the scan runs is caught by the next check.
+    $script:InstalledScanSignatureAtStart = Get-AMRInstalledChangeSignature
+
     $catalogSnapshot = @(
         foreach ($app in $script:SoftwareCatalog) {
             [pscustomobject]@{
@@ -25278,7 +26806,9 @@ $script:SoftwareSearchDebounceTimer.Add_Tick({
                 Set-AMRInstalledViewVisible -InstalledCount $script:InstalledScanState.Count
             } else {
                 Set-AMRInstalledViewVisible -InstalledCount $script:InstalledScanState.Count
-                Start-AMRInstalledCatalogScan -Refresh
+                # A22 rescanned (7-15 s CPU) on every toggle. Now only when an install/removal was detected,
+                # the saved catalog is older than the age limit, or it is missing. The Refresh button always scans.
+                if (Test-AMRInstalledRefreshNeeded -Context 'toggle') { Start-AMRInstalledCatalogScan -Refresh }
             }
         } else {
             $script:ProgressText.Text = 'Scanning installed applications. Your current catalog stays visible until the first installed row is ready...'
@@ -25845,16 +27375,30 @@ try {
             }, [System.Windows.Threading.DispatcherPriority]::ApplicationIdle)
         } catch {}
     }, $true)
+    # Initialized up front: StrictMode throws on reading an unset script variable.
+    $script:PerfLastGc0 = 0; $script:PerfLastGc1 = 0; $script:PerfLastGc2 = 0; $script:PerfLastCpuMs = [long]0; $script:PerfExtraErrLogged = $false
     $script:PerfFlushTimer = New-Object System.Windows.Threading.DispatcherTimer([System.Windows.Threading.DispatcherPriority]::Background)
     $script:PerfFlushTimer.Interval = [TimeSpan]::FromSeconds(5)
     $script:PerfFlushTimer.Add_Tick({
         try {
             $line = [AMR.PerfStats]::Take()
-            if ($null -ne $line) { Write-AMRDiagnostic -Severity 'INFO' -Area 'PerfStats' -Operation 'Window5s' -Message $line }
+            if ($null -ne $line) {
+                # A21/A22 (measurement only): GC collections, process CPU time and working set during this window.
+                try {
+                    $perfProc = [System.Diagnostics.Process]::GetCurrentProcess()
+                    $perfCpuNow = [long]$perfProc.TotalProcessorTime.TotalMilliseconds
+                    $perfG0 = [int][GC]::CollectionCount(0); $perfG1 = [int][GC]::CollectionCount(1); $perfG2 = [int][GC]::CollectionCount(2)
+                    $perfWsMb = [int]([long]$perfProc.WorkingSet64 / 1048576)
+                    $perfD0 = $perfG0 - [int]$script:PerfLastGc0; $perfD1 = $perfG1 - [int]$script:PerfLastGc1; $perfD2 = $perfG2 - [int]$script:PerfLastGc2
+                    $perfDc = $perfCpuNow - [long]$script:PerfLastCpuMs
+                    $line = $line + ' ; gc.gen0=' + $perfD0 + ' ; gc.gen1=' + $perfD1 + ' ; gc.gen2=' + $perfD2 + ' ; proc.cpuMs=' + $perfDc + ' ; proc.workingSetMB=' + $perfWsMb
+                    $script:PerfLastGc0 = $perfG0; $script:PerfLastGc1 = $perfG1; $script:PerfLastGc2 = $perfG2; $script:PerfLastCpuMs = $perfCpuNow
+                } catch { try { $line = $line + ' ; perf.extraError=1'; if (-not $script:PerfExtraErrLogged) { $script:PerfExtraErrLogged = $true; Write-AMRLog ('PerfStats extra counters failed: ' + $_.Exception.Message) WARNING System } } catch {} }
+                Write-AMRDiagnostic -Severity 'INFO' -Area 'PerfStats' -Operation 'Window5s' -Message $line }
         } catch {}
     })
     $script:PerfFlushTimer.Start()
-    try { Write-AMRDiagnostic -Severity 'INFO' -Area 'PerfStats' -Operation 'BuildLabel' -Message 'Build variant: A6 (built on A5; touchpad scroll, Source Manager header hover; driver download cancel, Rollback Check cancel fixes, glass MessageBoxes; Candidate Manager glass redesign, Source Manager hover/scrollbar/button animation) | previous A3 (built on A2; reasons for disabled driver buttons) | previous A2 (built on A1 and A13h; problem card open-in-Driver-Update button, softer Driver Downloads and Diagnose hover) | previous A1 (built on A13h; Driver Center layout: scan summary and diagnosis note in driver log, equal tab panes, Driver Downloads/Diagnose buttons) | previous A13e (A13d + Scan PartialShown fix after restore point, glass tabs with sliding pill, cheaper tab switch, app-palette problem cards, Scan blocked diagnostics and stale restore state repair)' } catch {}
+    try { Write-AMRDiagnostic -Severity 'INFO' -Area 'PerfStats' -Operation 'BuildLabel' -Message 'Build variant: A1 (numbering restarted; built on the previous series A25. A1: the A23 BelowNormal priority guard removed from every worker; Cleanup app detection (uninstall registry + AppX lookups) prefetched in a worker; Installed cache read/parse prefetched in a worker and saved in a worker; light Installed change check every 10 min and on window activation (AppX versions ignored in the change signature, age safety net 100 h); first Overview refresh runs right after the first render; native PDH GPU sampling with Get-Counter fallback; startup markers ProcessStartToScriptMs, cleanup.*, CatalogLoopMs, CatalogIconDecodeMs; previous A25 = A25 (Installed icon engine duration logged; installed.cacheImport.* markers; built on A24 = A24 (Windows Update history query moved off the UI thread (was 1.1 s at startup); GPU inventory query moved off the pre-window startup path; GPU sensor sample selection uses loops instead of pipelines (same result); built on A23 = A23 (single data folder ProgramData\AMR-Utility incl. Windows Update backups; Installed-app catalog persisted and refreshed only when an install/removal is detected, the saved catalog is older than 12 h, or it is missing; BelowNormal priority for background workers; startup markers startup.loaded.*, installed.changeCheck; built on A22 = A22 (fixes an A21 regression: shared brush helper broke the Show Installed button; Overview apply path lighter on the UI thread with the same 750 ms live cadence (cached controls and brushes, loops instead of pipelines, gauge geometry only when changed); Backup cards get their items at startup; glass dialog styles warmed at idle; new log-only markers (kit.sel.*, smart.contentFilterWalk, ov.apply.history, dialog.build.*, recycle.*, gc.*, proc.*); built on A20 = A20 (Cleanup tab: scan, clean, Inspect, Large Files, Recycle Bin and Tool Kit temp clear run in isolated workers so the window never freezes; Cleanup result and message dialogs use the same glass style as Software/System; built on A19 = A19 (Control Center warm-up log Area fixed (ToolKit was not an allowed Area, so the warm-up lines never logged); log-only Backup measurement markers (cc.prewarm.*, backup.updateCards.*, backup.cards.*), no behavior change; built on A18 = A18 (Startup Apps: persistent cache with change detection, lighter shadows, Refresh hover; built on A17; Startup Apps: match index, icon file map, brush cache, hydration retry; built on A16; Control Center: Backup column rule unified with the other pages, card warm-up at idle; built on A15; Control Center page title and counter raised beside the search panel, cards raised; built on A14; main tab strip keeps the original layout and is anchored after first layout so the growing search panel does not move it; results count moved up beside the page title; built on A12 <- A11 <- A10 <- A9 <- A8 <- A7 <- A6; Control Center entry in the Tool Kit sidebar that drops down Optimize, Security, System, Networks, Utilities and Backup, four cards per row, Backup cards restyled like Toolkit cards; Toolkit tabs native cards; Driver Backup redesign, glass buttons; driver download cancel, Rollback Check cancel fixes, glass MessageBoxes; Candidate Manager glass redesign, Source Manager hover/scrollbar/button animation) | previous A11 (Control Center tab inside Tool Kit with Logs-style top tabs) | previous A3 (built on A2; reasons for disabled driver buttons) | previous A2 (built on A1 and A13h; problem card open-in-Driver-Update button, softer Driver Downloads and Diagnose hover) | previous A1 (built on A13h; Driver Center layout: scan summary and diagnosis note in driver log, equal tab panes, Driver Downloads/Diagnose buttons) | previous A13e (A13d + Scan PartialShown fix after restore point, glass tabs with sliding pill, cheaper tab switch, app-palette problem cards, Scan blocked diagnostics and stale restore state repair)' } catch {}
 } catch { }
 
 $script:UpdateSoftwareGridColumns = {
@@ -25877,6 +27421,63 @@ $script:UpdateSoftwareGridColumns = {
 $script:SoftwareResizeUpdatePending = $false
 try { Enable-AMRGridTouchScroll -Window $script:Window -Grid (C 'DriverDeviceList') -HorizontalOnly } catch { try { Write-AMRDriverDiagnostic -Severity WARNING -Operation TouchScroll -Stage HookFallback -Message ('Horizontal touchpad scroll not enabled: ' + $_.Exception.Message) -Source 'AMRTouchScroll' } catch {} }
 $script:Window.Add_Loaded({ & $script:UpdateSoftwareGridColumns })
+$script:Window.Add_Loaded({
+    try {
+        $script:AMRCCPrewarmTimer = New-Object System.Windows.Threading.DispatcherTimer
+        $script:AMRCCPrewarmTimer.Interval = [TimeSpan]::FromSeconds(5)
+        $script:AMRCCPrewarmTimer.Add_Tick({
+            try { $script:AMRCCPrewarmTimer.Stop() } catch {}
+            Start-AMRControlCenterPrewarm
+        })
+        $script:AMRCCPrewarmTimer.Start()
+    } catch {
+        try { Write-AMRLog ('Control Center warm-up not scheduled: ' + $_.Exception.Message) WARNING System } catch {}
+    }
+})
+# Main tab strip anchor: the strip is laid out exactly as before (centered in the top row). Once, after the first layout, its measured
+# position is frozen with Top alignment + the same offset, so a growing search panel (category selector appearing) cannot move the tabs.
+# Any failure leaves the original centered layout untouched.
+$script:Window.Add_Loaded({
+    try {
+        $mainTabs = C 'MainNavigationTabs'
+        if (-not $mainTabs) { return }
+        $strip = $mainTabs.Template.FindName('PART_MainTabStrip', $mainTabs)
+        $panel = $mainTabs.Template.FindName('PART_SmartSearchPanel', $mainTabs)
+        if (-not $strip -or -not $panel) { return }
+        if ($strip.ActualHeight -lt 10 -or $panel.ActualHeight -lt 10) { return }
+        $stripSlot = $strip.ActualHeight + $strip.Margin.Top + $strip.Margin.Bottom
+        $panelSlot = $panel.ActualHeight + $panel.Margin.Top + $panel.Margin.Bottom
+        $combo = $script:SmartCategoryFilter
+        if ($combo -and $combo.Visibility -eq [System.Windows.Visibility]::Visible) {
+            # Measure the normal (selector hidden) state regardless of when this runs.
+            $panelSlot -= ($combo.ActualHeight + $combo.Margin.Top + $combo.Margin.Bottom)
+        }
+        $rowHeight = [Math]::Max($stripSlot, $panelSlot)
+        $offset = [Math]::Max(0.0, ($rowHeight - $stripSlot) / 2.0)
+        $strip.Margin = New-Object System.Windows.Thickness($strip.Margin.Left, ($strip.Margin.Top + $offset), $strip.Margin.Right, $strip.Margin.Bottom)
+        $strip.VerticalAlignment = [System.Windows.VerticalAlignment]::Top
+        # Control Center pages: raise the page title/counter into the free strip between the tabs and the (taller) search panel.
+        # free = distance between the bottom of the tabs and the top of the page area once the category selector is shown.
+        try {
+            $comboExtra = 35.0
+            if ($combo -and $combo.Height -gt 0) { $comboExtra = [double]$combo.Height + [double]$combo.Margin.Top }
+            $rowBig = [Math]::Max($stripSlot, $panelSlot + $comboExtra)
+            $free = $rowBig - $strip.ActualHeight
+            $lift = [Math]::Max(0.0, [Math]::Min(52.0, 6.0 + $free))
+            foreach ($pg in @('Optimize','Backup','Utilities','Security','System','Networks')) {
+                $hdr = C ('CCHeader' + $pg); $scr = C $(if ($pg -eq 'Backup') { 'BackupCenterScrollViewer' } else { 'CCScroll' + $pg })
+                if ($hdr -and $scr) {
+                    $hdr.Margin = New-Object System.Windows.Thickness(20, (14.0 - $lift), 20, 0)
+                    $scr.Margin = New-Object System.Windows.Thickness(0, (52.0 - $lift), 0, 0)
+                }
+            }
+        } catch {
+            try { Write-AMRLog ('Control Center header lift skipped: ' + $_.Exception.Message) WARNING UI } catch {}
+        }
+    } catch {
+        try { Write-AMRLog ('Main tab strip anchor skipped: ' + $_.Exception.Message) WARNING UI } catch {}
+    }
+})
 $script:Window.Add_StateChanged({
     # Let WPF finish the maximize/restore frame before changing the grid. Coalesce
     # repeated state notifications so only one responsive reflow is queued.
@@ -28370,6 +29971,7 @@ foreach ($tweakName in $script:AMRCustomizeCheckboxNames) {
     $infoButton.BorderThickness = [System.Windows.Thickness]::new(1)
     $infoButton.ToolTip = 'Click for details about this customization'
     $infoButton.Tag = [string]$script:AMRCustomizeInfo[$tweakName]
+    Add-AMRInfoButtonPulse -Button $infoButton
     $infoButton.Add_Click({ param($sender,$e) [void](Show-AMRMessageGlass -Message ([string]$sender.Tag) -Title 'AMR | Customization Information' -Buttons OK -Icon Information) })
     [System.Windows.Controls.Grid]::SetColumn($infoButton,1)
     [void]$rowGrid.Children.Add($infoButton)
@@ -28492,42 +30094,238 @@ if ($customCardsHost -and $customCardsHost -is [System.Windows.Controls.WrapPane
                 $card.RenderTransform.BeginAnimation([System.Windows.Media.TranslateTransform]::YProperty,$settle)
             }
             if ($card.BorderBrush -is [System.Windows.Media.SolidColorBrush]) {
-                $edge = New-Object System.Windows.Media.Animation.ColorAnimation($baseBorderColor,[System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(175)))
+                $edge = New-Object System.Windows.Media.Animation.ColorAnimation($(if ($script:AMRActiveCards.Contains($card)) { $script:AMRCardAccentColor } else { $baseBorderColor }),[System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(175)))
                 $card.BorderBrush.BeginAnimation([System.Windows.Media.SolidColorBrush]::ColorProperty,$edge)
             }
         }.GetNewClosure())
     }
 }
 
-# Action buttons: tiny scale response and color lift, without changing their
-# existing semantic colors (green Apply, red Cancel, teal Restore).
-foreach ($actionName in @('ApplyCustomizeBtn','CancelCustomizeBtn','RestoreDefaultsBtn')) {
+# Action buttons (Apply / Cancel / Restore Defaults): strong, premium hover.
+# Scale-up, edge brighten, soft glow in the button's own colour, press-down and spring release.
+foreach ($actionName in @('ApplyCustomizeBtn','CancelCustomizeBtn','RestoreDefaultsBtn','BasicPresetEssentialBtn','BasicPresetMinimalBtn','BasicPresetMediumBtn','BasicPresetAdvancedBtn','CancelAllTweaksBtn','RestoreBasicDefaultsBtn','ApplyBasicTweaksBtn')) {
     $actionButton = C $actionName
     if (-not ($actionButton -is [System.Windows.Controls.Button])) { continue }
+    $actionButton.Cursor = [System.Windows.Input.Cursors]::Hand
     $actionButton.RenderTransformOrigin = [System.Windows.Point]::new(0.5,0.5)
     $actionScale = New-Object System.Windows.Media.ScaleTransform(1,1)
     $actionButton.RenderTransform = $actionScale
+    $actionBaseEdge = [System.Windows.Media.Color]::FromRgb(120,190,245)
+    if ($actionButton.BorderBrush -is [System.Windows.Media.SolidColorBrush]) { $actionBaseEdge = $actionButton.BorderBrush.Color }
+    $actionEdgeBrush = New-Object System.Windows.Media.SolidColorBrush($actionBaseEdge)
+    $actionButton.BorderBrush = $actionEdgeBrush
+    $actionMix = 0.45; $actionGlowPeak = 0.7
+    if ($actionBaseEdge.R -gt ($actionBaseEdge.G + 40) -and $actionBaseEdge.R -gt ($actionBaseEdge.B + 40)) { $actionMix = 0.2; $actionGlowPeak = 0.35 }
+    $actionHoverEdge = [System.Windows.Media.Color]::FromRgb(
+        [byte][Math]::Min(255,[Math]::Round($actionBaseEdge.R + (255 - $actionBaseEdge.R) * $actionMix)),
+        [byte][Math]::Min(255,[Math]::Round($actionBaseEdge.G + (255 - $actionBaseEdge.G) * $actionMix)),
+        [byte][Math]::Min(255,[Math]::Round($actionBaseEdge.B + (255 - $actionBaseEdge.B) * $actionMix)))
+    $actionGlow = New-Object System.Windows.Media.Effects.DropShadowEffect
+    $actionGlow.Color = $actionBaseEdge
+    $actionGlow.ShadowDepth = 0
+    $actionGlow.BlurRadius = 0
+    $actionGlow.Opacity = 0
+    $actionButton.Effect = $actionGlow
     $actionButton.Add_MouseEnter({
-        $button = $this
-        $scale = $button.RenderTransform
-        $up = New-Object System.Windows.Media.Animation.DoubleAnimation(1.035,[System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(105)))
+        $up = New-Object System.Windows.Media.Animation.DoubleAnimation(1.06,[System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(130)))
         $up.EasingFunction = New-Object System.Windows.Media.Animation.CubicEase
         $up.EasingFunction.EasingMode = [System.Windows.Media.Animation.EasingMode]::EaseOut
-        $scale.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleXProperty,$up)
-        $scale.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleYProperty,$up)
-        $button.Opacity = 0.96
+        $actionScale.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleXProperty,$up)
+        $actionScale.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleYProperty,$up)
+        $glowBlur = New-Object System.Windows.Media.Animation.DoubleAnimation(16,[System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(160)))
+        $glowOpacity = New-Object System.Windows.Media.Animation.DoubleAnimation($actionGlowPeak,[System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(160)))
+        $actionGlow.BeginAnimation([System.Windows.Media.Effects.DropShadowEffect]::BlurRadiusProperty,$glowBlur)
+        $actionGlow.BeginAnimation([System.Windows.Media.Effects.DropShadowEffect]::OpacityProperty,$glowOpacity)
+        $edgeUp = New-Object System.Windows.Media.Animation.ColorAnimation($actionHoverEdge,[System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(130)))
+        $actionEdgeBrush.BeginAnimation([System.Windows.Media.SolidColorBrush]::ColorProperty,$edgeUp)
     }.GetNewClosure())
     $actionButton.Add_MouseLeave({
-        $button = $this
-        $scale = $button.RenderTransform
-        $down = New-Object System.Windows.Media.Animation.DoubleAnimation(1.0,[System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(135)))
+        $down = New-Object System.Windows.Media.Animation.DoubleAnimation(1.0,[System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(170)))
         $down.EasingFunction = New-Object System.Windows.Media.Animation.CubicEase
         $down.EasingFunction.EasingMode = [System.Windows.Media.Animation.EasingMode]::EaseOut
-        $scale.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleXProperty,$down)
-        $scale.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleYProperty,$down)
-        $button.Opacity = 1.0
+        $actionScale.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleXProperty,$down)
+        $actionScale.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleYProperty,$down)
+        $glowBlur = New-Object System.Windows.Media.Animation.DoubleAnimation(0,[System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(170)))
+        $glowOpacity = New-Object System.Windows.Media.Animation.DoubleAnimation(0,[System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(170)))
+        $actionGlow.BeginAnimation([System.Windows.Media.Effects.DropShadowEffect]::BlurRadiusProperty,$glowBlur)
+        $actionGlow.BeginAnimation([System.Windows.Media.Effects.DropShadowEffect]::OpacityProperty,$glowOpacity)
+        $edgeDown = New-Object System.Windows.Media.Animation.ColorAnimation($actionBaseEdge,[System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(170)))
+        $actionEdgeBrush.BeginAnimation([System.Windows.Media.SolidColorBrush]::ColorProperty,$edgeDown)
+    }.GetNewClosure())
+    $actionButton.Add_PreviewMouseLeftButtonDown({
+        $press = New-Object System.Windows.Media.Animation.DoubleAnimation(0.96,[System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(70)))
+        $actionScale.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleXProperty,$press)
+        $actionScale.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleYProperty,$press)
+    }.GetNewClosure())
+    $actionButton.Add_PreviewMouseLeftButtonUp({
+        $restTo = if ($actionButton.IsMouseOver) { 1.06 } else { 1.0 }
+        $spring = New-Object System.Windows.Media.Animation.DoubleAnimation($restTo,[System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(220)))
+        $spring.EasingFunction = New-Object System.Windows.Media.Animation.BackEase
+        $spring.EasingFunction.EasingMode = [System.Windows.Media.Animation.EasingMode]::EaseOut
+        $spring.EasingFunction.Amplitude = 0.7
+        $actionScale.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleXProperty,$spring)
+        $actionScale.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleYProperty,$spring)
     }.GetNewClosure())
 }
+Add-AMRRestoreSheen -Button (C 'RestoreDefaultsBtn')
+Add-AMRRestoreSheen -Button (C 'RestoreBasicDefaultsBtn')
+
+# Hand cursor on every interactive control (buttons, check/radio/toggle, tabs, combo boxes, sliders), including ones created later.
+if (-not (Get-Variable -Name AMRHandCursorRegistered -Scope Script -ValueOnly -ErrorAction SilentlyContinue)) {
+    $script:AMRHandCursorRegistered = $true
+    $script:AMRApplyHandCursor = {
+        param($sender,$e)
+        try {
+            if ($sender -is [System.Windows.FrameworkElement] -and [object]::ReferenceEquals($sender.ReadLocalValue([System.Windows.FrameworkElement]::CursorProperty),[System.Windows.DependencyProperty]::UnsetValue)) {
+                $sender.Cursor = [System.Windows.Input.Cursors]::Hand
+            }
+        } catch {}
+    }
+    $handLoaded = [System.Windows.RoutedEventHandler]$script:AMRApplyHandCursor
+    foreach ($handType in @([System.Windows.Controls.Primitives.ButtonBase],[System.Windows.Controls.TabItem],[System.Windows.Controls.ComboBox],[System.Windows.Controls.ComboBoxItem],[System.Windows.Controls.Slider])) {
+        try { [System.Windows.EventManager]::RegisterClassHandler($handType,[System.Windows.FrameworkElement]::LoadedEvent,$handLoaded) } catch {}
+    }
+    # Controls that were already loaded before registration.
+    try {
+        $handStack = New-Object 'System.Collections.Generic.Stack[System.Windows.DependencyObject]'
+        $handStack.Push($script:Window)
+        while ($handStack.Count -gt 0) {
+            $handItem = $handStack.Pop()
+            if ($handItem -is [System.Windows.Media.Visual] -or $handItem -is [System.Windows.Media.Media3D.Visual3D]) {
+                $handCount = [System.Windows.Media.VisualTreeHelper]::GetChildrenCount($handItem)
+                for ($hi = 0; $hi -lt $handCount; $hi++) { $handStack.Push([System.Windows.Media.VisualTreeHelper]::GetChild($handItem,$hi)) }
+            }
+            if ($handItem -is [System.Windows.Controls.Primitives.ButtonBase] -or $handItem -is [System.Windows.Controls.TabItem] -or $handItem -is [System.Windows.Controls.ComboBox] -or $handItem -is [System.Windows.Controls.ComboBoxItem] -or $handItem -is [System.Windows.Controls.Slider]) {
+                & $script:AMRApplyHandCursor $handItem $null
+            }
+        }
+    } catch {}
+}
+
+# --- Final-build extras X1 to X4 (render-only; no logic, selection or layout changes) ---
+function Get-AMRCardCheckBoxes {
+    param($Card)
+    $found = New-Object System.Collections.ArrayList
+    $walk = New-Object 'System.Collections.Generic.Stack[object]'
+    $walk.Push($Card)
+    while ($walk.Count -gt 0) {
+        $node = $walk.Pop()
+        if ($node -is [System.Windows.Controls.CheckBox]) { [void]$found.Add($node) }
+        try {
+            foreach ($child in [System.Windows.LogicalTreeHelper]::GetChildren($node)) {
+                if ($null -ne $child -and -not ($child -is [string])) { $walk.Push($child) }
+            }
+        } catch {}
+    }
+    return @($found)
+}
+
+# X2: a card with at least one ticked option keeps a soft accent border (hover still works on top of it).
+function Set-AMRCardAccent {
+    param($Card,$Boxes)
+    $active = (@($Boxes | Where-Object { $_.IsChecked -eq $true }).Count -gt 0)
+    if ($active) { [void]$script:AMRActiveCards.Add($Card) } else { [void]$script:AMRActiveCards.Remove($Card) }
+    if ($Card.IsMouseOver) { return }
+    if (-not ($Card.BorderBrush -is [System.Windows.Media.SolidColorBrush]) -or $Card.BorderBrush.IsFrozen) { return }
+    $target = if ($active) { $script:AMRCardAccentColor } else { $script:AMRCardBaseColor }
+    $anim = New-Object System.Windows.Media.Animation.ColorAnimation($target,[System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(220)))
+    $anim.FillBehavior = [System.Windows.Media.Animation.FillBehavior]::HoldEnd
+    $Card.BorderBrush.BeginAnimation([System.Windows.Media.SolidColorBrush]::ColorProperty,$anim)
+}
+
+# X1: the selected-count text does a short pulse when a box is ticked or cleared.
+function Invoke-AMRCounterPulse {
+    param($Block)
+    if (-not ($Block -is [System.Windows.Controls.TextBlock])) { return }
+    if (-not ($Block.RenderTransform -is [System.Windows.Media.ScaleTransform]) -or $Block.RenderTransform.IsFrozen) {
+        $Block.RenderTransformOrigin = [System.Windows.Point]::new(0,0.5)
+        $Block.RenderTransform = New-Object System.Windows.Media.ScaleTransform(1,1)
+    }
+    $pulse = New-Object System.Windows.Media.Animation.DoubleAnimation(1.06,[System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(140)))
+    $pulse.AutoReverse = $true
+    $pulse.EasingFunction = New-Object System.Windows.Media.Animation.CubicEase
+    $Block.RenderTransform.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleXProperty,$pulse)
+    $Block.RenderTransform.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleYProperty,$pulse)
+}
+
+# X3: Apply breathes softly while at least one option is ticked. Never touches IsEnabled.
+function Update-AMRApplyReady {
+    param($Button,$Names)
+    if (-not ($Button -is [System.Windows.Controls.Button])) { return }
+    $any = $false
+    foreach ($checkName in $Names) { $checkItem = C $checkName; if ($checkItem -and $checkItem.IsChecked -eq $true) { $any = $true; break } }
+    $running = $script:AMRApplyPulsing.Contains($Button)
+    if ($any -and -not $running) {
+        [void]$script:AMRApplyPulsing.Add($Button)
+        $breath = New-Object System.Windows.Media.Animation.DoubleAnimation(1.0,0.84,[System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(700)))
+        $breath.AutoReverse = $true
+        $breath.RepeatBehavior = [System.Windows.Media.Animation.RepeatBehavior]::Forever
+        $breath.EasingFunction = New-Object System.Windows.Media.Animation.SineEase
+        $Button.BeginAnimation([System.Windows.UIElement]::OpacityProperty,$breath)
+    } elseif (-not $any -and $running) {
+        [void]$script:AMRApplyPulsing.Remove($Button)
+        $Button.BeginAnimation([System.Windows.UIElement]::OpacityProperty,$null)
+        $Button.Opacity = 1.0
+    }
+}
+
+# X4: after a preset, the cards whose options changed flash once.
+function Invoke-AMRPresetCardFlash {
+    param([string[]]$Before)
+    $panel = C 'BasicTweaksPanel'
+    if (-not $panel) { return }
+    $cardsHost = $null
+    foreach ($child in $panel.Children) { if ($child -is [System.Windows.Controls.WrapPanel]) { $cardsHost = $child; break } }
+    if (-not $cardsHost) { return }
+    foreach ($card in @($cardsHost.Children)) {
+        if (-not ($card -is [System.Windows.Controls.Border])) { continue }
+        if (-not ($card.BorderBrush -is [System.Windows.Media.SolidColorBrush]) -or $card.BorderBrush.IsFrozen) { continue }
+        $changed = $false
+        foreach ($box in @(Get-AMRCardCheckBoxes $card)) {
+            $was = ($Before -contains [string]$box.Name)
+            if ($was -ne ($box.IsChecked -eq $true)) { $changed = $true; break }
+        }
+        if (-not $changed) { continue }
+        $final = if ($script:AMRActiveCards.Contains($card)) { $script:AMRCardAccentColor } else { $script:AMRCardBaseColor }
+        $flash = New-Object System.Windows.Media.Animation.ColorAnimationUsingKeyFrames
+        $flash.FillBehavior = [System.Windows.Media.Animation.FillBehavior]::HoldEnd
+        [void]$flash.KeyFrames.Add((New-Object System.Windows.Media.Animation.LinearColorKeyFrame([System.Windows.Media.Color]::FromRgb(196,228,255),[System.Windows.Media.Animation.KeyTime]::FromTimeSpan([TimeSpan]::FromMilliseconds(145)))))
+        [void]$flash.KeyFrames.Add((New-Object System.Windows.Media.Animation.LinearColorKeyFrame($final,[System.Windows.Media.Animation.KeyTime]::FromTimeSpan([TimeSpan]::FromMilliseconds(300)))))
+        $card.BorderBrush.BeginAnimation([System.Windows.Media.SolidColorBrush]::ColorProperty,$flash)
+    }
+}
+
+try {
+    $xTweakHost = $null
+    $xTweakPanel = C 'BasicTweaksPanel'
+    if ($xTweakPanel) { foreach ($xChild in $xTweakPanel.Children) { if ($xChild -is [System.Windows.Controls.WrapPanel]) { $xTweakHost = $xChild; break } } }
+    foreach ($xHost in @($xTweakHost,(C 'CustomizationCardsPanel'))) {
+        if (-not ($xHost -is [System.Windows.Controls.WrapPanel])) { continue }
+        foreach ($xCard in @($xHost.Children)) {
+            if (-not ($xCard -is [System.Windows.Controls.Border])) { continue }
+            $xBoxes = @(Get-AMRCardCheckBoxes $xCard)
+            foreach ($xBox in $xBoxes) {
+                $xBox.Add_Checked({ Set-AMRCardAccent -Card $xCard -Boxes $xBoxes }.GetNewClosure())
+                $xBox.Add_Unchecked({ Set-AMRCardAccent -Card $xCard -Boxes $xBoxes }.GetNewClosure())
+            }
+        }
+    }
+    foreach ($xName in $script:AMRCustomizeCheckboxNames) {
+        $xCheck = C $xName
+        if (-not $xCheck) { continue }
+        $xCheck.Add_Checked({ Invoke-AMRCounterPulse (C 'CustomizeSelectionCount'); Update-AMRApplyReady -Button (C 'ApplyCustomizeBtn') -Names $script:AMRCustomizeCheckboxNames })
+        $xCheck.Add_Unchecked({ Invoke-AMRCounterPulse (C 'CustomizeSelectionCount'); Update-AMRApplyReady -Button (C 'ApplyCustomizeBtn') -Names $script:AMRCustomizeCheckboxNames })
+    }
+    foreach ($xName in $script:AMRBasicCheckboxNames) {
+        $xCheck = C $xName
+        if (-not $xCheck) { continue }
+        $xCheck.Add_Checked({ Invoke-AMRCounterPulse (C 'BasicSelectionCount'); Update-AMRApplyReady -Button (C 'ApplyBasicTweaksBtn') -Names $script:AMRBasicCheckboxNames })
+        $xCheck.Add_Unchecked({ Invoke-AMRCounterPulse (C 'BasicSelectionCount'); Update-AMRApplyReady -Button (C 'ApplyBasicTweaksBtn') -Names $script:AMRBasicCheckboxNames })
+    }
+} catch {
+    try { Write-AMRLog ('Final-build visual extras warning: ' + $_.Exception.Message) WARNING System } catch {}
+}
+
 
 # Mutually exclusive appearance choices: selecting one clears its opposite.
 (C 'chkDarkMode').Add_Checked({ (C 'chkLightMode').IsChecked = $false })
@@ -28546,11 +30344,14 @@ function Update-AMRTweakSelectionCounts {
 }
 function Set-AMRBasicPreset {
     param([ValidateSet('Essential','Minimal','Medium','Advanced')][string]$Preset)
+    $presetBefore = @()
+    try { $presetBefore = @($script:AMRBasicCheckboxNames | Where-Object { (C $_).IsChecked -eq $true }) } catch {}
     foreach ($name in $script:AMRBasicCheckboxNames) { (C $name).IsChecked = $false }
     foreach ($name in $script:AMRBasicPresetMap[$Preset]) { (C $name).IsChecked = $true }
     (C 'BasicPresetStatus').Text = "$Preset preset selected. Review the checked options, then press Apply Selected Tweaks."
     Update-AMRTweakSelectionCounts
     Write-AMRLog "Selected $Preset local preset; no changes applied yet." INFO Customize
+    try { Invoke-AMRPresetCardFlash -Before $presetBefore } catch {}
 }
 # Keep counters live without linking checkbox state between panels.
 foreach ($name in $script:AMRCustomizeCheckboxNames) {
@@ -29019,6 +30820,76 @@ function Invoke-AMRVerifiedTempCleanup {
     return $result
 }
 
+# A20: Tool Kit temp clear runs in an isolated worker (same verification and same messages as Invoke-AMRVerifiedTempCleanup).
+$script:AMRTempCleanupBusy = $false
+$script:AMRTempCleanupState = $null
+$script:AMRTempCleanupWorkerScript = @'
+param($Queue,$Path,$Label)
+$ErrorActionPreference = 'Stop'
+try { [System.Threading.Thread]::CurrentThread.Priority = [System.Threading.ThreadPriority]::BelowNormal } catch {}
+$deleted = 0
+$failed = 0
+$failureDetails = New-Object 'System.Collections.Generic.List[string]'
+$errorText = $null
+try {
+    if (-not (Test-Path -LiteralPath $Path -PathType Container -ErrorAction Stop)) {
+        throw ("{0} folder does not exist or cannot be accessed: {1}" -f $Label,$Path)
+    }
+    $entries = @(Get-ChildItem -LiteralPath $Path -Force -ErrorAction Stop)
+    foreach ($entry in $entries) {
+        try {
+            Remove-Item -LiteralPath $entry.FullName -Recurse -Force -ErrorAction Stop
+            if (Test-Path -LiteralPath $entry.FullName -ErrorAction Stop) { throw 'Entry still exists after the delete request.' }
+            $deleted++
+        } catch {
+            $failed++
+            $failureDetails.Add(('{0}: {1}' -f $entry.FullName,$_.Exception.Message))
+        }
+    }
+    if ($failed -gt 0) {
+        throw ("{0} cleanup was partial. Verified deleted entries: {1}; failed/not verified: {2}. Details: {3}" -f $Label,$deleted,$failed,($failureDetails -join ' | '))
+    }
+} catch {
+    $errorText = $_.Exception.Message
+}
+[pscustomobject]@{ AMRResult = $true; Deleted = $deleted; Failed = $failed; FailureDetails = $failureDetails.ToArray(); Error = $errorText }
+'@
+
+function Complete-AMRTempCleanup {
+    param($Result)
+    $state = $script:AMRTempCleanupState
+    $script:AMRTempCleanupBusy = $false
+    foreach ($detail in @($Result.FailureDetails | Select-Object -First 200)) {
+        try { Write-AMRDiagnostic -Severity 'WARNING' -Area 'Cleanup' -Operation 'VerifiedTempDelete' -Message ([string]$detail) -Target ([string]$state.Path) } catch {}
+    }
+    if ($null -ne $Result.Error) {
+        Show-AMRMessageGlass ("Could not complete the selected optimization: " + [string]$Result.Error) 'Optimize' OK Error | Out-Null
+        Write-AMRLog ("Optimize tool failed [$($state.Key)]: " + [string]$Result.Error) ERROR Optimize
+        return
+    }
+    Write-AMRLog ("{0} TEMP cleanup verified: {1} top-level entries deleted; {2} failed." -f $state.Kind,$Result.Deleted,$Result.Failed) SUCCESS Cleanup
+    Show-AMRMessageGlass ("{0} temporary-file cleanup verified.`nDeleted entries: {1}`nFailed: {2}" -f $state.Kind,$Result.Deleted,$Result.Failed) 'Optimize' OK Information | Out-Null
+}
+function Fail-AMRTempCleanup {
+    param([string]$Message)
+    $state = $script:AMRTempCleanupState
+    $script:AMRTempCleanupBusy = $false
+    Show-AMRMessageGlass ("Could not complete the selected optimization: " + $Message) 'Optimize' OK Error | Out-Null
+    Write-AMRLog ("Optimize tool failed [$($state.Key)]: " + $Message) ERROR Optimize
+}
+function Start-AMRAsyncTempCleanup {
+    param([string]$Key,[string]$Kind,[string]$Path,[string]$Label)
+    if ($script:AMRTempCleanupBusy) {
+        Show-AMRMessageGlass 'A temporary-file cleanup is already running. Wait for it to finish.' 'Optimize' OK Information | Out-Null
+        return
+    }
+    $script:AMRTempCleanupBusy = $true
+    $script:AMRTempCleanupState = @{ Key = $Key; Kind = $Kind; Path = $Path }
+    Write-AMRLog ("{0} TEMP cleanup started in the background." -f $Kind) INFO Cleanup
+    $started = Start-AMRCleanupJob -Name ('TempCleanup' + $Key) -WorkerScript $script:AMRTempCleanupWorkerScript -WorkerArguments @($Path,$Label) -OnComplete 'Complete-AMRTempCleanup' -OnFailure 'Fail-AMRTempCleanup'
+    if (-not $started) { Fail-AMRTempCleanup 'Could not start the isolated cleanup worker.' }
+}
+
 function Invoke-AMROptimizeTool {
  param([string]$Key)
  try {
@@ -29043,8 +30914,8 @@ function Invoke-AMROptimizeTool {
    'TempSettings' { Start-Process 'ms-settings:temporaryfiles'; return }
    'OptimizeDrives' { Start-Process dfrgui.exe; return }
    'DriveSpace' { Get-PSDrive -PSProvider FileSystem | Select-Object Name,Root,@{N='UsedGB';E={[math]::Round($_.Used/1GB,2)}},@{N='FreeGB';E={[math]::Round($_.Free/1GB,2)}} | Out-GridView -Title 'Drive Space'; return }
-   'ClearUserTemp' { if((Show-AMRMessageGlass 'Delete files from your current user TEMP folder? Files in use may remain.' 'Confirm Cleanup' YesNo Warning) -ne 'Yes'){return}; $cleanupResult=Invoke-AMRVerifiedTempCleanup -Path $env:TEMP -Label 'User TEMP'; Write-AMRLog ("User TEMP cleanup verified: {0} top-level entries deleted; {1} failed." -f $cleanupResult.Deleted,$cleanupResult.Failed) SUCCESS Cleanup; Show-AMRMessageGlass ("User temporary-file cleanup verified.`nDeleted entries: {0}`nFailed: {1}" -f $cleanupResult.Deleted,$cleanupResult.Failed) 'Optimize' OK Information | Out-Null; return }
-   'ClearWindowsTemp' { if((Show-AMRMessageGlass 'Delete files from the Windows TEMP folder? Administrator rights may be required.' 'Confirm Cleanup' YesNo Warning) -ne 'Yes'){return}; $cleanupResult=Invoke-AMRVerifiedTempCleanup -Path (Join-Path $env:windir 'Temp') -Label 'Windows TEMP'; Write-AMRLog ("Windows TEMP cleanup verified: {0} top-level entries deleted; {1} failed." -f $cleanupResult.Deleted,$cleanupResult.Failed) SUCCESS Cleanup; Show-AMRMessageGlass ("Windows temporary-file cleanup verified.`nDeleted entries: {0}`nFailed: {1}" -f $cleanupResult.Deleted,$cleanupResult.Failed) 'Optimize' OK Information | Out-Null; return }
+   'ClearUserTemp' { if((Show-AMRMessageGlass 'Delete files from your current user TEMP folder? Files in use may remain.' 'Confirm Cleanup' YesNo Warning) -ne 'Yes'){return}; Start-AMRAsyncTempCleanup -Key 'ClearUserTemp' -Kind 'User' -Path $env:TEMP -Label 'User TEMP'; return }
+   'ClearWindowsTemp' { if((Show-AMRMessageGlass 'Delete files from the Windows TEMP folder? Administrator rights may be required.' 'Confirm Cleanup' YesNo Warning) -ne 'Yes'){return}; Start-AMRAsyncTempCleanup -Key 'ClearWindowsTemp' -Kind 'Windows' -Path (Join-Path $env:windir 'Temp') -Label 'Windows TEMP'; return }
    'RecycleBin' { Start-Process explorer.exe -ArgumentList 'shell:RecycleBinFolder'; return }
    'InstalledApps' { Start-Process 'ms-settings:appsfeatures'; return }
    'DefaultApps' { Start-Process 'ms-settings:defaultapps'; return }
@@ -29177,7 +31048,227 @@ function New-AMRCompactToolCard {
  return $border
 }
 
+# A9: shared native card list for the Toolkit tabs (Optimize, Security, System, Networks, Utilities).
+# One ItemsControl + one DataTemplate per tab replaces ~50 PowerShell-built cards per tab; hover/gold edge are XAML triggers (220 ms).
+$script:AMRToolCards = @{}
+$script:AMRToolCardSources = @{}
+$script:AMRToolCardItems = @{}
+function Get-AMRToolCardConfig {
+    param([string]$Area)
+    switch ($Area) {
+        'Optimize'  { return @{ Grid='OptToolsGrid';  Search='OptSearchBox';  Filter='OptCategoryFilter';  Count='OptResultsCount';  Icon=[string][char]0x2699; Cols=4 } }
+        'Security'  { return @{ Grid='SecToolsGrid';  Search='SecSearchBox';  Filter='SecCategoryFilter';  Count='SecResultsCount';  Icon=[System.Char]::ConvertFromUtf32(0x1F6E1); Cols=4 } }
+        'System'    { return @{ Grid='SysToolsGrid';  Search='SysSearchBox';  Filter='SysCategoryFilter';  Count='SysResultsCount';  Icon=[string][char]0x2699; Cols=4 } }
+        'Networks'  { return @{ Grid='NetToolsGrid';  Search='NetSearchBox';  Filter='NetCategoryFilter';  Count='NetResultsCount';  Icon=[System.Char]::ConvertFromUtf32(0x1F310); Cols=4 } }
+        'Utilities' { return @{ Grid='UtilButtonsPanel'; Search='UtilSearchBox'; Filter='UtilCategoryFilter'; Count='UtilResultsCount'; Icon=[System.Char]::ConvertFromUtf32(0x1F6E0); Cols=4 } }
+    }
+    return $null
+}
+
+function Initialize-AMRToolCards {
+    param([string]$Area)
+    $cfg = Get-AMRToolCardConfig -Area $Area
+    if (-not $cfg) { return $false }
+    $oldGrid = C $cfg.Grid
+    if (-not $oldGrid) { return $false }
+    $cardsXaml = @"
+<ItemsControl xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" x:Name="ToolCardsList" HorizontalAlignment="Stretch" VerticalAlignment="Top" Focusable="False" Tag="300">
+  <ItemsControl.ItemsPanel><ItemsPanelTemplate><WrapPanel Orientation="Horizontal"/></ItemsPanelTemplate></ItemsControl.ItemsPanel>
+  <ItemsControl.ItemTemplate>
+    <DataTemplate>
+      <Border x:Name="CardRoot" Width="{Binding Tag, RelativeSource={RelativeSource AncestorType={x:Type ItemsControl}}}" Height="68" Margin="0,0,10,10" CornerRadius="12" BorderThickness="1" BorderBrush="#43576C" SnapsToDevicePixels="True" RenderTransformOrigin="0.5,0.5">
+        <Border.RenderTransform><TranslateTransform Y="0"/></Border.RenderTransform>
+        <Border.Background>
+          <LinearGradientBrush StartPoint="0,0" EndPoint="1,1"><GradientStop Color="#F0263646" Offset="0"/><GradientStop Color="#F01B2531" Offset="1"/></LinearGradientBrush>
+        </Border.Background>
+        <Grid>
+          <Border x:Name="CardHover" CornerRadius="11" Opacity="0" IsHitTestVisible="False">
+            <Border.Background>
+              <LinearGradientBrush StartPoint="0,0" EndPoint="0,1"><GradientStop Color="#EE35506B" Offset="0"/><GradientStop Color="#EE27394D" Offset="1"/></LinearGradientBrush>
+            </Border.Background>
+          </Border>
+          <Border x:Name="CardEdge" CornerRadius="12" Margin="-1" BorderThickness="1.2" BorderBrush="#FFB89A62" Opacity="0" IsHitTestVisible="False"/>
+          <Border CornerRadius="11,11,0,0" Margin="1,1,1,0" Height="16" VerticalAlignment="Top" IsHitTestVisible="False">
+            <Border.Background>
+              <LinearGradientBrush StartPoint="0,0" EndPoint="0,1"><GradientStop Color="#1EFFFFFF" Offset="0"/><GradientStop Color="#00FFFFFF" Offset="1"/></LinearGradientBrush>
+            </Border.Background>
+          </Border>
+          <Grid>
+            <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="40"/></Grid.ColumnDefinitions>
+            <Button x:Name="ToolRunBtn" Grid.Column="0" Tag="{Binding Id}" Background="Transparent" BorderThickness="0" Padding="0" Cursor="Hand" FocusVisualStyle="{x:Null}" HorizontalContentAlignment="Stretch">
+              <Button.Template>
+                <ControlTemplate TargetType="{x:Type Button}"><Border Background="Transparent" CornerRadius="11"><ContentPresenter/></Border></ControlTemplate>
+              </Button.Template>
+              <Grid Margin="10,0,4,0">
+                <Grid.ColumnDefinitions><ColumnDefinition Width="42"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                <Border Width="36" Height="36" CornerRadius="10" BorderThickness="1" BorderBrush="#99B89A62" HorizontalAlignment="Left" VerticalAlignment="Center">
+                  <Border.Background>
+                    <LinearGradientBrush StartPoint="0,0" EndPoint="0,1"><GradientStop Color="#FF35506B" Offset="0"/><GradientStop Color="#FF263646" Offset="1"/></LinearGradientBrush>
+                  </Border.Background>
+                  <TextBlock Text="{Binding Icon}" FontSize="16" HorizontalAlignment="Center" VerticalAlignment="Center" Foreground="#FFE2C68E"/>
+                </Border>
+                <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                  <TextBlock Text="{Binding Name}" FontSize="12" FontWeight="SemiBold" Foreground="#FFE7EDF3" TextWrapping="Wrap" TextTrimming="CharacterEllipsis" MaxHeight="32"/>
+                  <TextBlock Text="{Binding Category}" FontSize="10" Foreground="#FFB89A62" Margin="0,2,0,0"/>
+                </StackPanel>
+              </Grid>
+            </Button>
+            <Button x:Name="ToolInfoBtn" Grid.Column="1" Tag="{Binding Id}" Width="24" Height="24" HorizontalAlignment="Center" VerticalAlignment="Center" Cursor="Hand" FocusVisualStyle="{x:Null}" ToolTip="About this tool">
+              <Button.Template>
+                <ControlTemplate TargetType="{x:Type Button}">
+                  <Border x:Name="InfoFace" CornerRadius="12" BorderThickness="1" BorderBrush="#FFE2C68E" Background="#FFB89A62">
+                    <TextBlock Text="i" FontSize="12" FontWeight="Bold" Foreground="#FF17212B" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                  </Border>
+                  <ControlTemplate.Triggers>
+                    <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="InfoFace" Property="Background" Value="#FFE0C58C"/></Trigger>
+                    <Trigger Property="IsPressed" Value="True"><Setter TargetName="InfoFace" Property="Background" Value="#FFA8884F"/></Trigger>
+                  </ControlTemplate.Triggers>
+                </ControlTemplate>
+              </Button.Template>
+            </Button>
+          </Grid>
+        </Grid>
+      </Border>
+      <DataTemplate.Triggers>
+        <Trigger SourceName="CardRoot" Property="IsMouseOver" Value="True">
+          <Trigger.EnterActions>
+            <BeginStoryboard><Storyboard>
+              <DoubleAnimation Storyboard.TargetName="CardHover" Storyboard.TargetProperty="Opacity" To="1" Duration="0:0:0.22"/>
+              <DoubleAnimation Storyboard.TargetName="CardEdge" Storyboard.TargetProperty="Opacity" To="1" Duration="0:0:0.22"/>
+              <DoubleAnimation Storyboard.TargetName="CardRoot" Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.Y)" To="-1.5" Duration="0:0:0.22"/>
+            </Storyboard></BeginStoryboard>
+          </Trigger.EnterActions>
+          <Trigger.ExitActions>
+            <BeginStoryboard><Storyboard>
+              <DoubleAnimation Storyboard.TargetName="CardHover" Storyboard.TargetProperty="Opacity" To="0" Duration="0:0:0.22"/>
+              <DoubleAnimation Storyboard.TargetName="CardEdge" Storyboard.TargetProperty="Opacity" To="0" Duration="0:0:0.22"/>
+              <DoubleAnimation Storyboard.TargetName="CardRoot" Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.Y)" To="0" Duration="0:0:0.22"/>
+            </Storyboard></BeginStoryboard>
+          </Trigger.ExitActions>
+        </Trigger>
+      </DataTemplate.Triggers>
+    </DataTemplate>
+  </ItemsControl.ItemTemplate>
+</ItemsControl>
+"@
+    try {
+        $cardsControl = [Windows.Markup.XamlReader]::Parse($cardsXaml)
+        $parentPanel = $oldGrid.Parent -as [System.Windows.Controls.Panel]
+        if (-not $parentPanel) { throw ('The ' + $Area + ' list has no panel parent.') }
+        $cardsControl.Resources['AMRToolArea'] = [string]$Area
+        $cardsControl.AddHandler([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent,[System.Windows.RoutedEventHandler]{
+            param($sender,$e)
+            try {
+                $clicked = $e.OriginalSource -as [System.Windows.Controls.Button]
+                if (-not $clicked) { return }
+                $areaName = [string]$sender.Resources['AMRToolArea']
+                $index = -1
+                if (-not [int]::TryParse([string]$clicked.Tag,[ref]$index)) { return }
+                $source = @($script:AMRToolCardSources[$areaName])
+                if ($index -lt 0 -or $index -ge $source.Count) { return }
+                $tool = $source[$index]
+                if ($clicked.Name -eq 'ToolRunBtn') {
+                    $e.Handled = $true
+                    switch ($areaName) {
+                        'Optimize'  { Invoke-AMROptimizeTool -Key $tool.Key }
+                        'Security'  { Invoke-AMRSecurityTool -Key $tool.Key }
+                        'System'    { Invoke-AMRSystemTool -Key $tool.Key }
+                        'Networks'  { Invoke-AMRNetworkTool -Key $tool.Key }
+                        'Utilities' { $tool.Button.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent))) }
+                    }
+                } elseif ($clicked.Name -eq 'ToolInfoBtn') {
+                    $e.Handled = $true
+                    if ($areaName -eq 'Utilities') { Show-AMRMessageGlass ([string]$tool.Description) 'Utility Information' OK Information | Out-Null }
+                    else { Show-AMRMessageGlass (Get-AMRToolInfoText -Tool $tool -Area $areaName) 'Tool Information' OK Information | Out-Null }
+                }
+            } catch { try { Write-AMRLog ('Toolkit card click failed: ' + $_.Exception.Message) ERROR System } catch {} }
+        })
+        $maxColumns = [int]$cfg.Cols
+        $cardsControl.Resources['AMRToolMaxCols'] = $maxColumns
+        $cardsControl.Add_SizeChanged({
+            param($sender,$e)
+            try {
+                $newWidth = [double]$sender.ActualWidth
+                if ($newWidth -lt 240) { return }
+                $maxCols = [int]$sender.Resources['AMRToolMaxCols']
+                $columns = [int][Math]::Max(1,[Math]::Min($maxCols,[Math]::Floor(($newWidth + 10) / 250)))
+                $sender.Tag = [double][Math]::Max(220,[Math]::Floor(($newWidth - ($columns * 10)) / $columns))
+            } catch { try { Write-AMRLog ('Toolkit card layout warning: ' + $_.Exception.Message) WARNING System } catch {} }
+        })
+        $insertAt = $parentPanel.Children.IndexOf($oldGrid) + 1
+        [void]$parentPanel.Children.Insert($insertAt,$cardsControl)
+        $oldGrid.Visibility = 'Collapsed'
+        $script:AMRToolCards[$Area] = $cardsControl
+        return $true
+    } catch {
+        $script:AMRToolCards.Remove($Area)
+        try { Write-AMRDriverDiagnostic -Severity WARNING -Operation 'Toolkit' -Stage 'CardsFallback' -Message ('Toolkit ' + $Area + ' kept the original card builder: ' + $_.Exception.Message) -Source 'AMRToolCards' } catch {}
+        return $false
+    }
+}
+
+function Update-AMRToolCardsView {
+    param([string]$Area)
+    $cards = $script:AMRToolCards[$Area]
+    if (-not $cards) { return $false }
+    try {
+        $cfg = Get-AMRToolCardConfig -Area $Area
+        $searchBox = C $cfg.Search; $filterBox = C $cfg.Filter; $countText = C $cfg.Count
+        $search = if ($searchBox) { [string]$searchBox.Text } else { '' }
+        $selected = if ($filterBox) { $filterBox.SelectedItem } else { $null }
+        $category = 'All Categories'
+        if ($selected) { $category = ([string]$selected.Content -replace '^[^A-Za-z0-9]+\s*','') }
+        $visibleItems = New-Object System.Collections.Generic.List[object]
+        $total = 0
+        $sourceList = @()
+        switch ($Area) {
+            'Optimize'  { $sourceList = @($script:AMROptimizeTools) }
+            'Security'  { $sourceList = @($script:AMRSecurityTools) }
+            'System'    { $sourceList = @($script:AMRSystemTools) }
+            'Networks'  { $sourceList = @($script:AMRNetworkTools) }
+            'Utilities' { $sourceList = @($script:UtilityCardEntries) }
+        }
+        $total = $sourceList.Count
+        $script:AMRToolCardSources[$Area] = $sourceList
+        for ($i = 0; $i -lt $sourceList.Count; $i++) {
+            $tool = $sourceList[$i]
+            if ($category -ne 'All Categories' -and [string]$tool.Category -ne $category) { continue }
+            if ($Area -eq 'Optimize') {
+                if (-not ((([string]$tool.Name + ' ' + [string]$tool.Keywords + ' ' + [string]$tool.Category)) -match [regex]::Escape($search))) { continue }
+            } elseif ($Area -eq 'Utilities') {
+                if (-not ([string]::IsNullOrWhiteSpace($search) -or ([string]$tool.Name).IndexOf($search,[System.StringComparison]::OrdinalIgnoreCase) -ge 0)) { continue }
+            } else {
+                $haystack = ('{0} {1} {2}' -f $tool.Name,$tool.Category,$tool.Keywords)
+                if (-not [string]::IsNullOrWhiteSpace($search)) {
+                    $matched = $false
+                    try { $matched = ($haystack -like "*$search*") } catch { $matched = ($haystack.IndexOf($search,[System.StringComparison]::OrdinalIgnoreCase) -ge 0) }
+                    if (-not $matched) { continue }
+                }
+            }
+            $visibleItems.Add([pscustomobject]@{ Id = [string]$i; Name = [string]$tool.Name; Category = [string]$tool.Category; Icon = [string]$cfg.Icon })
+        }
+        $cards.ItemsSource = $visibleItems.ToArray()
+        if ($countText) {
+            switch ($Area) {
+                'Optimize'  { $countText.Text = ('Showing {0} of {1} optimization tools' -f $visibleItems.Count,$total) }
+                'Security'  { $countText.Text = ('{0} security tools shown' -f $visibleItems.Count) }
+                'System'    { $countText.Text = ('{0} system tools shown' -f $visibleItems.Count) }
+                'Networks'  { $countText.Text = ('{0} network tools shown' -f $visibleItems.Count) }
+                'Utilities' { $countText.Text = ('{0} utilities shown' -f $visibleItems.Count) }
+            }
+        }
+        return $true
+    } catch {
+        try { Write-AMRDriverDiagnostic -Severity WARNING -Operation 'Toolkit' -Stage 'CardsFallback' -Message ('Toolkit ' + $Area + ' list update failed, original builder used: ' + $_.Exception.Message) -Source 'Update-AMRToolCardsView' } catch {}
+        try { $cards.ItemsSource = $null; $cards.Visibility = 'Collapsed'; $old = C (Get-AMRToolCardConfig -Area $Area).Grid; if ($old) { $old.Visibility = 'Visible' } } catch {}
+        if ($Area -eq 'Utilities') { return $true }
+        $script:AMRToolCards.Remove($Area)
+        return $false
+    }
+}
+
 function Update-AMROptimizeView {
+ if (Update-AMRToolCardsView -Area 'Optimize') { return }
  $query = ''; if ($null -ne (C 'OptSearchBox')) { $query = (C 'OptSearchBox').Text }
  $category = 'All Categories'; if ($null -ne (C 'OptCategoryFilter') -and (C 'OptCategoryFilter').SelectedItem) { $category = ([string](C 'OptCategoryFilter').SelectedItem.Content) -replace '^⚙️\s*','' }
  $grid = C 'OptToolsGrid'; if ($null -eq $grid) { return }; $grid.Children.Clear()
@@ -29187,6 +31278,7 @@ function Update-AMROptimizeView {
 }
 (C 'OptSearchBox').Add_TextChanged({ Update-AMROptimizeView })
 (C 'OptCategoryFilter').Add_SelectionChanged({ Update-AMROptimizeView })
+[void](Initialize-AMRToolCards -Area 'Optimize')
 Add-AMRStartupMark 'L25710 before-UpdateOptimizeView'
 Update-AMROptimizeView
 
@@ -29307,6 +31399,7 @@ function Invoke-AMRSecurityTool {
  } catch { Write-AMRLog ("Security tool failed ({0}): {1}" -f $Key,$_.Exception.Message) ERROR Security; Show-AMRMessageGlass ("Security tool failed:`n$($_.Exception.Message)") 'Security Tool Error' OK Error | Out-Null }
 }
 function Update-AMRSecurityView {
+ if (Update-AMRToolCardsView -Area 'Security') { return }
  $grid=C 'SecToolsGrid'; $grid.Children.Clear(); $search=[string](C 'SecSearchBox').Text
  $selected=(C 'SecCategoryFilter').SelectedItem; $category='All Categories'; if($selected){$category=([string]$selected.Content -replace '^🛡️\s*','')}
  $visible=0
@@ -29320,6 +31413,7 @@ function Update-AMRSecurityView {
 }
 (C 'SecSearchBox').Add_TextChanged({Update-AMRSecurityView})
 (C 'SecCategoryFilter').Add_SelectionChanged({Update-AMRSecurityView})
+[void](Initialize-AMRToolCards -Area 'Security')
 Add-AMRStartupMark 'L25842 before-UpdateSecurityView'
 Update-AMRSecurityView
 
@@ -29441,6 +31535,7 @@ function Invoke-AMRSystemTool {
  } catch { Write-AMRLog ("System tool failed ({0}): {1}" -f $Key,$_.Exception.Message) ERROR System; Show-AMRMessageGlass ("System tool failed:`n$($_.Exception.Message)") 'System Tool Error' OK Error | Out-Null }
 }
 function Update-AMRSystemView {
+ if (Update-AMRToolCardsView -Area 'System') { return }
  $grid=C 'SysToolsGrid'; $grid.Children.Clear(); $search=[string](C 'SysSearchBox').Text
  $selected=(C 'SysCategoryFilter').SelectedItem; $category='All Categories'; if($selected){$category=([string]$selected.Content -replace '^[^A-Za-z0-9]+\s*','')}
  $visible=0
@@ -29454,6 +31549,7 @@ function Update-AMRSystemView {
 }
 (C 'SysSearchBox').Add_TextChanged({Update-AMRSystemView})
 (C 'SysCategoryFilter').Add_SelectionChanged({Update-AMRSystemView})
+[void](Initialize-AMRToolCards -Area 'System')
 Add-AMRStartupMark 'L25975 before-UpdateSystemView'
 Update-AMRSystemView
 
@@ -29579,6 +31675,7 @@ function Invoke-AMRNetworkTool {
  }
 }
 function Update-AMRNetworkView {
+ if (Update-AMRToolCardsView -Area 'Networks') { return }
  $grid=C 'NetToolsGrid'; $grid.Children.Clear(); $search=[string](C 'NetSearchBox').Text
  $selected=(C 'NetCategoryFilter').SelectedItem; $category='All Categories'; if($selected){$category=([string]$selected.Content -replace '^[^A-Za-z0-9]+\s*','')}
  $visible=0
@@ -29592,6 +31689,7 @@ function Update-AMRNetworkView {
 }
 (C 'NetSearchBox').Add_TextChanged({ Update-AMRNetworkView })
 (C 'NetCategoryFilter').Add_SelectionChanged({ Update-AMRNetworkView })
+[void](Initialize-AMRToolCards -Area 'Networks')
 Add-AMRStartupMark 'L26112 before-UpdateNetworkView'
 Update-AMRNetworkView
 
@@ -30272,10 +32370,10 @@ foreach($item in $Selected){try{
 
 (C 'CleanupOrphanQuarantineBtn').Add_Click({
  $selected=@((C 'CleanupOrphanResults').Items | Where-Object {$_.IsChecked -and $_.Path})
- if($selected.Count -eq 0){[void][System.Windows.MessageBox]::Show('Select one or more analysis results first.','AMR Orphan Cleanup','OK','Information');return}
+ if($selected.Count -eq 0){[void](Show-AMRMessageGlass 'Select one or more analysis results first.' 'AMR Orphan Cleanup' OK Information);return}
  $unsafe=@($selected | Where-Object {$_.Classification -ne 'Likely leftover · review'})
- if($unsafe.Count -gt 0){[void][System.Windows.MessageBox]::Show("Only 'Likely leftover' results can be quarantined. Linked or uncertain folders are blocked for safety.",'AMR Safety Check','OK','Warning');return}
- $confirm=[System.Windows.MessageBox]::Show(('Move {0} selected folder(s) to reversible quarantine? No permanent deletion will occur.' -f $selected.Count),'Confirm Quarantine','YesNo','Warning')
+ if($unsafe.Count -gt 0){[void](Show-AMRMessageGlass "Only 'Likely leftover' results can be quarantined. Linked or uncertain folders are blocked for safety." 'AMR Safety Check' OK Warning);return}
+ $confirm=Show-AMRMessageGlass ('Move {0} selected folder(s) to reversible quarantine? No permanent deletion will occur.' -f $selected.Count) 'Confirm Quarantine' YesNo Warning
  if($confirm -ne [System.Windows.MessageBoxResult]::Yes){return}
  $status=C 'CleanupOrphanStatus';$status.Text='Moving selected folders to quarantine in background…'
  Start-AMROrphanBackgroundTask -TaskName 'Quarantine' -WorkerScript $orphanQuarantineWorker -Arguments @((,$selected),$script:AMROrphanQuarantineRoot) -OnComplete {
@@ -30289,8 +32387,8 @@ foreach($item in $Selected){try{
 (C 'CleanupOrphanRefreshBtn').Add_Click({Set-AMROrphanQuarantineList; (C 'CleanupOrphanStatus').Text='Quarantine list refreshed.'})
 (C 'CleanupOrphanRestoreBtn').Add_Click({
  $selected=@((C 'CleanupOrphanQuarantineList').Items | Where-Object {$_.IsChecked -and $_.Manifest})
- if($selected.Count -eq 0){[void][System.Windows.MessageBox]::Show('Select one or more quarantined items first.','AMR Restore','OK','Information');return}
- $confirm=[System.Windows.MessageBox]::Show(('Restore {0} selected item(s) to their original paths? Existing files will never be overwritten.' -f $selected.Count),'Confirm Restore','YesNo','Question')
+ if($selected.Count -eq 0){[void](Show-AMRMessageGlass 'Select one or more quarantined items first.' 'AMR Restore' OK Information);return}
+ $confirm=Show-AMRMessageGlass ('Restore {0} selected item(s) to their original paths? Existing files will never be overwritten.' -f $selected.Count) 'Confirm Restore' YesNo Question
  if($confirm -ne [System.Windows.MessageBoxResult]::Yes){return}
  $status=C 'CleanupOrphanStatus';$status.Text='Restoring selected folders in background…'
  Start-AMROrphanBackgroundTask -TaskName 'Restore' -WorkerScript $orphanRestoreWorker -Arguments @((,$selected)) -OnComplete {
@@ -30493,7 +32591,10 @@ function Add-AMRKnownGPUCacheRoot {
     }
 }
 
-$script:AMRGPUInventory = @(Get-AMRGPUInventory)
+# A24: the GPU inventory (CIM Win32_VideoController + Get-PnpDevice) was queried synchronously here during
+# script load (about 0.5 s of the pre-window startup per the A22 startup marks). Its only consumer is the
+# 'GPU detected' log lines below, so it now runs in a background worker after first render.
+$script:AMRGPUInventory = @()
 
 function Add-AMRGPUCacheCandidate {
     param([string]$Vendor,[string]$CacheType,[string]$Path)
@@ -30579,13 +32680,51 @@ if (-not [string]::IsNullOrWhiteSpace($env:USERPROFILE)) {
 
 # Inventory logging includes product family, raw PCI identity, board partner and source.
 # Product family is descriptive only; it never determines arbitrary cleanup locations.
-foreach ($gpu in $script:AMRGPUInventory) {
-    Write-AMRLog ("GPU detected | Name={0} | ChipVendor={1} | Family={2} | PCI Vendor ID={3} | PCI Device ID={4} | BoardPartner={5} | SubsystemVendorID={6} | Driver={7} | DriverDate={8} | Discovery={9}" -f $gpu.Name,$gpu.Vendor,$gpu.Family,$gpu.VendorId,$gpu.DeviceId,$gpu.BoardPartner,$gpu.SubsystemVendorId,$gpu.DriverVersion,$gpu.DriverDate,$gpu.Discovery) INFO Cleanup
+function Start-AMRGpuInventoryWorker {
+    $runspace = $null; $ps = $null
+    try {
+        $funcText = (Get-Command Get-AMRGPUInventory -ErrorAction Stop).ScriptBlock.ToString()
+        $workerText = "function Write-AMRLog { param(`$Message,`$Level,`$Area) }`nfunction Get-AMRGPUInventory {`n" + $funcText + "`n}`nGet-AMRGPUInventory"
+        $runspace = [runspacefactory]::CreateRunspace()
+        $runspace.ApartmentState = 'MTA'
+        $runspace.Open()
+        $ps = [powershell]::Create()
+        $ps.Runspace = $runspace
+        [void]$ps.AddScript($workerText,$true)
+        $script:AMRGpuInvJob = [pscustomobject]@{ PowerShell = $ps; Runspace = $runspace; Async = $ps.BeginInvoke() }
+        $script:AMRGpuInvTimer = New-Object System.Windows.Threading.DispatcherTimer
+        $script:AMRGpuInvTimer.Interval = [TimeSpan]::FromMilliseconds(250)
+        $script:AMRGpuInvTimer.Add_Tick({
+            $job = $script:AMRGpuInvJob
+            if (-not $job) { $script:AMRGpuInvTimer.Stop(); return }
+            if (-not $job.Async.IsCompleted) { return }
+            $script:AMRGpuInvTimer.Stop()
+            $script:AMRGpuInvJob = $null
+            $items = @()
+            try { $items = @($job.PowerShell.EndInvoke($job.Async)) } catch { Write-AMRLog ('GPU inventory worker failed: ' + $_.Exception.Message) WARNING Cleanup }
+            try { $job.PowerShell.Dispose() } catch {}
+            try { $job.Runspace.Close(); $job.Runspace.Dispose() } catch {}
+            $script:AMRGPUInventory = @($items | Where-Object { $null -ne $_ -and $_.PSObject.Properties['Vendor'] })
+            foreach ($gpu in $script:AMRGPUInventory) {
+                Write-AMRLog ("GPU detected | Name={0} | ChipVendor={1} | Family={2} | PCI Vendor ID={3} | PCI Device ID={4} | BoardPartner={5} | SubsystemVendorID={6} | Driver={7} | DriverDate={8} | Discovery={9}" -f $gpu.Name,$gpu.Vendor,$gpu.Family,$gpu.VendorId,$gpu.DeviceId,$gpu.BoardPartner,$gpu.SubsystemVendorId,$gpu.DriverVersion,$gpu.DriverDate,$gpu.Discovery) INFO Cleanup
+            }
+            if ($script:AMRGPUInventory.Count -eq 0) {
+                Write-AMRLog 'GPU inventory returned no adapters. Known DirectX and vendor cache candidates were still checked safely.' WARNING Cleanup
+            }
+        })
+        $script:AMRGpuInvTimer.Start()
+    } catch {
+        try { if ($ps) { $ps.Dispose() } } catch {}
+        try { if ($runspace) { $runspace.Close(); $runspace.Dispose() } } catch {}
+        $script:AMRGpuInvJob = $null
+        Write-AMRLog ('Could not start the GPU inventory worker: ' + $_.Exception.Message) WARNING Cleanup
+    }
 }
-if ($script:AMRGPUInventory.Count -eq 0) {
-    Write-AMRLog 'GPU inventory returned no adapters. Known DirectX and vendor cache candidates were still checked safely.' WARNING Cleanup
-}
+$script:AMRGpuInvJob = $null
+$script:AMRGpuInvTimer = $null
+Add-AMRDeferredStartupAction -Name 'GpuInventory' -Action { Start-AMRGpuInventoryWorker }
 
+Add-AMRStartupMark 'cleanup.beforeBrowserProfiles'
 # Chromium-family browser caches. Enumerate every recognized profile folder (Default,
 # Profile N, Guest/System Profile, Person N) instead of scanning Default only. Only cache
 # subdirectories are candidates; cookies, Login Data, Web Data, bookmarks and sessions
@@ -30671,12 +32810,32 @@ foreach ($firefoxProfiles in $firefoxProfileRoots) {
 # Detection uses uninstall metadata and known executable locations; a missing app is
 # reported as Not installed and never treated as an error. User data, messages, media,
 # downloads, credentials, profiles and project folders are intentionally excluded.
+Add-AMRStartupMark 'cleanup.beforeAppDetect'
 $uninstallDisplayNames = New-Object 'System.Collections.Generic.List[string]'
+# A1: the uninstall-registry read and the AppX lookups run in a worker started at the top of the script (about 0.5 s of the pre-window startup in A24).
+# Wait only if it is not finished; on any failure the original synchronous code below runs unchanged.
+$cleanupDetectUsed = $false
+try {
+    $cleanupDetect = Complete-AMRStartupPrefetchWorker -Job $script:AMRCleanupDetectJob -WaitMs 20000
+    $script:AMRCleanupDetectJob = $null
+    $cleanupDetectItem = $null
+    if ($cleanupDetect.Ok -and @($cleanupDetect.Items).Count -gt 0) { $cleanupDetectItem = @($cleanupDetect.Items)[0] }
+    if ($null -ne $cleanupDetectItem -and $cleanupDetectItem.PSObject.Properties['DisplayNames'] -and $cleanupDetectItem.PSObject.Properties['Appx']) {
+        foreach ($detectedName in @($cleanupDetectItem.DisplayNames)) { if (-not [string]::IsNullOrWhiteSpace([string]$detectedName)) { $uninstallDisplayNames.Add([string]$detectedName) } }
+        $script:AMRCleanupAppxDetect = $cleanupDetectItem.Appx
+        $cleanupDetectUsed = $true
+        Write-AMRLog ('Cleanup app detection prefetch used: {0} display name(s); worker {1} ms (registry {2} ms); waited {3} ms on the startup path.' -f $uninstallDisplayNames.Count,$cleanupDetectItem.TotalMs,$cleanupDetectItem.RegistryMs,$cleanupDetect.WaitedMs) INFO Cleanup
+    } else {
+        Write-AMRLog ('Cleanup app detection prefetch not available (ok={0}, waited {1} ms); using the synchronous scan.' -f $cleanupDetect.Ok,$cleanupDetect.WaitedMs) WARNING Cleanup
+    }
+} catch { $cleanupDetectUsed = $false; $script:AMRCleanupAppxDetect = $null; $uninstallDisplayNames.Clear() }
+Add-AMRStartupMark 'cleanup.appDetectPrefetch.applied'
 $uninstallRegistryRoots = @(
     'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall',
     'HKLM:\Software\Wow6432Node\Microsoft\Windows\CurrentVersion\Uninstall',
     'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall'
 )
+if (-not $cleanupDetectUsed) {
 foreach ($registryRoot in $uninstallRegistryRoots) {
     try {
         foreach ($subKey in @(Get-ChildItem -LiteralPath $registryRoot -ErrorAction SilentlyContinue)) {
@@ -30687,6 +32846,8 @@ foreach ($registryRoot in $uninstallRegistryRoots) {
         }
     } catch { }
 }
+}
+Add-AMRStartupMark 'cleanup.uninstallRegistry.ready'
 function Test-AMRKnownAppInstalled {
     param([string]$DisplayPattern,[string[]]$ExecutablePaths)
     $packageNames = @()
@@ -30694,6 +32855,10 @@ function Test-AMRKnownAppInstalled {
     if ($DisplayPattern -match 'Spotify') { $packageNames += 'SpotifyAB.SpotifyMusic' }
     if ($DisplayPattern -match 'Discord') { $packageNames += '*Discord*' }
     foreach ($packageName in $packageNames) {
+        if ($null -ne $script:AMRCleanupAppxDetect -and $script:AMRCleanupAppxDetect.ContainsKey($packageName)) {
+            if ([bool]$script:AMRCleanupAppxDetect[$packageName]) { return $true }
+            continue
+        }
         try { if (@(Get-AppxPackage -Name $packageName -ErrorAction SilentlyContinue).Count -gt 0) { return $true } } catch { }
     }
     foreach ($displayName in $uninstallDisplayNames) {
@@ -30754,6 +32919,7 @@ foreach ($app in $appCacheDefinitions) {
     }
     $script:AMRApplicationCacheInventory.Add([pscustomobject]@{Name=$app.Name;Status=$appStatus;CacheFolders=$cacheCount})
 }
+Add-AMRStartupMark 'cleanup.appInventory.done'
 
 # Cross-volume application-cache discovery (bounded to known user-data roots).
 # Search every fixed local volume for Windows user profiles, then register only
@@ -31248,18 +33414,48 @@ function Update-AMRCleanupProgress {
     try { [System.Windows.Forms.Application]::DoEvents() } catch { }
 }
 
-function Update-AMRCleanupSelectedSummary {
-    if ($null -eq $script:CleanupScanResults -or $script:CleanupScanResults -isnot [System.Collections.IDictionary]) { $script:CleanupScanResults = @{} }
-    $selectedBytes = [int64]0
-    $selectedFiles = 0
-    foreach ($category in $script:CleanupCategories) {
-        $check = C $category.Check
-        if ($check -and $check.IsChecked -eq $true -and $script:CleanupScanResults.ContainsKey($category.Key)) {
-            $result = $script:CleanupScanResults[$category.Key]
-            $selectedBytes += [int64]$result.Bytes
-            $selectedFiles += [int]$result.Count
+# A20: totals for a set of categories, counting a file once even when two categories list it (GPU shader cache and Application caches overlap).
+function Get-AMRCleanupSelectionTotals {
+    param([object[]]$Categories)
+    $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    $totalFiles = 0
+    [int64]$totalBytes = 0
+    foreach ($category in @($Categories)) {
+        if (-not $script:CleanupScanResults.ContainsKey($category.Key)) { continue }
+        $result = $script:CleanupScanResults[$category.Key]
+        $before = $seen.Count
+        $seen.UnionWith([string[]]@($result.Files))
+        $added = $seen.Count - $before
+        $totalFiles += $added
+        if ($added -eq [int]$result.Count) {
+            $totalBytes += [int64]$result.Bytes
+        } elseif ($added -gt 0) {
+            # Overlap with an earlier category: size only the files this category adds.
+            $earlier = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+            foreach ($earlierCategory in @($Categories)) {
+                if ($earlierCategory.Key -eq $category.Key) { break }
+                if ($script:CleanupScanResults.ContainsKey($earlierCategory.Key)) { $earlier.UnionWith([string[]]@($script:CleanupScanResults[$earlierCategory.Key].Files)) }
+            }
+            foreach ($candidate in @($result.Files)) {
+                if (-not $earlier.Contains([string]$candidate)) {
+                    try { $totalBytes += ([System.IO.FileInfo]::new([string]$candidate)).Length } catch { }
+                }
+            }
         }
     }
+    return [pscustomobject]@{ Files = $totalFiles; Bytes = $totalBytes }
+}
+
+function Update-AMRCleanupSelectedSummary {
+    if ($null -eq $script:CleanupScanResults -or $script:CleanupScanResults -isnot [System.Collections.IDictionary]) { $script:CleanupScanResults = @{} }
+    $selectedCategories = New-Object 'System.Collections.Generic.List[object]'
+    foreach ($category in $script:CleanupCategories) {
+        $check = C $category.Check
+        if ($check -and $check.IsChecked -eq $true -and $script:CleanupScanResults.ContainsKey($category.Key)) { $selectedCategories.Add($category) }
+    }
+    $selectedTotals = Get-AMRCleanupSelectionTotals -Categories $selectedCategories.ToArray()
+    $selectedBytes = [int64]$selectedTotals.Bytes
+    $selectedFiles = [int]$selectedTotals.Files
     $summary = C 'CleanupSelectedSummary'
     if ($summary) { $summary.Text = ('Selected: {0:N0} files • {1:N2} MB' -f $selectedFiles,($selectedBytes / 1MB)) }
 }
@@ -31294,9 +33490,145 @@ if ($cancelCleanupSelectionButton) {
     })
 }
 
-# Legacy simple Scan Now: scan each registered category in order and store the file list.
-# Smart Cleanup operation gate: DoEvents is used for responsive repainting,
-# so block other Smart Cleanup actions from being re-entered mid-operation.
+# ---------------------------------------------------------------------------------------------------------------------
+# A20: isolated Cleanup workers. Scan Now, Clean Selected, Inspect, Find Large Files, Recycle Bin and the Tool Kit temp
+# clear no longer touch the disk (or COM) on the UI thread. Each operation runs in its own background Runspace, reports
+# small progress messages through a ConcurrentQueue and the UI thread only drains that queue in short time slices from one
+# DispatcherTimer (no DoEvents, so a slow disk can no longer freeze or whiten the window). The file selection rules,
+# safety checks (reparse points, registered roots, incomplete scans blocking Clean Selected), confirmations and
+# summaries are the same as before.
+# ---------------------------------------------------------------------------------------------------------------------
+$script:AMRCleanupJobs = New-Object System.Collections.ArrayList
+$script:AMRCleanupJobTimer = $null
+$script:AMRCleanupTickBusy = $false
+
+function Start-AMRCleanupJob {
+    param(
+        [Parameter(Mandatory=$true)][string]$Name,
+        [Parameter(Mandatory=$true)][string]$WorkerScript,
+        [object[]]$WorkerArguments = @(),
+        [string]$OnMessage = '',
+        [string]$OnComplete = '',
+        [string]$OnFailure = '',
+        [bool]$Sta = $false
+    )
+    $runspace = $null
+    $powerShell = $null
+    try {
+        $queue = New-Object 'System.Collections.Concurrent.ConcurrentQueue[object]'
+        $runspace = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace()
+        $runspace.ApartmentState = if ($Sta) { [System.Threading.ApartmentState]::STA } else { [System.Threading.ApartmentState]::MTA }
+        $runspace.ThreadOptions = [System.Management.Automation.Runspaces.PSThreadOptions]::UseNewThread
+        $runspace.Open()
+        $powerShell = [PowerShell]::Create()
+        $powerShell.Runspace = $runspace
+        [void]$powerShell.AddScript($WorkerScript)
+        [void]$powerShell.AddArgument($queue)
+        foreach ($workerArgument in $WorkerArguments) { [void]$powerShell.AddArgument($workerArgument) }
+        $job = [pscustomobject]@{
+            Name = $Name
+            PowerShell = $powerShell
+            Runspace = $runspace
+            Async = $null
+            Queue = $queue
+            OnMessage = $OnMessage
+            OnComplete = $OnComplete
+            OnFailure = $OnFailure
+        }
+        $job.Async = $powerShell.BeginInvoke()
+        [void]$script:AMRCleanupJobs.Add($job)
+        if ($null -eq $script:AMRCleanupJobTimer) {
+            $timer = New-Object System.Windows.Threading.DispatcherTimer
+            $timer.Interval = [TimeSpan]::FromMilliseconds(150)
+            $timer.Add_Tick({ Invoke-AMRCleanupJobTick })
+            $script:AMRCleanupJobTimer = $timer
+        }
+        if (-not $script:AMRCleanupJobTimer.IsEnabled) { $script:AMRCleanupJobTimer.Start() }
+        return $true
+    } catch {
+        try { Write-AMRLog ("Could not start Cleanup worker '{0}': {1}" -f $Name,$_.Exception.Message) ERROR Cleanup } catch {}
+        try { if ($powerShell) { $powerShell.Dispose() } } catch {}
+        try { if ($runspace) { $runspace.Dispose() } } catch {}
+        return $false
+    }
+}
+
+function Invoke-AMRCleanupJobTick {
+    if ($script:AMRCleanupTickBusy) { return }
+    $script:AMRCleanupTickBusy = $true
+    $finished = New-Object System.Collections.ArrayList
+    try {
+        # The UI thread only drains already-prepared messages, and never for longer than one short slice per tick.
+        $slice = [System.Diagnostics.Stopwatch]::StartNew()
+        foreach ($job in @($script:AMRCleanupJobs.ToArray())) {
+            $workerFinished = $false
+            try { $workerFinished = [bool]$job.Async.IsCompleted } catch { $workerFinished = $true }
+            $message = $null
+            while ($slice.ElapsedMilliseconds -lt 12 -and $job.Queue.TryDequeue([ref]$message)) {
+                try { if ($job.OnMessage) { & $job.OnMessage $message } }
+                catch { try { Write-AMRLog ("Cleanup worker message handler failed [{0}]: {1}" -f $job.Name,$_.Exception.Message) WARNING Cleanup } catch {} }
+                $message = $null
+            }
+            # Finish only after the worker has stopped AND every queued message was delivered.
+            if ($workerFinished -and $job.Queue.IsEmpty) {
+                [void]$finished.Add($job)
+                $script:AMRCleanupJobs.Remove($job)
+            }
+        }
+        if ($script:AMRCleanupJobs.Count -eq 0 -and $script:AMRCleanupJobTimer) { $script:AMRCleanupJobTimer.Stop() }
+    } catch {
+        try { Write-AMRLog ("Cleanup worker tick failed: {0}" -f $_.Exception.Message) ERROR Cleanup } catch {}
+    } finally {
+        $script:AMRCleanupTickBusy = $false
+    }
+    # Completion handlers can open a dialog, so they run after the tick released its guard.
+    foreach ($doneJob in $finished) { Complete-AMRCleanupJob -Job $doneJob }
+}
+
+function Complete-AMRCleanupJob {
+    param($Job)
+    $result = $null
+    $failureMessage = $null
+    try {
+        $output = @($Job.PowerShell.EndInvoke($Job.Async))
+        foreach ($streamError in @($Job.PowerShell.Streams.Error | Select-Object -First 5)) {
+            try { Write-AMRLog ("Cleanup worker '{0}' reported: {1}" -f $Job.Name,$streamError.ToString()) WARNING Cleanup } catch {}
+        }
+        $result = @($output | Where-Object { $null -ne $_ -and $null -ne $_.PSObject.Properties['AMRResult'] }) | Select-Object -Last 1
+        if ($null -eq $result) { throw ("{0} worker returned no result." -f $Job.Name) }
+    } catch {
+        $failureMessage = $_.Exception.Message
+    } finally {
+        try { $Job.PowerShell.Dispose() } catch {}
+        try { $Job.Runspace.Dispose() } catch {}
+    }
+    try {
+        if ($null -ne $failureMessage) {
+            if ($Job.OnFailure) { & $Job.OnFailure $failureMessage }
+        } else {
+            if ($Job.OnComplete) { & $Job.OnComplete $result }
+        }
+    } catch {
+        try { Write-AMRLog ("Cleanup worker completion handler failed [{0}]: {1}" -f $Job.Name,$_.Exception.Message) ERROR Cleanup } catch {}
+    }
+}
+
+# Progress display without DoEvents: the UI thread is never re-entered from inside a timer tick.
+function Set-AMRCleanupProgressDisplay {
+    param([int]$Value,[string]$Message)
+    $safeValue = [Math]::Max(0,[Math]::Min(100,$Value))
+    $ctl = C 'CleanupProgress'
+    $txt = C 'CleanupProgressText'
+    $pct = C 'CleanupProgressPercent'
+    if ($ctl) { $ctl.Value = $safeValue }
+    if ($pct) {
+        if ($safeValue -gt 0) { $pct.Text = ('{0}%' -f $safeValue); $pct.Visibility = 'Visible' }
+        else { $pct.Text = ''; $pct.Visibility = 'Collapsed' }
+    }
+    if ($txt) { $txt.Text = $Message }
+}
+
+# Smart Cleanup operation gate: only one Cleanup operation at a time; the buttons are disabled while it runs.
 $script:AMRCleanupBusy = $false
 function Set-AMRCleanupUiBusy {
     param([bool]$Busy)
@@ -31306,6 +33638,199 @@ function Set-AMRCleanupUiBusy {
     }
 }
 
+# ---- Scan Now worker: pure file-system work, no UI objects, no DoEvents. Same rules as Get-AMRSmartCleanupFiles. ----
+$script:AMRCleanupScanWorkerScript = @'
+param($Queue,$Categories)
+$ErrorActionPreference = 'Continue'
+try { [System.Threading.Thread]::CurrentThread.Priority = [System.Threading.ThreadPriority]::BelowNormal } catch {}
+function Send-Msg { param($Item) try { [void]$Queue.Enqueue($Item) } catch {} }
+function Send-Log { param([string]$Text,[string]$Level) Send-Msg ([pscustomobject]@{ T='log'; Level=$Level; Text=$Text }) }
+
+$total = @($Categories).Count
+$index = 0
+# A category list can overlap another (for example GPU shader cache and Application caches both list NVIDIA DXCache and Intel ShaderCache).
+# Each category keeps its own list, but the totals count a file once.
+$seenAll = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+foreach ($category in @($Categories)) {
+    $index++
+    $label = [string]$category.Label
+    $minAge = [int]$category.MinAgeDays
+    $maxEntries = 100000
+    $maxSeconds = 120
+    $found = New-Object 'System.Collections.Generic.List[string]'
+    [int64]$bytes = 0
+    $uniqueCount = 0
+    [int64]$uniqueBytes = 0
+    $errors = New-Object 'System.Collections.Generic.List[object]'
+    $missingRoots = New-Object 'System.Collections.Generic.List[string]'
+    $validRoots = New-Object 'System.Collections.Generic.List[string]'
+    $audit = New-Object 'System.Collections.Generic.List[object]'
+    $stack = New-Object 'System.Collections.Generic.Stack[string]'
+    $reparseSkipped = 0
+    $visited = 0
+    $truncated = $false
+    $clock = [System.Diagnostics.Stopwatch]::StartNew()
+    $post = [System.Diagnostics.Stopwatch]::StartNew()
+    $cutoff = if ($minAge -gt 0) { (Get-Date).AddDays(-$minAge) } else { [datetime]::MinValue }
+    Send-Msg ([pscustomobject]@{ T='progress'; Index=$index; Total=$total; Label=$label; Visited=0; Files=0; Bytes=[int64]0 })
+
+    foreach ($root in @($category.Paths)) {
+        if ([string]::IsNullOrWhiteSpace([string]$root)) { continue }
+        try {
+            if (-not (Test-Path -LiteralPath $root -PathType Container -ErrorAction Stop)) {
+                $missingRoots.Add([string]$root)
+                continue
+            }
+            $rootAttributes = [System.IO.File]::GetAttributes([string]$root)
+            if (($rootAttributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                $errors.Add([pscustomobject]@{ Path=[string]$root; Stage='RootSafety'; Message='Cleanup root is a reparse point and was not traversed.' })
+                continue
+            }
+            $validRoots.Add([string]$root)
+        } catch {
+            $errors.Add([pscustomobject]@{ Path=[string]$root; Stage='RootCheck'; Message=$_.Exception.Message })
+        }
+    }
+
+    foreach ($root in $validRoots) {
+        $rootFiles = 0
+        [int64]$rootBytes = 0
+        if (-not $truncated) {
+            $stack.Clear()
+            $stack.Push($root)
+            while ($stack.Count -gt 0) {
+                if ($visited -ge $maxEntries -or $clock.Elapsed.TotalSeconds -ge $maxSeconds) { $truncated = $true; break }
+                $current = $stack.Pop()
+                try {
+                    foreach ($item in [System.IO.Directory]::EnumerateFileSystemEntries($current)) {
+                        $visited++
+                        if (($visited % 64) -eq 0) {
+                            if ($clock.Elapsed.TotalSeconds -ge $maxSeconds) { $truncated = $true; break }
+                            if ($post.ElapsedMilliseconds -ge 150) {
+                                Send-Msg ([pscustomobject]@{ T='progress'; Index=$index; Total=$total; Label=$label; Visited=$visited; Files=$found.Count; Bytes=$bytes })
+                                $post.Restart()
+                            }
+                        }
+                        if ($visited -gt $maxEntries) { $truncated = $true; break }
+                        try {
+                            $attributes = [System.IO.File]::GetAttributes($item)
+                            if (($attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                                $reparseSkipped++
+                                continue
+                            }
+                            if (($attributes -band [System.IO.FileAttributes]::Directory) -ne 0) {
+                                $stack.Push($item)
+                            } else {
+                                $file = [System.IO.FileInfo]::new($item)
+                                if ($minAge -le 0 -or $file.LastWriteTime -le $cutoff) {
+                                    $found.Add([string]$file.FullName)
+                                    $rootFiles++
+                                    $length = [int64]0
+                                    try { $length = [int64]$file.Length; $bytes += $length; $rootBytes += $length } catch { }
+                                    if ($seenAll.Add([string]$file.FullName)) { $uniqueCount++; $uniqueBytes += $length }
+                                }
+                            }
+                        } catch {
+                            if ($errors.Count -lt 5000) { $errors.Add([pscustomobject]@{ Path=[string]$item; Stage='InspectEntry'; Message=$_.Exception.Message }) }
+                        }
+                    }
+                    if ($truncated) { break }
+                } catch {
+                    if ($errors.Count -lt 5000) { $errors.Add([pscustomobject]@{ Path=[string]$current; Stage='EnumerateDirectory'; Message=$_.Exception.Message }) }
+                }
+            }
+        }
+        $audit.Add([pscustomobject]@{ Root=[string]$root; Files=$rootFiles; Bytes=$rootBytes })
+    }
+    $clock.Stop()
+    $elapsed = [math]::Round($clock.Elapsed.TotalSeconds,1)
+
+    # Same diagnostics as before, delivered as small messages (the UI writes them in short slices).
+    foreach ($entry in $audit) {
+        Send-Log ("Cleanup root audit | Category={0} | Exists={1} | Files={2} | MB={3:N2} | Path={4}" -f $label,[System.IO.Directory]::Exists([string]$entry.Root),$entry.Files,($entry.Bytes / 1MB),$entry.Root) 'INFO'
+    }
+    foreach ($missingRoot in $missingRoots) { Send-Log ("Cleanup root missing | Category={0} | Path={1}" -f $label,$missingRoot) 'INFO' }
+    foreach ($scanError in $errors) { Send-Log ("Cleanup scan issue | Category={0} | Path={1} | Stage={2} | Error={3}" -f $label,$scanError.Path,$scanError.Stage,$scanError.Message) 'WARNING' }
+
+    $complete = ((-not $truncated) -and ($errors.Count -eq 0) -and ($missingRoots.Count -eq 0))
+    $result = [pscustomobject]@{
+        Files = $found.ToArray()
+        Bytes = $bytes
+        Count = $found.Count
+        UniqueCount = [int]$uniqueCount
+        UniqueBytes = [int64]$uniqueBytes
+        Complete = [bool]$complete
+        Truncated = [bool]$truncated
+        Visited = [int]$visited
+        Errors = $errors.ToArray()
+    }
+    Send-Msg ([pscustomobject]@{ T='cat'; Key=[string]$category.Key; Label=$label; Result=$result })
+    Send-Log ("Scanned {0}: {1:N0} files, {2:N2} MB; visited={3}; truncated={4}; elapsed={5}s." -f $label,$found.Count,($bytes / 1MB),$visited,$truncated,$elapsed) 'INFO'
+}
+[pscustomobject]@{ AMRResult = $true; Categories = $total }
+'@
+
+function Restore-AMRCleanupScanButton {
+    try {
+        $scanButton = C 'CleanupScanBtn'
+        if ($scanButton -and $scanButton.RenderTransform -is [System.Windows.Media.ScaleTransform]) {
+            $scanButton.RenderTransform.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleXProperty,$null)
+            $scanButton.RenderTransform.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleYProperty,$null)
+            $scanButton.RenderTransform.ScaleX = 1.0; $scanButton.RenderTransform.ScaleY = 1.0
+        }
+        if ($scanButton) { $scanButton.Content = '⌕  Scan Now' }
+    } catch {}
+    Set-AMRCleanupUiBusy $false
+    $script:AMRCleanupBusy = $false
+    $scanButtonAfter = C 'CleanupScanBtn'
+    if ($scanButtonAfter) { $scanButtonAfter.IsEnabled = $true }
+}
+
+function Receive-AMRCleanupScanMessage {
+    param($Message)
+    switch ([string]$Message.T) {
+        'progress' {
+            $percent = [int](([int]$Message.Index - 1) * 100 / [Math]::Max(1,[int]$Message.Total))
+            Set-AMRCleanupProgressDisplay $percent ("Scanning: {0} ({1}/{2}) • {3:N0} files • {4:N2} MB" -f $Message.Label,$Message.Index,$Message.Total,$Message.Files,(([int64]$Message.Bytes) / 1MB))
+        }
+        'log' {
+            Write-AMRLog ([string]$Message.Text) ([string]$Message.Level) Cleanup
+        }
+        'cat' {
+            $result = $Message.Result
+            $script:CleanupScanResults[[string]$Message.Key] = $result
+            foreach ($category in $script:CleanupCategories) {
+                if ([string]$category.Key -ne [string]$Message.Key) { continue }
+                $info = C $category.Info
+                $scanSuffix = if ($result.Truncated) { ' • PARTIAL / safety limit' } elseif (-not $result.Complete) { ' • incomplete / review log' } else { '' }
+                if ($info) { $info.Text = ('{0:N0} files • {1:N2} MB{2}' -f $result.Count,($result.Bytes / 1MB),$scanSuffix) }
+            }
+            $script:AMRCleanupScanState.TotalBytes += [int64]$result.UniqueBytes
+            $script:AMRCleanupScanState.TotalFiles += [int]$result.UniqueCount
+        }
+    }
+}
+
+function Complete-AMRCleanupScan {
+    param($Result)
+    $state = $script:AMRCleanupScanState
+    $runButton = C 'CleanupRunBtn'
+    if ($runButton) { $runButton.IsEnabled = $true }
+    Update-AMRCleanupSelectedSummary
+    Set-AMRCleanupProgressDisplay 100 ('Scan complete: {0:N0} files • {1:N2} MB' -f $state.TotalFiles,($state.TotalBytes / 1MB))
+    Write-AMRLog ("Legacy simple Cleanup scan completed: {0} files, {1:N2} MB found." -f $state.TotalFiles,($state.TotalBytes / 1MB)) SUCCESS Cleanup
+    Restore-AMRCleanupScanButton
+}
+
+function Fail-AMRCleanupScan {
+    param([string]$Message)
+    Set-AMRCleanupProgressDisplay 0 'Scan failed. Check the application log.'
+    Write-AMRLog ("Cleanup scan failed: {0}" -f $Message) ERROR Cleanup
+    Restore-AMRCleanupScanButton
+    Show-AMRCleanupSummary -Title 'AMR | Cleanup Scan' -Status 'Scan failed' -Details $Message -Kind Error
+}
+
+$script:AMRCleanupScanState = @{ TotalBytes = [int64]0; TotalFiles = 0 }
 (C 'CleanupScanBtn').Add_Click({
     if ($script:AMRCleanupBusy) { return }
     $script:AMRCleanupBusy = $true
@@ -31314,8 +33839,7 @@ function Set-AMRCleanupUiBusy {
     $runButton = C 'CleanupRunBtn'
     $scanButton.IsEnabled = $false
     $runButton.IsEnabled = $false
-    # Give Scan Now a visible, continuous scanning state while the existing
-    # synchronous scan pumps WPF messages through Update-AMRCleanupProgress.
+    # Visible, continuous scanning state while the isolated worker scans.
     $scanButton.Content = '◌  Scanning...'
     $scanButton.RenderTransformOrigin = [System.Windows.Point]::new(0.5,0.5)
     $scanButton.RenderTransform = [System.Windows.Media.ScaleTransform]::new(1.0,1.0)
@@ -31329,82 +33853,224 @@ function Set-AMRCleanupUiBusy {
     $scanButton.RenderTransform.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleXProperty,$scanPulse)
     $scanButton.RenderTransform.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleYProperty,$scanPulse)
     $script:CleanupScanResults = @{}
-    $totalBytes = [int64]0
-    $totalFiles = 0
-    $index = 0
+    $script:AMRCleanupScanState = @{ TotalBytes = [int64]0; TotalFiles = 0 }
     try {
         Write-AMRLog 'Legacy simple Cleanup scan started.' INFO Cleanup
+        $categoryData = New-Object 'System.Collections.Generic.List[object]'
         foreach ($category in $script:CleanupCategories) {
-            $index++
-            $percent = [int](($index - 1) * 100 / [Math]::Max(1,$script:CleanupCategories.Count))
-            Update-AMRCleanupProgress $percent ("Scanning: {0} ({1}/{2})" -f $category.Label,$index,$script:CleanupCategories.Count)
-
             $minAge = 0
             if ($category.PSObject.Properties['MinAgeDays']) { $minAge = [int]$category.MinAgeDays }
-            $scanResult = Get-AMRSmartCleanupFiles -Roots @($category.Paths) -MinAgeDays $minAge
-            $files = @($scanResult.Files)
-            $bytes = [int64]0
-            foreach ($file in $files) { try { $bytes += [int64]$file.Length } catch { } }
-
-            $script:CleanupScanResults[$category.Key] = [pscustomobject]@{
-                Files = $files
-                Bytes = $bytes
-                Count = $files.Count
-                Complete = [bool]$scanResult.Complete
-                Truncated = [bool]$scanResult.Truncated
-                Visited = [int]$scanResult.Visited
-                Errors = @($scanResult.Errors)
-            }
-            # Per-root diagnostics make it clear which locations contributed data,
-            # which did not exist, and which could not be read on this PC.
-            foreach ($rootPath in @($category.Paths)) {
-                $rootFiles = @($files | Where-Object {
-                    try { $_.FullName.StartsWith(([System.IO.Path]::GetFullPath([string]$rootPath).TrimEnd('\') + '\'),[System.StringComparison]::OrdinalIgnoreCase) } catch { $false }
-                })
-                $rootBytes = [int64]0
-                foreach ($rootFile in $rootFiles) { try { $rootBytes += [int64]$rootFile.Length } catch { } }
-                $rootExists = [System.IO.Directory]::Exists([string]$rootPath)
-                Write-AMRLog ("Cleanup root audit | Category={0} | Exists={1} | Files={2} | MB={3:N2} | Path={4}" -f $category.Label,$rootExists,$rootFiles.Count,($rootBytes / 1MB),$rootPath) INFO Cleanup
-            }
-            foreach ($missingRoot in @($scanResult.MissingRoots)) {
-                Write-AMRLog ("Cleanup root missing | Category={0} | Path={1}" -f $category.Label,$missingRoot) INFO Cleanup
-            }
-            foreach ($scanError in @($scanResult.Errors)) {
-                Write-AMRLog ("Cleanup scan issue | Category={0} | Path={1} | Stage={2} | Error={3}" -f $category.Label,$scanError.Path,$scanError.Stage,$scanError.Message) WARNING Cleanup
-            }
-            $info = C $category.Info
-            $scanSuffix = if ($scanResult.Truncated) { ' • PARTIAL / safety limit' } elseif (-not $scanResult.Complete) { ' • incomplete / review log' } else { '' }
-            if ($info) { $info.Text = ('{0:N0} files • {1:N2} MB{2}' -f $files.Count,($bytes / 1MB),$scanSuffix) }
-            $totalBytes += $bytes
-            $totalFiles += $files.Count
-            Write-AMRLog ("Scanned {0}: {1:N0} files, {2:N2} MB; visited={3}; truncated={4}; elapsed={5}s." -f $category.Label,$files.Count,($bytes / 1MB),$scanResult.Visited,$scanResult.Truncated,$scanResult.ElapsedSeconds) INFO Cleanup
+            $categoryData.Add([pscustomobject]@{ Key=[string]$category.Key; Label=[string]$category.Label; Paths=[string[]]@($category.Paths); MinAgeDays=$minAge })
         }
-
-        $runButton.IsEnabled = $true
-        Update-AMRCleanupSelectedSummary
-        Update-AMRCleanupProgress 100 ('Scan complete: {0:N0} files • {1:N2} MB' -f $totalFiles,($totalBytes / 1MB))
-        Write-AMRLog ("Legacy simple Cleanup scan completed: {0} files, {1:N2} MB found." -f $totalFiles,($totalBytes / 1MB)) SUCCESS Cleanup
+        Set-AMRCleanupProgressDisplay 0 ("Scanning: {0} (1/{1})" -f $script:CleanupCategories[0].Label,$script:CleanupCategories.Count)
+        $started = Start-AMRCleanupJob -Name 'CleanupScan' -WorkerScript $script:AMRCleanupScanWorkerScript -WorkerArguments @(,$categoryData.ToArray()) -OnMessage 'Receive-AMRCleanupScanMessage' -OnComplete 'Complete-AMRCleanupScan' -OnFailure 'Fail-AMRCleanupScan'
+        if (-not $started) { throw 'Could not start the isolated Cleanup scan worker.' }
     } catch {
-        Update-AMRCleanupProgress 0 'Scan failed. Check the application log.'
-        Write-AMRLog ("Cleanup scan failed: {0}" -f $_.Exception.Message) ERROR Cleanup
-        Show-AMRCleanupSummary -Title 'AMR | Cleanup Scan' -Status 'Scan failed' -Details $_.Exception.Message -Kind Error
-    } finally {
-        try {
-            if ($scanButton -and $scanButton.RenderTransform -is [System.Windows.Media.ScaleTransform]) {
-                $scanButton.RenderTransform.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleXProperty,$null)
-                $scanButton.RenderTransform.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleYProperty,$null)
-                $scanButton.RenderTransform.ScaleX = 1.0; $scanButton.RenderTransform.ScaleY = 1.0
-            }
-            if ($scanButton) { $scanButton.Content = '⌕  Scan Now' }
-        } catch {}
-        Set-AMRCleanupUiBusy $false
-        $script:AMRCleanupBusy = $false
-        $scanButton.IsEnabled = $true
+        Fail-AMRCleanupScan $_.Exception.Message
     }
 })
 
-# Legacy simple Clean Selected: confirm, stop Windows Update only if it was running,
-# remove the scanned files, verify disappearance, then restore the original running state.
+# ---- Clean Selected worker: the same per-file safety checks and verified deletion as before, off the UI thread. ----
+$script:AMRCleanupRunWorkerScript = @'
+param($Queue,$Plan,$FilesEstimate,$HasUpdate)
+$ErrorActionPreference = 'Continue'
+try { [System.Threading.Thread]::CurrentThread.Priority = [System.Threading.ThreadPriority]::BelowNormal } catch {}
+function Send-Msg { param($Item) try { [void]$Queue.Enqueue($Item) } catch {} }
+function Send-Log { param([string]$Text,[string]$Level) Send-Msg ([pscustomobject]@{ T='log'; Level=$Level; Text=$Text }) }
+# Per-file "Verified deleted" lines go straight to the durable log queue (thread-safe) so the UI is never flooded.
+$diskWriter = $null
+try { $diskWriter = [AMRLogDiskWriter] } catch { $diskWriter = $null }
+function Send-DiskLog {
+    param([string]$Text,[string]$Level)
+    if ($null -ne $diskWriter) {
+        try { $diskWriter::Enqueue(('[{0:yyyy-MM-dd HH:mm:ss.fff}] [{1}] [Cleanup] {2}' -f (Get-Date),$Level,$Text)); return } catch {}
+    }
+    Send-Log $Text $Level
+}
+
+function Test-CleanupPathSafe {
+    param([string]$Path,[string[]]$Roots)
+    try {
+        $fullPath = [System.IO.Path]::GetFullPath($Path)
+        $matchedRoot = $null
+        foreach ($root in @($Roots)) {
+            if ([string]::IsNullOrWhiteSpace([string]$root)) { continue }
+            $rootFull = [System.IO.Path]::GetFullPath([string]$root).TrimEnd([System.IO.Path]::DirectorySeparatorChar,[System.IO.Path]::AltDirectorySeparatorChar)
+            $prefix = $rootFull + [System.IO.Path]::DirectorySeparatorChar
+            if ($fullPath.StartsWith($prefix,[System.StringComparison]::OrdinalIgnoreCase)) { $matchedRoot = $rootFull; break }
+        }
+        if (-not $matchedRoot) { return $false }
+        $cursor = [System.IO.Path]::GetDirectoryName($fullPath)
+        while (-not [string]::IsNullOrWhiteSpace($cursor)) {
+            $attributes = [System.IO.File]::GetAttributes($cursor)
+            if (($attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { return $false }
+            if ($cursor.TrimEnd([System.IO.Path]::DirectorySeparatorChar,[System.IO.Path]::AltDirectorySeparatorChar).Equals($matchedRoot,[System.StringComparison]::OrdinalIgnoreCase)) { break }
+            $parent = [System.IO.Path]::GetDirectoryName($cursor)
+            if ([string]::IsNullOrWhiteSpace($parent) -or $parent -eq $cursor) { return $false }
+            $cursor = $parent
+        }
+        return $true
+    } catch { return $false }
+}
+
+$deleted = 0
+$skipped = 0
+$failed = 0
+$processedTotal = 0
+$processedPaths = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+$updateWasRunning = $false
+$updateServiceTouched = $false
+$updateServiceMessage = 'Not involved'
+$post = [System.Diagnostics.Stopwatch]::StartNew()
+$estimate = [Math]::Max(1,[int]$FilesEstimate)
+
+try {
+    if ($HasUpdate) {
+        $service = Get-Service -Name 'wuauserv' -ErrorAction SilentlyContinue
+        if ($service -and $service.Status -eq [System.ServiceProcess.ServiceControllerStatus]::Running) {
+            $updateWasRunning = $true
+            Stop-Service -Name 'wuauserv' -Force -ErrorAction Stop
+            $updateServiceTouched = $true
+            $service = Get-Service -Name 'wuauserv' -ErrorAction Stop
+            $service.WaitForStatus([System.ServiceProcess.ServiceControllerStatus]::Stopped,[TimeSpan]::FromSeconds(20))
+            $updateServiceMessage = 'Stopped for cleanup; will be restarted'
+        } elseif ($service) {
+            $updateServiceMessage = ('Originally {0}; left unchanged' -f $service.Status)
+        } else {
+            $updateServiceMessage = 'Service unavailable; cache cleanup attempted'
+        }
+    }
+
+    foreach ($category in @($Plan)) {
+        $fileList = @($category.Files)
+        $fileIndex = 0
+        $categoryRoots = [string[]]@($category.Paths)
+        Send-Log ("Cleaning category {0}: {1} files." -f $category.Label,$fileList.Count) 'INFO'
+        foreach ($path in $fileList) {
+            $fileIndex++
+            $path = [string]$path
+            # A file listed by two selected categories is handled once, so it is never counted or reported twice.
+            if (-not $processedPaths.Add($path)) { continue }
+            $processedTotal++
+            try {
+                if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+                    $skipped++
+                } elseif (-not (Test-CleanupPathSafe -Path $path -Roots $categoryRoots)) {
+                    $skipped++
+                    Send-Log ("Skipped path outside registered cleanup roots or with a reparse-point parent: {0}" -f $path) 'WARNING'
+                } else {
+                    # Last-moment safety check: do not delete a reparse point or directory.
+                    $attributes = [System.IO.File]::GetAttributes($path)
+                    if ((($attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) -or (($attributes -band [System.IO.FileAttributes]::Directory) -ne 0)) {
+                        $skipped++
+                        Send-Log ("Skipped unsafe or changed filesystem entry: {0}" -f $path) 'WARNING'
+                    } else {
+                        $fileBytes = [int64]0
+                        try { $fileBytes = [int64]([System.IO.FileInfo]$path).Length } catch { }
+                        Remove-Item -LiteralPath $path -Force -ErrorAction Stop
+                        if (-not (Test-Path -LiteralPath $path)) {
+                            $deleted++
+                            Send-DiskLog ("Verified deleted: {0} ({1:N2} MB)." -f $path,($fileBytes / 1MB)) 'SUCCESS'
+                        } else {
+                            $failed++
+                            Send-Log ("Delete was not verified; file remains: {0}" -f $path) 'ERROR'
+                        }
+                    }
+                }
+            } catch {
+                $failed++
+                Send-Log ("Failed to delete file: {0}. Reason: {1}" -f $path,$_.Exception.Message) 'WARNING'
+            }
+            if ($post.ElapsedMilliseconds -ge 150 -or $fileIndex -eq $fileList.Count) {
+                $pct = [int]($processedTotal * 100 / $estimate)
+                Send-Msg ([pscustomobject]@{ T='progress'; Pct=$pct; Text=("Cleaning {0}: {1}/{2} files • removed {3}" -f $category.Label,$fileIndex,$fileList.Count,$deleted); Deleted=$deleted; Skipped=$skipped; Failed=$failed })
+                $post.Restart()
+            }
+        }
+    }
+} catch {
+    $failed++
+    Send-Log ("Cleanup operation error: {0}" -f $_.Exception.Message) 'ERROR'
+} finally {
+    if ($updateServiceTouched -and $updateWasRunning) {
+        try {
+            Start-Service -Name 'wuauserv' -ErrorAction Stop
+            $service = Get-Service -Name 'wuauserv' -ErrorAction Stop
+            $service.WaitForStatus([System.ServiceProcess.ServiceControllerStatus]::Running,[TimeSpan]::FromSeconds(20))
+            $updateServiceMessage = 'Originally Running; restarted and verified'
+            Send-Log 'Windows Update service restored to Running after cleanup.' 'SUCCESS'
+        } catch {
+            $failed++
+            $updateServiceMessage = 'Restart failed; check Windows Update service'
+            Send-Log ("Could not restore Windows Update service: {0}" -f $_.Exception.Message) 'ERROR'
+        }
+    }
+}
+[pscustomobject]@{ AMRResult = $true; Deleted = $deleted; Skipped = $skipped; Failed = $failed; UpdateServiceMessage = $updateServiceMessage }
+'@
+
+$script:AMRCleanupRunState = $null
+
+function Receive-AMRCleanupRunMessage {
+    param($Message)
+    switch ([string]$Message.T) {
+        'progress' {
+            $state = $script:AMRCleanupRunState
+            if ($state) { $state.Deleted = [int]$Message.Deleted; $state.Skipped = [int]$Message.Skipped; $state.Failed = [int]$Message.Failed }
+            Set-AMRCleanupProgressDisplay ([int]$Message.Pct) ([string]$Message.Text)
+        }
+        'log' {
+            Write-AMRLog ([string]$Message.Text) ([string]$Message.Level) Cleanup
+        }
+    }
+}
+
+function Complete-AMRCleanupRun {
+    param([int]$Deleted,[int]$Skipped,[int]$Failed,[string]$UpdateServiceMessage)
+    $state = $script:AMRCleanupRunState
+    Set-AMRCleanupUiBusy $false
+    $script:AMRCleanupBusy = $false
+    $runButton = C 'CleanupRunBtn'
+    $scanButton = C 'CleanupScanBtn'
+    if ($runButton) { $runButton.IsEnabled = $true }
+    if ($scanButton) { $scanButton.IsEnabled = $true }
+
+    $summaryControl = C 'CleanupScanSummary'
+    if ($summaryControl) { $summaryControl.Text = 'Cleanup finished. Scan again to refresh the results.' }
+    foreach ($category in @($state.Selected)) {
+        $info = C $category.Info
+        if ($info) { $info.Text = 'Rescan required' }
+    }
+    $script:CleanupScanResults = @{}
+    Update-AMRCleanupSelectedSummary
+    Set-AMRCleanupProgressDisplay 100 ("Finished • removed {0} • skipped {1} • failed {2}" -f $Deleted,$Skipped,$Failed)
+
+    $summaryKind = if ($Failed -gt 0) { 'Warning' } else { 'Success' }
+    $summaryStatus = if ($Failed -gt 0) { 'Cleanup completed with issues' } elseif ($Deleted -eq 0) { 'Nothing needed cleaning' } else { 'Cleanup completed successfully' }
+    $summaryLines = @(
+        ("Removed and verified: {0:N0} files" -f $Deleted),
+        ("Skipped: {0:N0} • Failed: {1:N0}" -f $Skipped,$Failed),
+        ("Windows Update service: {0}" -f $UpdateServiceMessage),
+        'Run Scan Now again to refresh the estimates.'
+    )
+    Write-AMRLog ("Legacy simple Cleanup completed. Removed={0}; Skipped={1}; Failed={2}; WindowsUpdate={3}." -f $Deleted,$Skipped,$Failed,$UpdateServiceMessage) $(if ($Failed -gt 0) { 'WARNING' } else { 'SUCCESS' }) Cleanup
+    Show-AMRCleanupSummary -Title 'AMR | Cleanup Results' -Status $summaryStatus -Details 'The simple cleanup operation has finished.' -Lines $summaryLines -Kind $summaryKind
+}
+
+function Complete-AMRCleanupRunJob {
+    param($Result)
+    Complete-AMRCleanupRun -Deleted ([int]$Result.Deleted) -Skipped ([int]$Result.Skipped) -Failed ([int]$Result.Failed) -UpdateServiceMessage ([string]$Result.UpdateServiceMessage)
+}
+
+function Fail-AMRCleanupRunJob {
+    param([string]$Message)
+    $state = $script:AMRCleanupRunState
+    Write-AMRLog ("Cleanup operation error: {0}" -f $Message) ERROR Cleanup
+    Complete-AMRCleanupRun -Deleted ([int]$state.Deleted) -Skipped ([int]$state.Skipped) -Failed ([int]$state.Failed + 1) -UpdateServiceMessage 'Not verified (worker stopped unexpectedly); check the Windows Update service'
+}
+
+# Clean Selected: confirm, then the isolated worker stops Windows Update only if it was running, removes the scanned files,
+# verifies disappearance, and restores the original running state.
 (C 'CleanupRunBtn').Add_Click({
     $selected = @($script:CleanupCategories | Where-Object {
         $check = C $_.Check
@@ -31432,10 +34098,9 @@ function Set-AMRCleanupUiBusy {
 
     $estimate = [int64]0
     $filesEstimate = 0
-    foreach ($category in $selected) {
-        $estimate += [int64]$script:CleanupScanResults[$category.Key].Bytes
-        $filesEstimate += [int]$script:CleanupScanResults[$category.Key].Count
-    }
+    $selectionTotals = Get-AMRCleanupSelectionTotals -Categories $selected
+    $estimate = [int64]$selectionTotals.Bytes
+    $filesEstimate = [int]$selectionTotals.Files
     $names = ($selected | ForEach-Object { $_.Label }) -join "`n• "
     $answer = Show-AMRMessageGlass ("You are about to remove the selected temporary/cache files:`n`n• $names`n`nEstimated: {0:N0} files ({1:N2} MB).`n`nThis cannot be undone. Continue?" -f $filesEstimate,($estimate / 1MB)) 'Confirm Cleanup' YesNo Warning
     if ($answer -ne [System.Windows.MessageBoxResult]::Yes) {
@@ -31450,122 +34115,25 @@ function Set-AMRCleanupUiBusy {
     $scanButton = C 'CleanupScanBtn'
     $runButton.IsEnabled = $false
     $scanButton.IsEnabled = $false
-    $deleted = 0
-    $skipped = 0
-    $failed = 0
-    $done = 0
-    $updateWasRunning = $false
-    $updateServiceTouched = $false
-    $updateServiceMessage = 'Not involved'
-
+    $script:AMRCleanupRunState = @{ Selected = @($selected); Deleted = 0; Skipped = 0; Failed = 0 }
     try {
-        if (@($selected | Where-Object { $_.Key -eq 'Update' }).Count -gt 0) {
-            $service = Get-Service -Name 'wuauserv' -ErrorAction SilentlyContinue
-            if ($service -and $service.Status -eq [System.ServiceProcess.ServiceControllerStatus]::Running) {
-                $updateWasRunning = $true
-                Stop-Service -Name 'wuauserv' -Force -ErrorAction Stop
-                $updateServiceTouched = $true
-                $service = Get-Service -Name 'wuauserv' -ErrorAction Stop
-                $service.WaitForStatus([System.ServiceProcess.ServiceControllerStatus]::Stopped,[TimeSpan]::FromSeconds(20))
-                $updateServiceMessage = 'Stopped for cleanup; will be restarted'
-            } elseif ($service) {
-                $updateServiceMessage = ('Originally {0}; left unchanged' -f $service.Status)
-            } else {
-                $updateServiceMessage = 'Service unavailable; cache cleanup attempted'
-            }
-        }
-
+        $plan = New-Object 'System.Collections.Generic.List[object]'
         foreach ($category in $selected) {
-            $result = $script:CleanupScanResults[$category.Key]
-            $fileList = @($result.Files)
-            $fileIndex = 0
-            Write-AMRLog ("Cleaning category {0}: {1} files." -f $category.Label,$fileList.Count) INFO Cleanup
-
-            foreach ($file in $fileList) {
-                $fileIndex++
-                $path = [string]$file.FullName
-                try {
-                    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
-                        $skipped++
-                    } elseif (-not (Test-AMRCleanupPathSafe -Path $path -Roots @($category.Paths))) {
-                        $skipped++
-                        Write-AMRLog ("Skipped path outside registered cleanup roots or with a reparse-point parent: {0}" -f $path) WARNING Cleanup
-                    } else {
-                        # Basic last-moment safety check: do not delete a reparse point or directory.
-                        $attributes = [System.IO.File]::GetAttributes($path)
-                        if ((($attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) -or (($attributes -band [System.IO.FileAttributes]::Directory) -ne 0)) {
-                            $skipped++
-                            Write-AMRLog ("Skipped unsafe or changed filesystem entry: {0}" -f $path) WARNING Cleanup
-                        } else {
-                            $fileBytes = [int64]0
-                            try { $fileBytes = [int64]([System.IO.FileInfo]$path).Length } catch { }
-                            Remove-Item -LiteralPath $path -Force -ErrorAction Stop
-                            if (-not (Test-Path -LiteralPath $path)) {
-                                $deleted++
-                                Write-AMRLog ("Verified deleted: {0} ({1:N2} MB)." -f $path,($fileBytes / 1MB)) SUCCESS Cleanup
-                            } else {
-                                $failed++
-                                Write-AMRLog ("Delete was not verified; file remains: {0}" -f $path) ERROR Cleanup
-                            }
-                        }
-                    }
-                } catch {
-                    $failed++
-                    Write-AMRLog ("Failed to delete file: {0}. Reason: {1}" -f $path,$_.Exception.Message) WARNING Cleanup
-                }
-
-                if (($fileIndex % 20) -eq 0 -or $fileIndex -eq $fileList.Count) {
-                    $pct = [int](($done + $fileIndex) * 100 / [Math]::Max(1,$filesEstimate))
-                    Update-AMRCleanupProgress $pct ("Cleaning {0}: {1}/{2} files • removed {3}" -f $category.Label,$fileIndex,$fileList.Count,$deleted)
-                }
-            }
-            $done += $fileList.Count
+            $plan.Add([pscustomobject]@{ Key=[string]$category.Key; Label=[string]$category.Label; Paths=[string[]]@($category.Paths); Files=$script:CleanupScanResults[$category.Key].Files })
         }
+        $hasUpdate = (@($selected | Where-Object { $_.Key -eq 'Update' }).Count -gt 0)
+        $runWorkerArgumentList = New-Object 'System.Collections.Generic.List[object]'
+        $runWorkerArgumentList.Add($plan.ToArray())
+        $runWorkerArgumentList.Add([int]$filesEstimate)
+        $runWorkerArgumentList.Add([bool]$hasUpdate)
+        $runWorkerArguments = $runWorkerArgumentList.ToArray()
+        Set-AMRCleanupProgressDisplay 0 'Cleaning: starting...'
+        $started = Start-AMRCleanupJob -Name 'CleanupRun' -WorkerScript $script:AMRCleanupRunWorkerScript -WorkerArguments $runWorkerArguments -OnMessage 'Receive-AMRCleanupRunMessage' -OnComplete 'Complete-AMRCleanupRunJob' -OnFailure 'Fail-AMRCleanupRunJob'
+        if (-not $started) { throw 'Could not start the isolated Cleanup worker.' }
     } catch {
-        $failed++
-        Write-AMRLog ("Cleanup operation error: {0}" -f $_.Exception.Message) ERROR Cleanup
-    } finally {
-        if ($updateServiceTouched -and $updateWasRunning) {
-            try {
-                Start-Service -Name 'wuauserv' -ErrorAction Stop
-                $service = Get-Service -Name 'wuauserv' -ErrorAction Stop
-                $service.WaitForStatus([System.ServiceProcess.ServiceControllerStatus]::Running,[TimeSpan]::FromSeconds(20))
-                $updateServiceMessage = 'Originally Running; restarted and verified'
-                Write-AMRLog 'Windows Update service restored to Running after cleanup.' SUCCESS Cleanup
-            } catch {
-                $failed++
-                $updateServiceMessage = 'Restart failed; check Windows Update service'
-                Write-AMRLog ("Could not restore Windows Update service: {0}" -f $_.Exception.Message) ERROR Cleanup
-            }
-        }
-        Set-AMRCleanupUiBusy $false
-        $script:AMRCleanupBusy = $false
-        $runButton.IsEnabled = $true
-        $scanButton.IsEnabled = $true
+        Fail-AMRCleanupRunJob $_.Exception.Message
     }
-
-    $summaryControl = C 'CleanupScanSummary'
-    if ($summaryControl) { $summaryControl.Text = 'Cleanup finished. Scan again to refresh the results.' }
-    foreach ($category in $selected) {
-        $info = C $category.Info
-        if ($info) { $info.Text = 'Rescan required' }
-    }
-    $script:CleanupScanResults = @{}
-    Update-AMRCleanupSelectedSummary
-    Update-AMRCleanupProgress 100 ("Finished • removed {0} • skipped {1} • failed {2}" -f $deleted,$skipped,$failed)
-
-    $summaryKind = if ($failed -gt 0) { 'Warning' } else { 'Success' }
-    $summaryStatus = if ($failed -gt 0) { 'Cleanup completed with issues' } elseif ($deleted -eq 0) { 'Nothing needed cleaning' } else { 'Cleanup completed successfully' }
-    $summaryLines = @(
-        ("Removed and verified: {0:N0} files" -f $deleted),
-        ("Skipped: {0:N0} • Failed: {1:N0}" -f $skipped,$failed),
-        ("Windows Update service: {0}" -f $updateServiceMessage),
-        'Run Scan Now again to refresh the estimates.'
-    )
-    Write-AMRLog ("Legacy simple Cleanup completed. Removed={0}; Skipped={1}; Failed={2}; WindowsUpdate={3}." -f $deleted,$skipped,$failed,$updateServiceMessage) $(if ($failed -gt 0) { 'WARNING' } else { 'SUCCESS' }) Cleanup
-    Show-AMRCleanupSummary -Title 'AMR | Cleanup Results' -Status $summaryStatus -Details 'The simple cleanup operation has finished.' -Lines $summaryLines -Kind $summaryKind
 })
-
 
 # Smart Cleanup extensions: Recycle Bin is system-drive scoped; discovery panels are read-only.
 function Get-AMRSmartCleanupRecycleBinSnapshot {
@@ -31590,19 +34158,57 @@ function Get-AMRSmartCleanupRecycleBinSnapshot {
         return [pscustomobject]@{ Readable=$false; Count=0; Bytes=[int64]0; Drive=($systemLetter + ':'); Error=$_.Exception.Message }
     }
 }
+# A20: Recycle Bin snapshot (Shell COM, needs an STA thread) runs in an isolated STA worker; the function body is reused as is.
+$script:AMRRecycleSnapshotPending = $false
+$script:AMRRecycleEmptyState = $null
+
+function Get-AMRRecycleSnapshotWorkerScript {
+    $snapshotBody = (Get-Command -Name 'Get-AMRSmartCleanupRecycleBinSnapshot' -CommandType Function).ScriptBlock.ToString()
+    return ("param(`$Queue)`r`nfunction Get-AMRSmartCleanupRecycleBinSnapshot {`r`n" + $snapshotBody + "`r`n}`r`n`$snap = Get-AMRSmartCleanupRecycleBinSnapshot`r`n[pscustomobject]@{ AMRResult = `$true; Snapshot = `$snap }`r`n")
+}
+
+function Show-AMRRecycleBinSnapshot {
+    param($Snapshot)
+    $info = C 'CleanupRecycleBinInfo'
+    if (-not $info) { return }
+    if ($Snapshot.Readable) {
+        $info.Text = ('{0:N0} items • {1:N2} MB • {2} only' -f $Snapshot.Count,($Snapshot.Bytes / 1MB),$Snapshot.Drive)
+    } else {
+        $info.Text = ('Unable to read Recycle Bin: {0}' -f $Snapshot.Error)
+    }
+}
+
+function Complete-AMRRecycleBinRefresh {
+    param($Result)
+    $script:AMRRecycleSnapshotPending = $false
+    $perfRb = Get-AMRPerfNow
+    Show-AMRRecycleBinSnapshot -Snapshot $Result.Snapshot
+    Add-AMRPerfSince 'recycle.apply.snapshotUi' $perfRb
+}
+function Fail-AMRRecycleBinRefresh {
+    param([string]$Message)
+    $script:AMRRecycleSnapshotPending = $false
+    $info = C 'CleanupRecycleBinInfo'
+    if ($info) { $info.Text = ('Unable to read Recycle Bin: {0}' -f $Message) }
+}
+
 function Update-AMRSmartCleanupRecycleBin {
     $info = C 'CleanupRecycleBinInfo'
     if (-not $info) { return }
-    $snap = Get-AMRSmartCleanupRecycleBinSnapshot
-    if ($snap.Readable) {
-        $info.Text = ('{0:N0} items • {1:N2} MB • {2} only' -f $snap.Count,($snap.Bytes / 1MB),$snap.Drive)
-    } else {
-        $info.Text = ('Unable to read Recycle Bin: {0}' -f $snap.Error)
-    }
+    if ($script:AMRRecycleSnapshotPending) { return }
+    $script:AMRRecycleSnapshotPending = $true
+    $info.Text = 'Reading Recycle Bin…'
+    $started = Start-AMRCleanupJob -Name 'RecycleSnapshot' -WorkerScript (Get-AMRRecycleSnapshotWorkerScript) -OnComplete 'Complete-AMRRecycleBinRefresh' -OnFailure 'Fail-AMRRecycleBinRefresh' -Sta $true
+    if (-not $started) { Fail-AMRRecycleBinRefresh 'Could not start the isolated Recycle Bin reader.' }
 }
 (C 'CleanupRecycleBinRefreshBtn').Add_Click({ Update-AMRSmartCleanupRecycleBin })
-(C 'CleanupRecycleBinEmptyBtn').Add_Click({
-    $snap = Get-AMRSmartCleanupRecycleBinSnapshot
+
+function Complete-AMRRecycleEmptyConfirm {
+    param($Result)
+    $snap = $Result.Snapshot
+    Set-AMRCleanupUiBusy $false
+    $script:AMRCleanupBusy = $false
+    Show-AMRRecycleBinSnapshot -Snapshot $snap
     if (-not $snap.Readable) {
         Show-AMRCleanupSummary -Title 'AMR | Recycle Bin' -Status 'Unable to inspect' -Details $snap.Error -Kind Warning
         return
@@ -31616,16 +34222,46 @@ function Update-AMRSmartCleanupRecycleBin {
         Write-AMRLog 'Smart Cleanup Recycle Bin empty operation cancelled.' INFO Cleanup
         return
     }
-    try {
-        $driveLetter = $snap.Drive.TrimEnd(':')
-        Clear-RecycleBin -DriveLetter $driveLetter -Force -ErrorAction Stop
-        Update-AMRSmartCleanupRecycleBin
-        Write-AMRLog ("Smart Cleanup emptied Recycle Bin on {0} only; before {1} items / {2:N2} MB." -f $snap.Drive,$snap.Count,($snap.Bytes / 1MB)) SUCCESS Cleanup
-        Show-AMRCleanupSummary -Title 'AMR | Recycle Bin' -Status 'Operation completed' -Details ('Recycle Bin cleanup was requested for {0} only. Review the refreshed count.' -f $snap.Drive) -Kind Success
-    } catch {
-        Write-AMRLog ("Smart Cleanup Recycle Bin operation failed on {0}: {1}" -f $snap.Drive,$_.Exception.Message) ERROR Cleanup
-        Show-AMRCleanupSummary -Title 'AMR | Recycle Bin' -Status 'Could not empty Recycle Bin' -Details $_.Exception.Message -Kind Error
-    }
+    if ($script:AMRCleanupBusy) { return }
+    $script:AMRCleanupBusy = $true
+    Set-AMRCleanupUiBusy $true
+    $script:AMRRecycleEmptyState = $snap
+    $driveLetter = $snap.Drive.TrimEnd(':')
+    $emptyWorker = "param(`$Queue,`$DriveLetter)`r`n`$ErrorActionPreference = 'Stop'`r`nClear-RecycleBin -DriveLetter `$DriveLetter -Force -ErrorAction Stop`r`n[pscustomobject]@{ AMRResult = `$true }`r`n"
+    $started = Start-AMRCleanupJob -Name 'RecycleEmpty' -WorkerScript $emptyWorker -WorkerArguments @($driveLetter) -OnComplete 'Complete-AMRRecycleEmpty' -OnFailure 'Fail-AMRRecycleEmpty' -Sta $true
+    if (-not $started) { Fail-AMRRecycleEmpty 'Could not start the isolated Recycle Bin worker.' }
+}
+function Fail-AMRRecycleEmptyConfirm {
+    param([string]$Message)
+    Set-AMRCleanupUiBusy $false
+    $script:AMRCleanupBusy = $false
+    Show-AMRCleanupSummary -Title 'AMR | Recycle Bin' -Status 'Unable to inspect' -Details $Message -Kind Warning
+}
+function Complete-AMRRecycleEmpty {
+    param($Result)
+    $snap = $script:AMRRecycleEmptyState
+    Set-AMRCleanupUiBusy $false
+    $script:AMRCleanupBusy = $false
+    $perfRb = Get-AMRPerfNow
+    Update-AMRSmartCleanupRecycleBin
+    Add-AMRPerfSince 'recycle.empty.refreshStart' $perfRb
+    Write-AMRLog ("Smart Cleanup emptied Recycle Bin on {0} only; before {1} items / {2:N2} MB." -f $snap.Drive,$snap.Count,($snap.Bytes / 1MB)) SUCCESS Cleanup
+    Show-AMRCleanupSummary -Title 'AMR | Recycle Bin' -Status 'Operation completed' -Details ('Recycle Bin cleanup was requested for {0} only. Review the refreshed count.' -f $snap.Drive) -Kind Success
+}
+function Fail-AMRRecycleEmpty {
+    param([string]$Message)
+    $snap = $script:AMRRecycleEmptyState
+    Set-AMRCleanupUiBusy $false
+    $script:AMRCleanupBusy = $false
+    Write-AMRLog ("Smart Cleanup Recycle Bin operation failed on {0}: {1}" -f $snap.Drive,$Message) ERROR Cleanup
+    Show-AMRCleanupSummary -Title 'AMR | Recycle Bin' -Status 'Could not empty Recycle Bin' -Details $Message -Kind Error
+}
+(C 'CleanupRecycleBinEmptyBtn').Add_Click({
+    if ($script:AMRCleanupBusy) { return }
+    $script:AMRCleanupBusy = $true
+    Set-AMRCleanupUiBusy $true
+    $started = Start-AMRCleanupJob -Name 'RecycleSnapshotForEmpty' -WorkerScript (Get-AMRRecycleSnapshotWorkerScript) -OnComplete 'Complete-AMRRecycleEmptyConfirm' -OnFailure 'Fail-AMRRecycleEmptyConfirm' -Sta $true
+    if (-not $started) { Fail-AMRRecycleEmptyConfirm 'Could not start the isolated Recycle Bin reader.' }
 })
 Add-AMRStartupMark 'L28139 before-UpdateSmartCleanupRecycleBin'
 Update-AMRSmartCleanupRecycleBin
@@ -31653,7 +34289,6 @@ function Get-AMRReadOnlyFileInventory {
             foreach ($entry in [IO.Directory]::EnumerateFileSystemEntries($dir)) {
                 $visited++
                 if (($visited % 128) -eq 0) {
-                    try { [System.Windows.Forms.Application]::DoEvents() } catch { }
                     if ($clock.Elapsed.TotalSeconds -ge $MaxSeconds) { $timedOut = $true; break }
                 }
                 if ($visited -ge $MaxEntries) { break }
@@ -31671,89 +34306,158 @@ function Get-AMRReadOnlyFileInventory {
     return [pscustomobject]@{ Files=$found.ToArray(); Errors=$errors.ToArray(); Visited=$visited; ElapsedSeconds=[math]::Round($clock.Elapsed.TotalSeconds,1); Truncated=($timedOut -or $stack.Count -gt 0 -or $visited -ge $MaxEntries) }
 }
 
+# A20: Inspect and Find Large Files run in an isolated worker. The worker script embeds the unchanged Get-AMRReadOnlyFileInventory.
+function Get-AMRInventoryWorkerScript {
+    param([string]$Body)
+    $inventoryBody = (Get-Command -Name 'Get-AMRReadOnlyFileInventory' -CommandType Function).ScriptBlock.ToString()
+    return ("param(`$Queue)`r`n`$ErrorActionPreference = 'Continue'`r`ntry { [System.Threading.Thread]::CurrentThread.Priority = [System.Threading.ThreadPriority]::BelowNormal } catch {}`r`nfunction Send-Log { param([string]`$Text,[string]`$Level) try { [void]`$Queue.Enqueue([pscustomobject]@{ T='log'; Level=`$Level; Text=`$Text }) } catch {} }`r`nfunction Get-AMRReadOnlyFileInventory {`r`n" + $inventoryBody + "`r`n}`r`n" + $Body)
+}
+
+function Receive-AMRCleanupInventoryMessage {
+    param($Message)
+    if ([string]$Message.T -eq 'log') { Write-AMRLog ([string]$Message.Text) ([string]$Message.Level) Cleanup }
+}
+
+$script:AMRCleanupDiscoveryWorkerBody = @'
+$systemRoot = [string]$env:windir
+$systemDriveRoot = [string]$env:SystemDrive + '\'
+$report = New-Object 'System.Collections.Generic.List[string]'
+$dumpRoots = @(
+    (Join-Path $systemRoot 'Minidump'),
+    (Join-Path $systemRoot 'LiveKernelReports'),
+    (Join-Path $systemRoot 'MEMORY.DMP'),
+    (Join-Path $env:LOCALAPPDATA 'CrashDumps'),
+    (Join-Path $env:ProgramData 'Microsoft\Windows\WER\ReportArchive'),
+    (Join-Path $env:ProgramData 'Microsoft\Windows\WER\ReportQueue')
+)
+$upgradeRoots = @(
+    (Join-Path $systemDriveRoot 'Windows.old'),
+    (Join-Path $systemDriveRoot '$WINDOWS.~BT'),
+    (Join-Path $systemDriveRoot '$Windows.~WS'),
+    (Join-Path $systemRoot 'Panther'),
+    (Join-Path $systemRoot 'SoftwareDistribution\Download')
+)
+$dumpInventory = Get-AMRReadOnlyFileInventory -Roots $dumpRoots -MinimumBytes 0 -MaxEntries 30000
+$dumpFiles = @($dumpInventory.Files | Where-Object {
+    ($_.Extension -match '^\.(dmp|mdmp|hdmp)$' -and $_.Length -ge 64MB) -or $_.FullName -match '(?i)\\WER\\'
+})
+$memoryDumpPath = Join-Path $systemRoot 'MEMORY.DMP'
+if (Test-Path -LiteralPath $memoryDumpPath -PathType Leaf -ErrorAction SilentlyContinue) {
+    try {
+        $memoryDump = Get-Item -LiteralPath $memoryDumpPath -Force -ErrorAction Stop
+        if ($memoryDump.Length -ge 64MB) { $dumpFiles = @($dumpFiles) + @($memoryDump) }
+    } catch {}
+}
+$dumpFiles = @($dumpFiles | Sort-Object Length -Descending | Select-Object -Unique)
+[int64]$dumpBytes = 0
+foreach ($f in $dumpFiles) { $dumpBytes += [int64]$f.Length }
+$report.Add('CRASH DUMPS / ERROR REPORTS — READ ONLY')
+if ($dumpFiles.Count -eq 0) { $report.Add('No matching dump/report files found in the inspected system locations.') }
+foreach ($f in ($dumpFiles | Select-Object -First 40)) {
+    $report.Add(('{0,9:N1} MB | {1}' -f ($f.Length / 1MB),$f.FullName))
+}
+$report.Add(('Crash/report inventory: {0:N0} files • {1:N2} MB' -f $dumpFiles.Count,($dumpBytes / 1MB)))
+if ($dumpInventory.Truncated) { $report.Add('NOTE: Inventory reached its safety scan limit; results may be partial.') }
+if ($dumpInventory.Errors.Count -gt 0) { $report.Add(('Unreadable entries: {0:N0} (see application log)' -f $dumpInventory.Errors.Count)) }
+
+$report.Add('')
+$report.Add('WINDOWS UPDATE / UPGRADE LEFTOVERS — READ ONLY')
+foreach ($root in $upgradeRoots) {
+    if (Test-Path -LiteralPath $root -PathType Container -ErrorAction SilentlyContinue) {
+        $folderInventory = Get-AMRReadOnlyFileInventory -Roots @($root) -MinimumBytes 0 -MaxEntries 5000
+        [int64]$folderBytes = 0
+        foreach ($folderFile in @($folderInventory.Files)) { $folderBytes += [int64]$folderFile.Length }
+        $sizeNote = if ($folderInventory.Truncated) { ' (partial estimate; scan limit reached)' } else { ' (read-only estimate)' }
+        $report.Add(('{0:N0} files • {1:N2} MB{2} | {3}' -f $folderInventory.Files.Count,($folderBytes / 1MB),$sizeNote,$root))
+        if ($folderInventory.Errors.Count -gt 0) { $report.Add(('  Unreadable entries: {0:N0}' -f $folderInventory.Errors.Count)) }
+    } elseif (Test-Path -LiteralPath $root -PathType Leaf -ErrorAction SilentlyContinue) {
+        try {
+            $fi = Get-Item -LiteralPath $root -Force -ErrorAction Stop
+            $report.Add(('{0:N1} MB | {1}' -f ($fi.Length / 1MB),$root))
+        } catch { $report.Add(('PRESENT (size unavailable) | {0}' -f $root)) }
+    }
+}
+$report.Add('All upgrade-folder findings are review-only. No Windows.old, setup, recovery, or update folders are changed.')
+foreach ($err in @($dumpInventory.Errors)) {
+    Send-Log ("Smart Cleanup read-only discovery issue: {0}" -f $err) 'WARNING'
+}
+$summary = ('Found {0:N0} crash/report files • {1:N2} MB. Upgrade folders are presence-checked only.' -f $dumpFiles.Count,($dumpBytes / 1MB))
+Send-Log ("Smart Cleanup read-only discovery finished. Crash/report files={0}; bytes={1}; truncated={2}." -f $dumpFiles.Count,$dumpBytes,$dumpInventory.Truncated) 'INFO'
+[pscustomobject]@{ AMRResult = $true; Report = ($report -join [Environment]::NewLine); Summary = $summary }
+'@
+
+function Restore-AMRCleanupInventoryButton {
+    param([string]$ButtonName)
+    Set-AMRCleanupUiBusy $false
+    $script:AMRCleanupBusy = $false
+    $button = C $ButtonName
+    if ($button) { $button.IsEnabled = $true }
+}
+function Complete-AMRCleanupDiscovery {
+    param($Result)
+    (C 'CleanupDiscoveryReport').Text = [string]$Result.Report
+    (C 'CleanupDiscoverySummary').Text = [string]$Result.Summary
+    Restore-AMRCleanupInventoryButton 'CleanupDiscoveryScanBtn'
+}
+function Fail-AMRCleanupDiscovery {
+    param([string]$Message)
+    (C 'CleanupDiscoverySummary').Text = 'Inspection failed; see application log.'
+    (C 'CleanupDiscoveryReport').Text = $Message
+    Write-AMRLog ("Smart Cleanup discovery failed: {0}" -f $Message) ERROR Cleanup
+    Restore-AMRCleanupInventoryButton 'CleanupDiscoveryScanBtn'
+}
 (C 'CleanupDiscoveryScanBtn').Add_Click({
     if ($script:AMRCleanupBusy) { return }
     $script:AMRCleanupBusy = $true
     Set-AMRCleanupUiBusy $true
     $button = C 'CleanupDiscoveryScanBtn'
     $button.IsEnabled = $false
-    $report = New-Object 'System.Collections.Generic.List[string]'
     try {
-        $systemRoot = [string]$env:windir
-        $systemDriveRoot = [string]$env:SystemDrive + '\'
-        $dumpRoots = @(
-            (Join-Path $systemRoot 'Minidump'),
-            (Join-Path $systemRoot 'LiveKernelReports'),
-            (Join-Path $systemRoot 'MEMORY.DMP'),
-            (Join-Path $env:LOCALAPPDATA 'CrashDumps'),
-            (Join-Path $env:ProgramData 'Microsoft\Windows\WER\ReportArchive'),
-            (Join-Path $env:ProgramData 'Microsoft\Windows\WER\ReportQueue')
-        )
-        $upgradeRoots = @(
-            (Join-Path $systemDriveRoot 'Windows.old'),
-            (Join-Path $systemDriveRoot '$WINDOWS.~BT'),
-            (Join-Path $systemDriveRoot '$Windows.~WS'),
-            (Join-Path $systemRoot 'Panther'),
-            (Join-Path $systemRoot 'SoftwareDistribution\Download')
-        )
-        $dumpInventory = Get-AMRReadOnlyFileInventory -Roots $dumpRoots -MinimumBytes 0 -MaxEntries 30000
-        $dumpFiles = @($dumpInventory.Files | Where-Object {
-            ($_.Extension -match '^\.(dmp|mdmp|hdmp)$' -and $_.Length -ge 64MB) -or $_.FullName -match '(?i)\\WER\\'
-        })
-        $memoryDumpPath = Join-Path $systemRoot 'MEMORY.DMP'
-        if (Test-Path -LiteralPath $memoryDumpPath -PathType Leaf -ErrorAction SilentlyContinue) {
-            try {
-                $memoryDump = Get-Item -LiteralPath $memoryDumpPath -Force -ErrorAction Stop
-                if ($memoryDump.Length -ge 64MB) { $dumpFiles = @($dumpFiles) + @($memoryDump) }
-            } catch {}
-        }
-        $dumpFiles = @($dumpFiles | Sort-Object Length -Descending | Select-Object -Unique)
-        [int64]$dumpBytes = 0
-        foreach ($f in $dumpFiles) { $dumpBytes += [int64]$f.Length }
-        $report.Add('CRASH DUMPS / ERROR REPORTS — READ ONLY')
-        if ($dumpFiles.Count -eq 0) { $report.Add('No matching dump/report files found in the inspected system locations.') }
-        foreach ($f in ($dumpFiles | Select-Object -First 40)) {
-            $report.Add(('{0,9:N1} MB | {1}' -f ($f.Length / 1MB),$f.FullName))
-        }
-        $report.Add(('Crash/report inventory: {0:N0} files • {1:N2} MB' -f $dumpFiles.Count,($dumpBytes / 1MB)))
-        if ($dumpInventory.Truncated) { $report.Add('NOTE: Inventory reached its safety scan limit; results may be partial.') }
-        if ($dumpInventory.Errors.Count -gt 0) { $report.Add(('Unreadable entries: {0:N0} (see application log)' -f $dumpInventory.Errors.Count)) }
-
-        $report.Add('')
-        $report.Add('WINDOWS UPDATE / UPGRADE LEFTOVERS — READ ONLY')
-        foreach ($root in $upgradeRoots) {
-            if (Test-Path -LiteralPath $root -PathType Container -ErrorAction SilentlyContinue) {
-                $folderInventory = Get-AMRReadOnlyFileInventory -Roots @($root) -MinimumBytes 0 -MaxEntries 5000
-                [int64]$folderBytes = 0
-                foreach ($folderFile in @($folderInventory.Files)) { $folderBytes += [int64]$folderFile.Length }
-                $sizeNote = if ($folderInventory.Truncated) { ' (partial estimate; scan limit reached)' } else { ' (read-only estimate)' }
-                $report.Add(('{0:N0} files • {1:N2} MB{2} | {3}' -f $folderInventory.Files.Count,($folderBytes / 1MB),$sizeNote,$root))
-                if ($folderInventory.Errors.Count -gt 0) { $report.Add(('  Unreadable entries: {0:N0}' -f $folderInventory.Errors.Count)) }
-            } elseif (Test-Path -LiteralPath $root -PathType Leaf -ErrorAction SilentlyContinue) {
-                try {
-                    $fi = Get-Item -LiteralPath $root -Force -ErrorAction Stop
-                    $report.Add(('{0:N1} MB | {1}' -f ($fi.Length / 1MB),$root))
-                } catch { $report.Add(('PRESENT (size unavailable) | {0}' -f $root)) }
-            }
-        }
-        $report.Add('All upgrade-folder findings are review-only. No Windows.old, setup, recovery, or update folders are changed.')
-        foreach ($err in @($dumpInventory.Errors)) {
-            Write-AMRLog ("Smart Cleanup read-only discovery issue: {0}" -f $err) WARNING Cleanup
-        }
-        (C 'CleanupDiscoveryReport').Text = ($report -join [Environment]::NewLine)
-        (C 'CleanupDiscoverySummary').Text = ('Found {0:N0} crash/report files • {1:N2} MB. Upgrade folders are presence-checked only.' -f $dumpFiles.Count,($dumpBytes / 1MB))
-        Write-AMRLog ("Smart Cleanup read-only discovery finished. Crash/report files={0}; bytes={1}; truncated={2}." -f $dumpFiles.Count,$dumpBytes,$dumpInventory.Truncated) INFO Cleanup
+        (C 'CleanupDiscoverySummary').Text = 'Inspecting… the window stays responsive.'
+        $started = Start-AMRCleanupJob -Name 'CleanupDiscovery' -WorkerScript (Get-AMRInventoryWorkerScript -Body $script:AMRCleanupDiscoveryWorkerBody) -OnMessage 'Receive-AMRCleanupInventoryMessage' -OnComplete 'Complete-AMRCleanupDiscovery' -OnFailure 'Fail-AMRCleanupDiscovery'
+        if (-not $started) { throw 'Could not start the isolated inspection worker.' }
     } catch {
-        (C 'CleanupDiscoverySummary').Text = 'Inspection failed; see application log.'
-        (C 'CleanupDiscoveryReport').Text = $_.Exception.Message
-        Write-AMRLog ("Smart Cleanup discovery failed: {0}" -f $_.Exception.Message) ERROR Cleanup
-    } finally {
-        Set-AMRCleanupUiBusy $false
-        $script:AMRCleanupBusy = $false
-        $button.IsEnabled = $true
+        Fail-AMRCleanupDiscovery $_.Exception.Message
     }
 })
 
+$script:AMRCleanupLargeFilesWorkerBody = @'
+$profile = [string]$env:USERPROFILE
+$roots = @(
+    (Join-Path $profile 'Downloads'),
+    (Join-Path $profile 'Desktop'),
+    (Join-Path $profile 'Documents'),
+    (Join-Path $profile 'Videos')
+)
+$inventory = Get-AMRReadOnlyFileInventory -Roots $roots -MinimumBytes (512MB) -MaxEntries 30000
+$files = @($inventory.Files | Sort-Object Length -Descending)
+$lines = New-Object 'System.Collections.Generic.List[string]'
+foreach ($file in ($files | Select-Object -First 100)) {
+    $lines.Add(('{0,9:N1} MB | {1:yyyy-MM-dd} | {2}' -f ($file.Length / 1MB),$file.LastWriteTime,$file.FullName))
+}
+if ($files.Count -eq 0) { $lines.Add('No files >= 512 MB found in the inspected user folders.') }
+if ($inventory.Truncated) { $lines.Add('NOTE: Scan reached its safety limit; results may be partial.') }
+$lines.Add('')
+$lines.Add('READ ONLY — these files are not part of Clean Selected and cannot be deleted here.')
+$summary = ('Found {0:N0} file(s) >= 512 MB • inspected {1:N0} entries in {2}s • {3} • system drive user folders only.' -f $files.Count,$inventory.Visited,$inventory.ElapsedSeconds,($(if ($inventory.Truncated) { 'PARTIAL' } else { 'Complete' })))
+foreach ($err in @($inventory.Errors)) { Send-Log ("Smart Cleanup large-file scan issue: {0}" -f $err) 'WARNING' }
+Send-Log ("Smart Cleanup large-file review completed. Found={0}; visited={1}; truncated={2}." -f $files.Count,$inventory.Visited,$inventory.Truncated) 'INFO'
+[pscustomobject]@{ AMRResult = $true; Report = ($lines -join [Environment]::NewLine); Summary = $summary }
+'@
+
+function Complete-AMRCleanupLargeFiles {
+    param($Result)
+    (C 'CleanupLargeFilesReport').Text = [string]$Result.Report
+    (C 'CleanupLargeFilesSummary').Text = [string]$Result.Summary
+    Restore-AMRCleanupInventoryButton 'CleanupLargeFilesScanBtn'
+}
+function Fail-AMRCleanupLargeFiles {
+    param([string]$Message)
+    (C 'CleanupLargeFilesSummary').Text = 'Large-file inspection failed; see application log.'
+    (C 'CleanupLargeFilesReport').Text = $Message
+    Write-AMRLog ("Smart Cleanup large-file review failed: {0}" -f $Message) ERROR Cleanup
+    Restore-AMRCleanupInventoryButton 'CleanupLargeFilesScanBtn'
+}
 (C 'CleanupLargeFilesScanBtn').Add_Click({
     if ($script:AMRCleanupBusy) { return }
     $script:AMRCleanupBusy = $true
@@ -31761,35 +34465,11 @@ function Get-AMRReadOnlyFileInventory {
     $button = C 'CleanupLargeFilesScanBtn'
     $button.IsEnabled = $false
     try {
-        $profile = [string]$env:USERPROFILE
-        $roots = @(
-            (Join-Path $profile 'Downloads'),
-            (Join-Path $profile 'Desktop'),
-            (Join-Path $profile 'Documents'),
-            (Join-Path $profile 'Videos')
-        )
-        $inventory = Get-AMRReadOnlyFileInventory -Roots $roots -MinimumBytes (512MB) -MaxEntries 30000
-        $files = @($inventory.Files | Sort-Object Length -Descending)
-        $lines = New-Object 'System.Collections.Generic.List[string]'
-        foreach ($file in ($files | Select-Object -First 100)) {
-            $lines.Add(('{0,9:N1} MB | {1:yyyy-MM-dd} | {2}' -f ($file.Length / 1MB),$file.LastWriteTime,$file.FullName))
-        }
-        if ($files.Count -eq 0) { $lines.Add('No files >= 512 MB found in the inspected user folders.') }
-        if ($inventory.Truncated) { $lines.Add('NOTE: Scan reached its safety limit; results may be partial.') }
-        $lines.Add('')
-        $lines.Add('READ ONLY — these files are not part of Clean Selected and cannot be deleted here.')
-        (C 'CleanupLargeFilesReport').Text = ($lines -join [Environment]::NewLine)
-        (C 'CleanupLargeFilesSummary').Text = ('Found {0:N0} file(s) >= 512 MB • inspected {1:N0} entries in {2}s • {3} • system drive user folders only.' -f $files.Count,$inventory.Visited,$inventory.ElapsedSeconds,($(if ($inventory.Truncated) { 'PARTIAL' } else { 'Complete' })))
-        foreach ($err in @($inventory.Errors)) { Write-AMRLog ("Smart Cleanup large-file scan issue: {0}" -f $err) WARNING Cleanup }
-        Write-AMRLog ("Smart Cleanup large-file review completed. Found={0}; visited={1}; truncated={2}." -f $files.Count,$inventory.Visited,$inventory.Truncated) INFO Cleanup
+        (C 'CleanupLargeFilesSummary').Text = 'Inspecting large files… the window stays responsive.'
+        $started = Start-AMRCleanupJob -Name 'CleanupLargeFiles' -WorkerScript (Get-AMRInventoryWorkerScript -Body $script:AMRCleanupLargeFilesWorkerBody) -OnMessage 'Receive-AMRCleanupInventoryMessage' -OnComplete 'Complete-AMRCleanupLargeFiles' -OnFailure 'Fail-AMRCleanupLargeFiles'
+        if (-not $started) { throw 'Could not start the isolated large-file worker.' }
     } catch {
-        (C 'CleanupLargeFilesSummary').Text = 'Large-file inspection failed; see application log.'
-        (C 'CleanupLargeFilesReport').Text = $_.Exception.Message
-        Write-AMRLog ("Smart Cleanup large-file review failed: {0}" -f $_.Exception.Message) ERROR Cleanup
-    } finally {
-        Set-AMRCleanupUiBusy $false
-        $script:AMRCleanupBusy = $false
-        $button.IsEnabled = $true
+        Fail-AMRCleanupLargeFiles $_.Exception.Message
     }
 })
 
@@ -32124,7 +34804,217 @@ function Invoke-AMRBackupGridBatch {
  }
 }
 
+
+# A7: Backup Center cards. The list is an ItemsControl with one XAML DataTemplate (parsed once); WPF creates the 50 cards natively,
+# hover/press are template triggers (220 ms), and one routed Click handler serves every card. The previous per-card PowerShell
+# builder (13 controls, 9 closures and 14 brush parses per card, plus PowerShell hover handlers) stays only as the logged fallback.
+function Get-AMRBackupCardItems {
+    if ($script:AMRBackupCardItems) { return $script:AMRBackupCardItems }
+    $icons = @{ System = [string][char]0x2699; Security = [System.Char]::ConvertFromUtf32(0x1F6E1); Optimize = [System.Char]::ConvertFromUtf32(0x1F680); Network = [System.Char]::ConvertFromUtf32(0x1F310); Utilities = [System.Char]::ConvertFromUtf32(0x1F9F0) }
+    $list = New-Object System.Collections.Generic.List[object]
+    foreach ($action in @($script:BackupActions)) {
+        $categoryName = [string]$action.Category
+        $iconText = [System.Char]::ConvertFromUtf32(0x1F4BE)
+        if ($icons.ContainsKey($categoryName)) { $iconText = [string]$icons[$categoryName] }
+        $list.Add([pscustomobject]@{ Name = [string]$action.Name; Key = [string]$action.Key; Category = $categoryName; Icon = $iconText })
+    }
+    $script:AMRBackupCardItems = $list.ToArray()
+    return $script:AMRBackupCardItems
+}
+
+function Initialize-AMRBackupCards {
+    $oldGrid = C 'BackupActionsGrid'
+    if (-not $oldGrid) { return }
+    $cardsXaml = @"
+<ItemsControl xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" x:Name="BackupCardsList" HorizontalAlignment="Stretch" VerticalAlignment="Top" Focusable="False" Tag="300">
+  <ItemsControl.ItemsPanel><ItemsPanelTemplate><WrapPanel Orientation="Horizontal"/></ItemsPanelTemplate></ItemsControl.ItemsPanel>
+  <ItemsControl.ItemTemplate>
+    <DataTemplate>
+      <Border x:Name="CardRoot" Width="{Binding Tag, RelativeSource={RelativeSource AncestorType={x:Type ItemsControl}}}" Height="68" Margin="0,0,10,10" CornerRadius="12" BorderThickness="1" BorderBrush="#43576C" SnapsToDevicePixels="True" RenderTransformOrigin="0.5,0.5">
+        <Border.RenderTransform><TranslateTransform Y="0"/></Border.RenderTransform>
+        <Border.Background>
+          <LinearGradientBrush StartPoint="0,0" EndPoint="1,1"><GradientStop Color="#F0263646" Offset="0"/><GradientStop Color="#F01B2531" Offset="1"/></LinearGradientBrush>
+        </Border.Background>
+        <Grid>
+          <Border x:Name="CardHover" CornerRadius="11" Opacity="0" IsHitTestVisible="False">
+            <Border.Background>
+              <LinearGradientBrush StartPoint="0,0" EndPoint="0,1"><GradientStop Color="#EE35506B" Offset="0"/><GradientStop Color="#EE27394D" Offset="1"/></LinearGradientBrush>
+            </Border.Background>
+          </Border>
+          <Border x:Name="CardEdge" CornerRadius="12" Margin="-1" BorderThickness="1.2" BorderBrush="#FFB89A62" Opacity="0" IsHitTestVisible="False"/>
+          <Border CornerRadius="11,11,0,0" Margin="1,1,1,0" Height="16" VerticalAlignment="Top" IsHitTestVisible="False">
+            <Border.Background>
+              <LinearGradientBrush StartPoint="0,0" EndPoint="0,1"><GradientStop Color="#1EFFFFFF" Offset="0"/><GradientStop Color="#00FFFFFF" Offset="1"/></LinearGradientBrush>
+            </Border.Background>
+          </Border>
+          <Grid>
+            <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="40"/></Grid.ColumnDefinitions>
+            <Button x:Name="BackupRunBtn" Grid.Column="0" Tag="{Binding Key}" Background="Transparent" BorderThickness="0" Padding="0" Cursor="Hand" FocusVisualStyle="{x:Null}" HorizontalContentAlignment="Stretch">
+              <Button.Template>
+                <ControlTemplate TargetType="{x:Type Button}"><Border Background="Transparent" CornerRadius="11"><ContentPresenter/></Border></ControlTemplate>
+              </Button.Template>
+              <Grid Margin="10,0,4,0">
+                <Grid.ColumnDefinitions><ColumnDefinition Width="42"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                <Border Width="36" Height="36" CornerRadius="10" BorderThickness="1" BorderBrush="#99B89A62" HorizontalAlignment="Left" VerticalAlignment="Center">
+                  <Border.Background>
+                    <LinearGradientBrush StartPoint="0,0" EndPoint="0,1"><GradientStop Color="#FF35506B" Offset="0"/><GradientStop Color="#FF263646" Offset="1"/></LinearGradientBrush>
+                  </Border.Background>
+                  <TextBlock Text="{Binding Icon}" FontSize="16" HorizontalAlignment="Center" VerticalAlignment="Center" Foreground="#FFE2C68E"/>
+                </Border>
+                <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                  <TextBlock Text="{Binding Name}" ToolTip="{Binding Name}" FontSize="12" FontWeight="SemiBold" Foreground="#FFE7EDF3" TextWrapping="Wrap" TextTrimming="CharacterEllipsis" MaxHeight="32"/>
+                  <TextBlock Text="{Binding Category}" FontSize="10" Foreground="#FFB89A62" Margin="0,2,0,0"/>
+                </StackPanel>
+              </Grid>
+            </Button>
+            <Button x:Name="BackupInfoBtn" Grid.Column="1" Tag="{Binding Key}" Width="24" Height="24" HorizontalAlignment="Center" VerticalAlignment="Center" Cursor="Hand" FocusVisualStyle="{x:Null}" ToolTip="About this backup tool">
+              <Button.Template>
+                <ControlTemplate TargetType="{x:Type Button}">
+                  <Border x:Name="InfoFace" CornerRadius="12" BorderThickness="1" BorderBrush="#FFE2C68E" Background="#FFB89A62">
+                    <TextBlock Text="i" FontSize="12" FontWeight="Bold" Foreground="#FF17212B" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                  </Border>
+                  <ControlTemplate.Triggers>
+                    <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="InfoFace" Property="Background" Value="#FFE0C58C"/></Trigger>
+                    <Trigger Property="IsPressed" Value="True"><Setter TargetName="InfoFace" Property="Background" Value="#FFA8884F"/></Trigger>
+                  </ControlTemplate.Triggers>
+                </ControlTemplate>
+              </Button.Template>
+            </Button>
+          </Grid>
+        </Grid>
+      </Border>
+      <DataTemplate.Triggers>
+        <Trigger SourceName="CardRoot" Property="IsMouseOver" Value="True">
+          <Trigger.EnterActions>
+            <BeginStoryboard><Storyboard>
+              <DoubleAnimation Storyboard.TargetName="CardHover" Storyboard.TargetProperty="Opacity" To="1" Duration="0:0:0.22"/>
+              <DoubleAnimation Storyboard.TargetName="CardEdge" Storyboard.TargetProperty="Opacity" To="1" Duration="0:0:0.22"/>
+              <DoubleAnimation Storyboard.TargetName="CardRoot" Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.Y)" To="-1.5" Duration="0:0:0.22"/>
+            </Storyboard></BeginStoryboard>
+          </Trigger.EnterActions>
+          <Trigger.ExitActions>
+            <BeginStoryboard><Storyboard>
+              <DoubleAnimation Storyboard.TargetName="CardHover" Storyboard.TargetProperty="Opacity" To="0" Duration="0:0:0.22"/>
+              <DoubleAnimation Storyboard.TargetName="CardEdge" Storyboard.TargetProperty="Opacity" To="0" Duration="0:0:0.22"/>
+              <DoubleAnimation Storyboard.TargetName="CardRoot" Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.Y)" To="0" Duration="0:0:0.22"/>
+            </Storyboard></BeginStoryboard>
+          </Trigger.ExitActions>
+        </Trigger>
+      </DataTemplate.Triggers>
+    </DataTemplate>
+  </ItemsControl.ItemTemplate>
+</ItemsControl>
+"@
+    try {
+        $cardsControl = [Windows.Markup.XamlReader]::Parse($cardsXaml)
+        $parentPanel = $oldGrid.Parent -as [System.Windows.Controls.Panel]
+        if (-not $parentPanel) { throw 'The Backup Center list has no panel parent.' }
+        $cardsControl.AddHandler([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent,[System.Windows.RoutedEventHandler]{
+            param($sender,$e)
+            try {
+                $clicked = $e.OriginalSource -as [System.Windows.Controls.Button]
+                if (-not $clicked) { return }
+                $actionKey = [string]$clicked.Tag
+                if ([string]::IsNullOrWhiteSpace($actionKey)) { return }
+                if ($clicked.Name -eq 'BackupRunBtn') {
+                    $e.Handled = $true
+                    Invoke-AMRBackupAction -Key $actionKey
+                } elseif ($clicked.Name -eq 'BackupInfoBtn') {
+                    $e.Handled = $true
+                    $infoAction = @($script:BackupActions | Where-Object { [string]$_.Key -eq $actionKey }) | Select-Object -First 1
+                    if ($infoAction) { Show-AMRMessageGlass (Get-AMRBackupInfoText -Action $infoAction) 'Backup Tool Information' OK Information | Out-Null }
+                }
+            } catch { try { Write-AMRLog ('Backup card click failed: ' + $_.Exception.Message) ERROR System } catch {} }
+        })
+        $cardsControl.Add_SizeChanged({
+            param($sender,$e)
+            try {
+                $newWidth = [double]$sender.ActualWidth
+                if ($newWidth -lt 240) { return }
+                $columns = [int][Math]::Max(1,[Math]::Min(4,[Math]::Floor(($newWidth + 10) / 250)))
+                $sender.Tag = [double][Math]::Max(220,[Math]::Floor(($newWidth - ($columns * 10)) / $columns))
+                if ($script:AMRBackupGridPending) { Request-AMRBackupViewRefresh }
+            } catch { try { Write-AMRLog ('Backup card layout warning: ' + $_.Exception.Message) WARNING System } catch {} }
+        })
+        $cardsControl.Add_Loaded({
+            try {
+                $script:AMRBackupLoadedT0 = [AMR.PerfStats]::Now()
+                [AMR.PerfStats]::Count('backup.cards.loaded',1)
+                [void]$script:Window.Dispatcher.BeginInvoke([System.Action]{
+                    try { [AMR.PerfStats]::Add('backup.cards.loadedToIdle', [AMR.PerfStats]::Now() - [long]$script:AMRBackupLoadedT0) } catch {}
+                },[System.Windows.Threading.DispatcherPriority]::ApplicationIdle)
+            } catch {}
+            Request-AMRBackupViewRefresh
+        })
+        $insertAt = $parentPanel.Children.IndexOf($oldGrid) + 1
+        [void]$parentPanel.Children.Insert($insertAt,$cardsControl)
+        $oldGrid.Visibility = 'Collapsed'
+        $script:AMRBackupCards = $cardsControl
+        # A21: same as the other Control Center pages, the card items exist from startup. The first open then only attaches built cards and
+        # the Loaded/refresh path finds the rendered signature already current. Width stays owned by the SizeChanged handler.
+        try {
+            $initItems = @(Get-AMRBackupCardItems)
+            $cardsControl.Tag = [double]250
+            $cardsControl.ItemsSource = $initItems
+            $initCount = C 'BackupResultsCount'
+            if ($initCount) { $initCount.Text = ('{0} backup actions shown' -f $initItems.Count) }
+            $script:AMRBackupGridLastFilterSignature = 'All Categories|'
+            $script:AMRBackupGridRenderedSignature = 'All Categories|'
+            $script:AMRBackupGridHasRendered = $true
+            $script:AMRBackupGridBuilding = $false
+            $script:AMRBackupGridPending = $false
+        } catch { try { Write-AMRLog ('Backup cards initial items skipped: ' + $_.Exception.Message) WARNING System } catch {} }
+    } catch {
+        $script:AMRBackupCards = $null
+        try { Write-AMRDriverDiagnostic -Severity WARNING -Operation BackupCenter -Stage CardsFallback -Message ('Backup cards kept the original builder: ' + $_.Exception.Message) -Source 'AMRBackupCards' } catch {}
+    }
+}
+
+function Update-AMRBackupCards {
+    $cards = $script:AMRBackupCards
+    if (-not $cards) { return }
+    $perfCardsStart = [long]0
+    try { $perfCardsStart = [AMR.PerfStats]::Now() } catch {}
+    $width = [double]$cards.ActualWidth
+    $countText = C 'BackupResultsCount'
+    if ($width -lt 300) {
+        # A21: when the items are already rendered for the current filter, a narrow (not yet laid out) card list needs nothing, so the count text is kept.
+        $narrowSearchBox = C 'BackupSearchBox'; $narrowCategoryBox = C 'BackupCategoryFilter'
+        $narrowSearch = if ($narrowSearchBox) { [string]$narrowSearchBox.Text } else { '' }
+        $narrowCategory = 'All Categories'
+        if ($narrowCategoryBox -and $narrowCategoryBox.SelectedItem) { $narrowCategory = ([string]$narrowCategoryBox.SelectedItem.Content -replace '^[^A-Za-z0-9]+\s*','') }
+        if ($script:AMRBackupGridHasRendered -and $script:AMRBackupGridRenderedSignature -eq ($narrowCategory + '|' + $narrowSearch)) { try { [AMR.PerfStats]::Count('backup.updateCards.narrowKept',1) } catch {}; return }
+        $script:AMRBackupGridPending = $true; if ($countText) { $countText.Text = 'Preparing backup tools…' }; try { [AMR.PerfStats]::Count('backup.updateCards.pendingNarrow',1) } catch {}; return
+    }
+    $searchBox = C 'BackupSearchBox'; $categoryBox = C 'BackupCategoryFilter'
+    $search = if ($searchBox) { [string]$searchBox.Text } else { '' }
+    $selectedCategory = if ($categoryBox) { $categoryBox.SelectedItem } else { $null }
+    $category = 'All Categories'
+    if ($selectedCategory) { $category = ([string]$selectedCategory.Content -replace '^[^A-Za-z0-9]+\s*','') }
+    $filter = $category + '|' + $search
+    if ($script:AMRBackupGridHasRendered -and $script:AMRBackupGridRenderedSignature -eq $filter) { try { [AMR.PerfStats]::Count('backup.updateCards.skipAlreadyRendered',1); if ($perfCardsStart -ne 0) { [AMR.PerfStats]::Add('backup.updateCards.skip', [AMR.PerfStats]::Now() - $perfCardsStart) } } catch {}; return }
+    if ($script:AMRBackupGridLastFilterSignature -and $script:AMRBackupGridLastFilterSignature -ne $filter) { $scroll = C 'BackupCenterScrollViewer'; if ($scroll) { $scroll.ScrollToTop() } }
+    # Same column rule as the card SizeChanged handler and the other Control Center pages (up to 4 columns, 250 px per column),
+    # so the two never disagree and the cards are not laid out twice with different widths.
+    $columns = [int][Math]::Max(1,[Math]::Min(4,[Math]::Floor(($width + 10) / 250)))
+    $newCardWidth = [double][Math]::Max(220,[Math]::Floor(($width - ($columns * 10)) / $columns))
+    if ([double]$cards.Tag -ne $newCardWidth) { try { [AMR.PerfStats]::Count('backup.updateCards.tagChanged',1) } catch {}; $cards.Tag = $newCardWidth }
+    $items = @(Get-AMRBackupCardItems | Where-Object {
+        ($category -eq 'All Categories' -or [string]$_.Category -eq $category) -and
+        ([string]::IsNullOrWhiteSpace($search) -or ([string]$_.Name -like "*$search*" -or [string]$_.Category -like "*$search*"))
+    })
+    $cards.ItemsSource = $items
+    if ($countText) { $countText.Text = ('{0} backup actions shown' -f $items.Count) }
+    $script:AMRBackupGridLastFilterSignature = $filter
+    $script:AMRBackupGridRenderedSignature = $filter
+    $script:AMRBackupGridHasRendered = $true
+    $script:AMRBackupGridBuilding = $false
+    $script:AMRBackupGridPending = $false
+    try { if ($perfCardsStart -ne 0) { [AMR.PerfStats]::Add('backup.updateCards.setItems', [AMR.PerfStats]::Now() - $perfCardsStart) } } catch {}
+}
+
 function Update-AMRBackupView {
+ if($script:AMRBackupCards){Update-AMRBackupCards;return}
  $grid=C 'BackupActionsGrid';if(-not $grid){return}
  $width=[double]$grid.ActualWidth
  if($width -lt 300){$script:AMRBackupGridPending=$true;$count=C 'BackupResultsCount';if($count){$count.Text='Preparing backup tools…'};return}
@@ -32158,17 +35048,77 @@ function Update-AMRBackupView {
  [void]$grid.Dispatcher.BeginInvoke([System.Action]{Invoke-AMRBackupGridBatch},[System.Windows.Threading.DispatcherPriority]::Background)
 }
 
+function Test-AMRBackupPageActive {
+ $main=C 'MainNavigationTabs';$kit=C 'ToolKitSubTabs'
+ if(-not $main -or -not $main.SelectedItem){return $false}
+ if([string]$main.SelectedItem.Header -ne 'Tool Kit'){return $false}
+ if(-not (Get-AMRToolKitControlTabSelected)){return $false}
+ if(-not $kit -or -not $kit.SelectedItem){return $false}
+ return ([string]$kit.SelectedItem.Header -eq 'Backup')
+}
+
+# Control Center card warm-up. The cards are ItemsControls whose ~50 items are only created when the page is first measured, which used to
+# happen inside the click that opens the page. After startup settles, each page is measured once off-screen at idle priority, one page per
+# idle tick, so opening the page later only attaches already-built cards. Each step is timed in the log.
+function Invoke-AMRControlCenterPrewarmStep {
+    try {
+        if (-not $script:AMRCCPrewarmQueue -or $script:AMRCCPrewarmQueue.Count -eq 0) { return }
+        $area = [string]$script:AMRCCPrewarmQueue.Dequeue()
+        $ic = $null
+        if ($area -eq 'GlassDialog') {
+            # A21: the first glass dialog of a session parses an animated button style, a close-button template and builds a transparent window
+            # on the UI thread (two stalls near 2 s were logged right at the first Cleanup summary). Parse the styles once here, off the click.
+            $swDlg = [System.Diagnostics.Stopwatch]::StartNew()
+            try { [void](New-AMRGlassButtonStyle -Role 'Blue' -Animated); [void](New-AMRGlassButtonStyle -Role 'Red' -Animated) } catch {}
+            try { $warmWindow = New-Object System.Windows.Window; $warmWindow.AllowsTransparency = $true; $warmWindow.WindowStyle = 'None'; $warmWindow.ShowInTaskbar = $false; $warmWindow = $null } catch {}
+            $swDlg.Stop()
+            try { [AMR.PerfStats]::Add('cc.prewarm.GlassDialog', $swDlg.ElapsedTicks) } catch {}
+            try { Write-AMRLog ('Control Center warm-up GlassDialog: {0} ms' -f [int]$swDlg.ElapsedMilliseconds) INFO System } catch {}
+        } else {
+            $ic = if ($area -eq 'Backup') { $script:AMRBackupCards } else { $script:AMRToolCards[$area] }
+        }
+        if ($ic -and -not $ic.IsLoaded) {
+            $sw = [System.Diagnostics.Stopwatch]::StartNew()
+            if ($area -eq 'Backup' -and -not $script:AMRBackupGridHasRendered) {
+                $items = @(Get-AMRBackupCardItems)
+                $ic.ItemsSource = $items
+                $countText = C 'BackupResultsCount'
+                if ($countText) { $countText.Text = ('{0} backup actions shown' -f $items.Count) }
+                $script:AMRBackupGridLastFilterSignature = 'All Categories|'
+                $script:AMRBackupGridRenderedSignature = 'All Categories|'
+                $script:AMRBackupGridHasRendered = $true
+                $script:AMRBackupGridBuilding = $false
+                $script:AMRBackupGridPending = $false
+            }
+            $ic.Measure((New-Object System.Windows.Size(1000.0, [double]::PositiveInfinity)))
+            $sw.Stop()
+            try { [AMR.PerfStats]::Add('cc.prewarm.' + $area, $sw.ElapsedTicks) } catch {}
+            try { Write-AMRLog ('Control Center warm-up {0}: {1} ms' -f $area,[int]$sw.ElapsedMilliseconds) INFO System } catch {}
+        }
+    } catch {
+        try { Write-AMRLog ('Control Center warm-up skipped: ' + $_.Exception.Message) WARNING System } catch {}
+    }
+    try {
+        if ($script:AMRCCPrewarmQueue -and $script:AMRCCPrewarmQueue.Count -gt 0) {
+            [void]$script:Window.Dispatcher.BeginInvoke([System.Action]{ Invoke-AMRControlCenterPrewarmStep },[System.Windows.Threading.DispatcherPriority]::ApplicationIdle)
+        }
+    } catch {}
+}
+function Start-AMRControlCenterPrewarm {
+    try {
+        $script:AMRCCPrewarmQueue = New-Object System.Collections.Queue
+        foreach ($n in @('Optimize','Backup','Utilities','Security','System','Networks','GlassDialog')) { $script:AMRCCPrewarmQueue.Enqueue($n) }
+        Invoke-AMRControlCenterPrewarmStep
+    } catch {}
+}
+
 function Request-AMRBackupViewRefresh {
- $tabs=C 'OverviewSubTabs';$backupTabs=C 'BackupSubTabs'
- if($tabs -and $tabs.SelectedItem -and [string]$tabs.SelectedItem.Header -ne 'Backups'){return}
- if($backupTabs -and $backupTabs.SelectedItem -and [string]$backupTabs.SelectedItem.Header -ne 'Backup Center'){return}
+ if(-not (Test-AMRBackupPageActive)){return}
  $grid=C 'BackupActionsGrid';if(-not $grid){return}
  try {
   [void]$grid.Dispatcher.BeginInvoke([System.Action]{
    try {
-    $activeOverview=C 'OverviewSubTabs';$activeBackup=C 'BackupSubTabs'
-    if($activeOverview -and $activeOverview.SelectedItem -and [string]$activeOverview.SelectedItem.Header -ne 'Backups'){return}
-    if($activeBackup -and $activeBackup.SelectedItem -and [string]$activeBackup.SelectedItem.Header -ne 'Backup Center'){return}
+    if(-not (Test-AMRBackupPageActive)){return}
     Update-AMRBackupView
    } catch {}
   },[System.Windows.Threading.DispatcherPriority]::ContextIdle)
@@ -32184,8 +35134,11 @@ $script:AMRBackupGridHasRendered=$false
 $script:AMRBackupGridBuilding=$false
 $script:AMRBackupGridPending=$true
 $script:AMRBackupGridBuildState=$null
+$script:AMRBackupCards=$null
+$script:AMRBackupCardItems=$null
 (C 'BackupSearchBox').Add_TextChanged({Update-AMRBackupView})
 (C 'BackupCategoryFilter').Add_SelectionChanged({Update-AMRBackupView})
+Initialize-AMRBackupCards
 $backupActionsGrid.Add_Loaded({Request-AMRBackupViewRefresh}.GetNewClosure())
 $backupActionsGrid.Add_SizeChanged({
  # Layout-only resize: update existing cards in place. Do not call the data
@@ -32202,14 +35155,13 @@ $backupActionsGrid.Add_SizeChanged({
   if($script:AMRBackupGridPending -and -not $script:AMRBackupGridBuilding){Request-AMRBackupViewRefresh}
  } catch {try{Write-AMRLog ('Backup card layout resize warning: '+$_.Exception.Message) WARNING System}catch{}}
 }.GetNewClosure())
-$backupTabsForRefresh=C 'BackupSubTabs'
-$backupTabsForRefresh.Add_SelectionChanged({
- if($this.SelectedItem -and [string]$this.SelectedItem.Header -eq 'Backup Center'){Request-AMRBackupViewRefresh}
-}.GetNewClosure())
-$overviewTabsForRefresh=C 'OverviewSubTabs'
-$overviewTabsForRefresh.Add_SelectionChanged({
- if($this.SelectedItem -and [string]$this.SelectedItem.Header -eq 'Backups'){Request-AMRBackupViewRefresh}
-}.GetNewClosure())
+$mainTabsForBackupRefresh=C 'MainNavigationTabs'
+if($mainTabsForBackupRefresh){
+ $mainTabsForBackupRefresh.Add_SelectionChanged({
+  if($_.OriginalSource -ne $this){return}
+  if($this.SelectedItem -and [string]$this.SelectedItem.Header -eq 'Tool Kit'){Request-AMRBackupViewRefresh}
+ }.GetNewClosure())
+}
 
 Add-AMRStartupMark 'L28722 before-StartupManagerSection'
 # ----------------------------------------------------------
@@ -32305,7 +35257,9 @@ function Set-AMRStartupEntryEnabled {
 
 function Update-AMRStartupInstalledMatchIndex {
     $index=@{}
+    $script:StartupInstalledMatchIndexSource=$null
     try {
+        $script:StartupInstalledMatchIndexSource=$script:InstalledScanState.Inventory
         foreach($record in @($script:InstalledScanState.Inventory)) {
             if($null -eq $record){continue}
             $normalized=([string]$record.Name -replace '[^a-zA-Z0-9]','').ToLowerInvariant()
@@ -32317,18 +35271,19 @@ function Update-AMRStartupInstalledMatchIndex {
 
 function Get-AMRStartupInstalledMatch {
     param([string]$DisplayName,[string]$CommandText)
-    $inventory=@()
-    try{if($script:InstalledScanState -and $script:InstalledScanState.Inventory){$inventory=@($script:InstalledScanState.Inventory)}}catch{}
-    if($inventory.Count -eq 0){return $null}
+    $inventoryRef=$null
+    try{if($script:InstalledScanState -and $script:InstalledScanState.Inventory){$inventoryRef=$script:InstalledScanState.Inventory}}catch{}
+    if($null -eq $inventoryRef -or @($inventoryRef).Count -eq 0){return $null}
+    # One normalized-name index per inventory object. The old code normalized every inventory record again for each
+    # startup entry that missed the index (entries x inventory string operations on the UI thread). Same first-match rule.
+    if($null -eq $script:StartupInstalledMatchIndex -or -not [object]::ReferenceEquals($script:StartupInstalledMatchIndexSource,$inventoryRef)){
+        Update-AMRStartupInstalledMatchIndex
+    }
     $norm=($DisplayName -replace '[^a-zA-Z0-9]','').ToLowerInvariant()
-    if($norm -and $script:StartupInstalledMatchIndex -and $script:StartupInstalledMatchIndex.ContainsKey($norm)){return $script:StartupInstalledMatchIndex[$norm]}
+    if($norm -and $script:StartupInstalledMatchIndex.ContainsKey($norm)){return $script:StartupInstalledMatchIndex[$norm]}
     $exe='';try{$m=[regex]::Match($CommandText,'(?i)([A-Z]:\\[^"]+?\.exe)');if($m.Success){$exe=[IO.Path]::GetFileNameWithoutExtension($m.Groups[1].Value)}}catch{}
     $exeNorm=if($exe){($exe -replace '[^a-zA-Z0-9]','').ToLowerInvariant()}else{''}
-    foreach($record in $inventory){
-        $recordNorm=([string]$record.Name -replace '[^a-zA-Z0-9]','').ToLowerInvariant()
-        if($norm -and $recordNorm -and $recordNorm -eq $norm){return $record}
-        if($exeNorm -and $recordNorm -and $recordNorm -eq $exeNorm){return $record}
-    }
+    if($exeNorm -and $script:StartupInstalledMatchIndex.ContainsKey($exeNorm)){return $script:StartupInstalledMatchIndex[$exeNorm]}
     return $null
 }
 
@@ -32532,6 +35487,29 @@ function Get-AMRStartupIconFromPath {
     return $null
 }
 
+function Get-AMRStartupBrush {
+    param([string]$Color)
+    if($script:StartupBrushProto -isnot [hashtable]){$script:StartupBrushProto=@{}}
+    if(-not $script:StartupBrushProto.ContainsKey($Color)){$script:StartupBrushProto[$Color]=[System.Windows.Media.BrushConverter]::new().ConvertFromString($Color)}
+    # Each card still gets its own unfrozen brush, because hover animates the card brushes.
+    return $script:StartupBrushProto[$Color].Clone()
+}
+
+function Get-AMRStartupIconFileMap {
+    param([string]$Root)
+    if($script:StartupIconFileMaps -isnot [hashtable]){$script:StartupIconFileMaps=@{}}
+    $stamp=[DateTime]::UtcNow
+    if($script:StartupIconFileMaps.ContainsKey($Root) -and (($stamp-$script:StartupIconFileMaps[$Root].Stamp).TotalSeconds -lt 45)){return $script:StartupIconFileMaps[$Root].Map}
+    $map=@{}
+    try{
+        if(Test-Path -LiteralPath $Root -PathType Container){
+            foreach($f in [System.IO.Directory]::EnumerateFiles($Root)){$map[[IO.Path]::GetFileName($f).ToLowerInvariant()]=$f}
+        }
+    }catch{}
+    $script:StartupIconFileMaps[$Root]=@{Stamp=$stamp;Map=$map}
+    return $map
+}
+
 function Get-AMRStartupIconSource {
     param([object]$Entry)
     try {
@@ -32567,10 +35545,12 @@ function Get-AMRStartupIconSource {
         if(Test-Path -LiteralPath $startupCacheRoot -PathType Container){$iconRoots+= $startupCacheRoot}
         foreach($id in @($candidateIds | Select-Object -Unique)){
             foreach($iconRoot in $iconRoots){
+                # One directory listing per icon folder (cached 45 s) instead of one Test-Path per id x folder x extension.
+                $iconFileMap=Get-AMRStartupIconFileMap -Root ([string]$iconRoot)
                 foreach($ext in $script:AMRIconImageExtensions){
-                    $iconPath=Join-Path $iconRoot ($id+$ext)
-                    if(Test-Path -LiteralPath $iconPath -PathType Leaf){
-                        $source=Get-AMRIconImageSource -Path $iconPath
+                    $mapKey=([string]($id+$ext)).ToLowerInvariant()
+                    if($iconFileMap.ContainsKey($mapKey)){
+                        $source=Get-AMRIconImageSource -Path $iconFileMap[$mapKey]
                         if($source){return $source}
                     }
                 }
@@ -32753,11 +35733,156 @@ function Set-AMRStartupSwitchVisual {
     }catch{}
 }
 
+# ---- Startup Apps cache -------------------------------------------------------------------------------------------------
+# Design: the complete discovery result (registry, startup folders, packaged tasks, scheduled tasks, Windows inventory) is saved to
+# %ProgramData%\AMR-Utility\Cache\StartupApps.json after a full scan finishes, and after each ON/OFF switch. On the next launch the
+# cache is shown directly, without rediscovery, when (a) the file is complete and version 1, (b) it was saved by the same user,
+# (c) it is under 24 hours old, and (d) a cheap change signature still matches: Run/RunOnce/Policy Run values (both hives and registry views),
+# every StartupApproved value, and the Startup folder file names and timestamps. Any difference, or the Refresh button, runs the full
+# discovery exactly as before. Icons are not stored; they are resolved again at idle priority.
+function Get-AMRStartupCachePath { return (Join-Path (Join-Path $script:AppRoot 'Cache') 'StartupApps.json') }
+
+function Get-AMRStartupChangeSignature {
+    $sb=New-Object System.Text.StringBuilder
+    foreach($hiveName in @('CurrentUser','LocalMachine')){
+        $hive=if($hiveName -eq 'CurrentUser'){[Microsoft.Win32.RegistryHive]::CurrentUser}else{[Microsoft.Win32.RegistryHive]::LocalMachine}
+        $views=@([Microsoft.Win32.RegistryView]::Registry32)
+        if([Environment]::Is64BitOperatingSystem){$views+=[Microsoft.Win32.RegistryView]::Registry64}
+        foreach($view in $views){
+            $base=$null
+            try{
+                $base=[Microsoft.Win32.RegistryKey]::OpenBaseKey($hive,$view)
+                foreach($rel in @('Software\Microsoft\Windows\CurrentVersion\Run','Software\Microsoft\Windows\CurrentVersion\RunOnce','Software\Microsoft\Windows\CurrentVersion\Policies\Explorer\Run')){
+                    $k=$null
+                    try{
+                        $k=$base.OpenSubKey($rel,$false)
+                        [void]$sb.Append('R|'+$hiveName+'|'+$view+'|'+$rel+"`n")
+                        if($k){foreach($n in @($k.GetValueNames() | Sort-Object)){[void]$sb.Append($n+'='+[string]$k.GetValue($n,$null,[Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)+"`n")}}
+                    }finally{if($k){$k.Dispose()}}
+                }
+                if($view -eq [Microsoft.Win32.RegistryView]::Registry64 -or -not [Environment]::Is64BitOperatingSystem){
+                    $root=$null
+                    try{
+                        $root=$base.OpenSubKey('Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved',$false)
+                        if($root){
+                            foreach($sn in @($root.GetSubKeyNames() | Sort-Object)){
+                                $sk=$null
+                                try{
+                                    $sk=$root.OpenSubKey($sn,$false)
+                                    [void]$sb.Append('A|'+$hiveName+'|'+$sn+"`n")
+                                    if($sk){
+                                        foreach($n in @($sk.GetValueNames() | Sort-Object)){$d=$sk.GetValue($n,$null);$h=if($d -is [byte[]]){[BitConverter]::ToString($d)}else{[string]$d};[void]$sb.Append($n+'='+$h+"`n")}
+                                        foreach($fn in @($sk.GetSubKeyNames() | Sort-Object)){
+                                            $fk=$null
+                                            try{
+                                                $fk=$sk.OpenSubKey($fn,$false)
+                                                [void]$sb.Append('F|'+$fn+"`n")
+                                                if($fk){foreach($n in @($fk.GetValueNames() | Sort-Object)){$d=$fk.GetValue($n,$null);$h=if($d -is [byte[]]){[BitConverter]::ToString($d)}else{[string]$d};[void]$sb.Append($n+'='+$h+"`n")}}
+                                            }finally{if($fk){$fk.Dispose()}}
+                                        }
+                                    }
+                                }finally{if($sk){$sk.Dispose()}}
+                            }
+                        }
+                    }finally{if($root){$root.Dispose()}}
+                }
+            }finally{if($base){$base.Dispose()}}
+        }
+    }
+    foreach($folder in @((Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Startup'),(Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs\Startup'))){
+        [void]$sb.Append('D|'+$folder+"`n")
+        try{if(Test-Path -LiteralPath $folder -PathType Container){foreach($fi in @(Get-ChildItem -LiteralPath $folder -File -ErrorAction Stop | Sort-Object Name)){[void]$sb.Append($fi.Name+'|'+$fi.Length+'|'+$fi.LastWriteTimeUtc.Ticks+"`n")}}}catch{}
+    }
+    $sha=[System.Security.Cryptography.SHA256]::Create()
+    try{return ([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($sb.ToString()))) -replace '-','')}finally{$sha.Dispose()}
+}
+
+function ConvertTo-AMRStartupCacheRecord {
+    param([object]$Entry,[switch]$NoNested)
+    $record=[ordered]@{}
+    foreach($p in @($Entry.PSObject.Properties)){
+        $name=[string]$p.Name
+        if($name -in @('IconSource','IconControl','GlyphControl','InstalledRecord','Registrations')){continue}
+        $v=$p.Value
+        if($null -eq $v){$record[$name]=$null}
+        elseif($v -is [string] -or $v -is [bool] -or $v -is [int] -or $v -is [long] -or $v -is [double]){$record[$name]=$v}
+        elseif($v -is [array] -and (@($v | Where-Object {$_ -isnot [string]}).Count -eq 0)){$record[$name]=@($v)}
+    }
+    if($Entry.PSObject.Properties['InstalledRecord'] -and $Entry.InstalledRecord){
+        $slim=[ordered]@{}
+        foreach($pn in @('Id','AppId','PackageId','Name','DisplayIcon','IconLocation','ShortcutPath')){
+            if($Entry.InstalledRecord.PSObject.Properties[$pn] -and $null -ne $Entry.InstalledRecord.$pn){$slim[$pn]=[string]$Entry.InstalledRecord.$pn}
+        }
+        $record['InstalledRecord']=$slim
+    }
+    if(-not $NoNested -and $Entry.PSObject.Properties['Registrations'] -and $Entry.Registrations){
+        $record['Registrations']=@(@($Entry.Registrations) | ForEach-Object {ConvertTo-AMRStartupCacheRecord -Entry $_ -NoNested})
+    }
+    return $record
+}
+
+function Restore-AMRStartupCacheEntry {
+    param([object]$Record)
+    if($null -eq $Record){return $null}
+    foreach($pn in @('IconSource')){if(-not $Record.PSObject.Properties[$pn]){$Record | Add-Member -NotePropertyName $pn -NotePropertyValue $null -Force}else{$Record.$pn=$null}}
+    if(-not $Record.PSObject.Properties['InstalledRecord']){$Record | Add-Member -NotePropertyName InstalledRecord -NotePropertyValue $null -Force}
+    if($Record.PSObject.Properties['Registrations'] -and $Record.Registrations){
+        $members=@(@($Record.Registrations) | ForEach-Object {Restore-AMRStartupCacheEntry -Record $_})
+        $Record.Registrations=$members
+    }
+    return $Record
+}
+
+function Save-AMRStartupManagerCache {
+    param([object[]]$Entries)
+    if(-not $script:StartupCacheComplete){return $false}
+    try{
+        $list=@(@($Entries) | Where-Object {$_} | ForEach-Object {ConvertTo-AMRStartupCacheRecord -Entry $_})
+        if($list.Count -eq 0){return $false}
+        $payload=[ordered]@{Version=1;User=[string]$env:USERNAME;SavedUtc=[DateTime]::UtcNow.ToString('o');Signature=(Get-AMRStartupChangeSignature);Entries=$list}
+        $path=Get-AMRStartupCachePath
+        $dir=Split-Path -Parent $path
+        if(-not (Test-Path -LiteralPath $dir)){[void](New-Item -ItemType Directory -Path $dir -Force)}
+        $tmp=$path+'.tmp'
+        [IO.File]::WriteAllText($tmp,(ConvertTo-Json -InputObject $payload -Depth 6),(New-Object System.Text.UTF8Encoding($false)))
+        if(Test-Path -LiteralPath $path){Remove-Item -LiteralPath $path -Force}
+        Move-Item -LiteralPath $tmp -Destination $path -Force
+        try{Write-AMRLog ('Startup cache saved: '+$list.Count+' item(s).') INFO System}catch{}
+        return $true
+    }catch{
+        try{Write-AMRLog ('Startup cache save skipped: '+$_.Exception.Message) WARNING System}catch{}
+        return $false
+    }
+}
+
+function Get-AMRStartupCachedEntries {
+    $path=Get-AMRStartupCachePath
+    if(-not (Test-Path -LiteralPath $path -PathType Leaf)){return $null}
+    try{
+        $data=Get-Content -LiteralPath $path -Raw -Encoding UTF8 | ConvertFrom-Json
+        if([int]$data.Version -ne 1){return $null}
+        if([string]$data.User -ne [string]$env:USERNAME){return $null}
+        $savedAt=$data.SavedUtc
+        if($savedAt -is [DateTime]){$savedAt=$savedAt.ToUniversalTime()}else{$savedAt=[DateTime]::Parse([string]$savedAt,[Globalization.CultureInfo]::InvariantCulture,[Globalization.DateTimeStyles]::RoundtripKind).ToUniversalTime()}
+        $age=([DateTime]::UtcNow-$savedAt).TotalHours
+        if($age -lt 0 -or $age -ge 24){try{Write-AMRLog 'Startup cache ignored: older than 24 hours.' INFO System}catch{};return $null}
+        if([string]$data.Signature -ne (Get-AMRStartupChangeSignature)){try{Write-AMRLog 'Startup cache ignored: startup registrations changed.' INFO System}catch{};return $null}
+        $entries=@(@($data.Entries) | ForEach-Object {Restore-AMRStartupCacheEntry -Record $_} | Where-Object {$_})
+        if($entries.Count -eq 0){return $null}
+        try{Write-AMRLog ('Startup cache used: '+$entries.Count+' item(s), no rediscovery.') INFO System}catch{}
+        return $entries
+    }catch{
+        try{Write-AMRLog ('Startup cache ignored: '+$_.Exception.Message) WARNING System}catch{}
+        return $null
+    }
+}
+
 function Refresh-AMRStartupManager {
     param([object[]]$Entries,[switch]$RefreshInventory,[switch]$SkipDeferredCim,[switch]$AppendEntries)
     $hostPanel=C 'AMRStartupAppsHost';if(-not $hostPanel){return}
     # Re-entering Startups must reuse the existing cards. Only an explicit refresh
     # or a supplied replacement entry set is allowed to rebuild the visual tree.
+    if(-not $PSBoundParameters.ContainsKey('Entries')){$script:StartupCacheComplete=$false}
     if(-not $PSBoundParameters.ContainsKey('Entries') -and -not $RefreshInventory -and
        ($script:StartupManagerLoaded -or $script:StartupRenderState)){return}
     if(-not ($AppendEntries -and $script:StartupRenderState)){try { if($script:StartupRenderTimer){$script:StartupRenderTimer.Stop()} } catch {}}
@@ -32803,7 +35928,7 @@ function Refresh-AMRStartupManager {
             [System.Windows.Media.ColorConverter]::ConvertFromString('#E817202B'),
             [System.Windows.Point]::new(0,0),
             [System.Windows.Point]::new(1,1))
-        $card.BorderBrush=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#8C9B805F')
+        $card.BorderBrush=(Get-AMRStartupBrush ('#8C9B805F'))
         $card.BorderThickness=[System.Windows.Thickness]::new(1)
         $card.CornerRadius=[System.Windows.CornerRadius]::new(18)
         $card.Padding=[System.Windows.Thickness]::new(16,13,16,13)
@@ -32814,7 +35939,7 @@ function Refresh-AMRStartupManager {
         $card.RenderTransform=[System.Windows.Media.TranslateTransform]::new(0,10)
         $card.Effect=[System.Windows.Media.Effects.DropShadowEffect]::new()
         $card.Effect.Color=[System.Windows.Media.ColorConverter]::ConvertFromString('#000000')
-        $card.Effect.BlurRadius=9
+        $card.Effect.BlurRadius=7
         $card.Effect.ShadowDepth=1
         $card.Effect.Opacity=0.16
         $grid=New-Object System.Windows.Controls.Grid
@@ -32822,39 +35947,35 @@ function Refresh-AMRStartupManager {
         $grid.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition -Property @{Width=[System.Windows.GridLength]::new(1,[System.Windows.GridUnitType]::Star)}))
         $grid.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition -Property @{Width=[System.Windows.GridLength]::new(88)}))
         $grid.ColumnDefinitions.Add((New-Object System.Windows.Controls.ColumnDefinition -Property @{Width=[System.Windows.GridLength]::new(58)}))
-        $glyph=New-Object System.Windows.Controls.Border;$glyph.Width=42;$glyph.Height=42;$glyph.CornerRadius=[System.Windows.CornerRadius]::new(13);$glyph.Background=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#B52D3A49');$glyph.BorderBrush=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#A9C6A77A');$glyph.BorderThickness=[System.Windows.Thickness]::new(1);$glyph.VerticalAlignment='Center'
-        $glyph.Effect=New-Object System.Windows.Media.Effects.DropShadowEffect
-        $glyph.Effect.Color=[System.Windows.Media.ColorConverter]::ConvertFromString('#C99B5A')
-        $glyph.Effect.BlurRadius=9
-        $glyph.Effect.ShadowDepth=0
-        $glyph.Effect.Opacity=0.18
-        $initial=New-Object System.Windows.Controls.TextBlock;$entryDisplayName=[string]$entry.Name;$initial.Text=if($entryDisplayName.Length -gt 0){$entryDisplayName.Substring(0,1).ToUpperInvariant()}else{'A'};$initial.Foreground=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#D9BD8B');$initial.FontSize=14;$initial.FontWeight='Bold';$initial.HorizontalAlignment='Center';$initial.VerticalAlignment='Center';$glyph.Child=$initial
+        $glyph=New-Object System.Windows.Controls.Border;$glyph.Width=42;$glyph.Height=42;$glyph.CornerRadius=[System.Windows.CornerRadius]::new(13);$glyph.Background=(Get-AMRStartupBrush ('#B52D3A49'));$glyph.BorderBrush=(Get-AMRStartupBrush ('#A9C6A77A'));$glyph.BorderThickness=[System.Windows.Thickness]::new(1);$glyph.VerticalAlignment='Center'
+        # The per-card gold glow effect was removed: the glyph keeps its gold edge (BorderBrush), and one fewer blur effect is rendered per card.
+        $initial=New-Object System.Windows.Controls.TextBlock;$entryDisplayName=[string]$entry.Name;$initial.Text=if($entryDisplayName.Length -gt 0){$entryDisplayName.Substring(0,1).ToUpperInvariant()}else{'A'};$initial.Foreground=(Get-AMRStartupBrush ('#D9BD8B'));$initial.FontSize=14;$initial.FontWeight='Bold';$initial.HorizontalAlignment='Center';$initial.VerticalAlignment='Center';$glyph.Child=$initial
         $appImage=New-Object System.Windows.Controls.Image;$appImage.Width=27;$appImage.Height=27;$appImage.Stretch='Uniform';$appImage.HorizontalAlignment='Center';$appImage.VerticalAlignment='Center'
         if($entry.IconSource){$appImage.Source=$entry.IconSource;$glyph.Child=$appImage}
         $entry | Add-Member -NotePropertyName IconControl -NotePropertyValue $appImage -Force
         $entry | Add-Member -NotePropertyName GlyphControl -NotePropertyValue $glyph -Force
         [System.Windows.Controls.Grid]::SetColumn($glyph,0);[void]$grid.Children.Add($glyph)
         $details=New-Object System.Windows.Controls.StackPanel;$details.VerticalAlignment='Center'
-        $name=New-Object System.Windows.Controls.TextBlock;$name.Text=$entryDisplayName;$name.Foreground=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#F0F5FA');$name.FontSize=12;$name.FontWeight='SemiBold';$name.TextTrimming='CharacterEllipsis'
-        $source=New-Object System.Windows.Controls.TextBlock;$source.Text=[string]$entry.Source;$source.Foreground=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#8FA6BC');$source.FontSize=9;$source.Margin=[System.Windows.Thickness]::new(0,3,0,0);$source.TextTrimming='CharacterEllipsis'
+        $name=New-Object System.Windows.Controls.TextBlock;$name.Text=$entryDisplayName;$name.Foreground=(Get-AMRStartupBrush ('#F0F5FA'));$name.FontSize=12;$name.FontWeight='SemiBold';$name.TextTrimming='CharacterEllipsis'
+        $source=New-Object System.Windows.Controls.TextBlock;$source.Text=[string]$entry.Source;$source.Foreground=(Get-AMRStartupBrush ('#8FA6BC'));$source.FontSize=9;$source.Margin=[System.Windows.Thickness]::new(0,3,0,0);$source.TextTrimming='CharacterEllipsis'
         [void]$details.Children.Add($name);[void]$details.Children.Add($source);[System.Windows.Controls.Grid]::SetColumn($details,1);[void]$grid.Children.Add($details)
         $statusBadge=New-Object System.Windows.Controls.Border
         $statusBadge.CornerRadius=[System.Windows.CornerRadius]::new(10)
         $statusBadge.Padding=[System.Windows.Thickness]::new(10,6,10,6)
         $statusBadge.HorizontalAlignment='Center'
         $statusBadge.VerticalAlignment='Center'
-        $statusBadge.Background=[System.Windows.Media.BrushConverter]::new().ConvertFromString($(if($entry.Enabled){'#4935A88B'}else{'#493E5268'}))
-        $statusBadge.BorderBrush=[System.Windows.Media.BrushConverter]::new().ConvertFromString($(if($entry.Enabled){'#8C6ED0B4'}else{'#806B8298'}))
+        $statusBadge.Background=(Get-AMRStartupBrush ($(if($entry.Enabled){'#4935A88B'}else{'#493E5268'})))
+        $statusBadge.BorderBrush=(Get-AMRStartupBrush ($(if($entry.Enabled){'#8C6ED0B4'}else{'#806B8298'})))
         $statusBadge.BorderThickness=[System.Windows.Thickness]::new(1)
         $status=New-Object System.Windows.Controls.TextBlock
         $status.Text=if($entry.Enabled){'●  ON'}else{'○  OFF'}
-        $status.Foreground=[System.Windows.Media.BrushConverter]::new().ConvertFromString($(if($entry.Enabled){'#9BE8D0'}else{'#C0CCD8'}))
+        $status.Foreground=(Get-AMRStartupBrush ($(if($entry.Enabled){'#9BE8D0'}else{'#C0CCD8'})))
         $status.FontSize=9;$status.FontWeight='Bold';$status.VerticalAlignment='Center';$status.HorizontalAlignment='Center'
         $statusBadge.Child=$status
         [System.Windows.Controls.Grid]::SetColumn($statusBadge,2);[void]$grid.Children.Add($statusBadge)
         $switch=New-Object System.Windows.Controls.Grid;$switch.Width=52;$switch.Height=29;$switch.VerticalAlignment='Center';$switch.HorizontalAlignment='Center';$switch.Cursor=[System.Windows.Input.Cursors]::Hand
-        $track=New-Object System.Windows.Controls.Border;$track.Width=52;$track.Height=29;$track.CornerRadius=[System.Windows.CornerRadius]::new(15);$track.Background=[System.Windows.Media.BrushConverter]::new().ConvertFromString($(if($entry.Enabled){'#36B99A'}else{'#34485C'}));$track.BorderBrush=[System.Windows.Media.BrushConverter]::new().ConvertFromString($(if($entry.Enabled){'#9BE8D0'}else{'#8298AD'}));$track.BorderThickness=[System.Windows.Thickness]::new(1);$track.Effect=New-Object System.Windows.Media.Effects.DropShadowEffect;$track.Effect.Color=[System.Windows.Media.ColorConverter]::ConvertFromString($(if($entry.Enabled){'#36B99A'}else{'#66809A'}));$track.Effect.BlurRadius=10;$track.Effect.ShadowDepth=0;$track.Effect.Opacity=0.30;[void]$switch.Children.Add($track)
-        $thumb=New-Object System.Windows.Shapes.Ellipse;$thumb.Width=21;$thumb.Height=21;$thumb.Fill=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#FFFDF7');$thumb.Stroke=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#D8C49D');$thumb.StrokeThickness=0.7;$thumb.VerticalAlignment='Center';$thumb.HorizontalAlignment='Left';$thumb.Margin=[System.Windows.Thickness]::new(3,0,0,0);$thumb.RenderTransform=New-Object System.Windows.Media.TranslateTransform($(if($entry.Enabled){23.0}else{2.0}),0);$thumb.Effect=New-Object System.Windows.Media.Effects.DropShadowEffect;$thumb.Effect.Color=[System.Windows.Media.Colors]::Black;$thumb.Effect.BlurRadius=5;$thumb.Effect.ShadowDepth=1;$thumb.Effect.Opacity=0.30;[void]$switch.Children.Add($thumb)
+        $track=New-Object System.Windows.Controls.Border;$track.Width=52;$track.Height=29;$track.CornerRadius=[System.Windows.CornerRadius]::new(15);$track.Background=(Get-AMRStartupBrush ($(if($entry.Enabled){'#36B99A'}else{'#34485C'})));$track.BorderBrush=(Get-AMRStartupBrush ($(if($entry.Enabled){'#9BE8D0'}else{'#8298AD'})));$track.BorderThickness=[System.Windows.Thickness]::new(1);$track.Effect=New-Object System.Windows.Media.Effects.DropShadowEffect;$track.Effect.Color=[System.Windows.Media.ColorConverter]::ConvertFromString($(if($entry.Enabled){'#36B99A'}else{'#66809A'}));$track.Effect.BlurRadius=10;$track.Effect.ShadowDepth=0;$track.Effect.Opacity=0.30;[void]$switch.Children.Add($track)
+        $thumb=New-Object System.Windows.Shapes.Ellipse;$thumb.Width=21;$thumb.Height=21;$thumb.Fill=(Get-AMRStartupBrush ('#FFFDF7'));$thumb.Stroke=(Get-AMRStartupBrush ('#D8C49D'));$thumb.StrokeThickness=0.7;$thumb.VerticalAlignment='Center';$thumb.HorizontalAlignment='Left';$thumb.Margin=[System.Windows.Thickness]::new(3,0,0,0);$thumb.RenderTransform=New-Object System.Windows.Media.TranslateTransform($(if($entry.Enabled){23.0}else{2.0}),0);$thumb.Effect=New-Object System.Windows.Media.Effects.DropShadowEffect;$thumb.Effect.Color=[System.Windows.Media.Colors]::Black;$thumb.Effect.BlurRadius=5;$thumb.Effect.ShadowDepth=1;$thumb.Effect.Opacity=0.30;[void]$switch.Children.Add($thumb)
         [System.Windows.Controls.Grid]::SetColumn($switch,3);[void]$grid.Children.Add($switch)
         $entryCopy=$entry;$trackCopy=$track;$thumbCopy=$thumb;$statusCopy=$status
         $switch.Add_MouseLeftButtonUp({
@@ -32867,6 +35988,7 @@ function Refresh-AMRStartupManager {
                 $currentSummary=C 'AMRStartupSummary'
                 if($currentSummary){$all=@($script:StartupManagerEntries);$on=@($all|Where-Object {$_.Enabled}).Count;$currentSummary.Text=('{0} startup item(s) detected  ·  {1} enabled  ·  {2} disabled' -f $all.Count,$on,($all.Count-$on))}
                 Write-AMRLog ("Startup item '{0}' changed to {1}." -f $entryCopy.Name,$(if($desired){'Enabled'}else{'Disabled'})) SUCCESS System
+                try{[void](Save-AMRStartupManagerCache -Entries $script:StartupManagerEntries)}catch{}
             }catch{
                 Show-AMRMessageGlass ("Could not change startup state for '{0}':`n`n{1}" -f $entryCopy.Name,$_.Exception.Message) 'Startup Manager' OK Warning | Out-Null
                 Set-AMRStartupSwitchVisual -Track $trackCopy -Thumb $thumbCopy -Enabled ([bool]$entryCopy.Enabled) -StatusText $statusCopy
@@ -32876,8 +35998,8 @@ function Refresh-AMRStartupManager {
         $switch.ToolTip=if($entry.CanToggle){'Smooth ON/OFF control · Windows StartupApproved'}else{'Detected by Windows; no safe StartupApproved switch was exposed for this item.'}
         if(-not $entry.CanToggle){
             $switch.Opacity=0.45
-            if($entry.PSObject.Properties['StateKnown'] -and -not $entry.StateKnown){$status.Text='INFO';$status.Foreground=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#A3B2C1')}
-            else{$status.Text=if($entry.Enabled){'●  ON'}else{'○  OFF'};$status.Foreground=[System.Windows.Media.BrushConverter]::new().ConvertFromString($(if($entry.Enabled){'#9BE8D0'}else{'#C0CCD8'}))}
+            if($entry.PSObject.Properties['StateKnown'] -and -not $entry.StateKnown){$status.Text='INFO';$status.Foreground=(Get-AMRStartupBrush ('#A3B2C1'))}
+            else{$status.Text=if($entry.Enabled){'●  ON'}else{'○  OFF'};$status.Foreground=(Get-AMRStartupBrush ($(if($entry.Enabled){'#9BE8D0'}else{'#C0CCD8'})))}
         }
         [System.Windows.Controls.Grid]::SetColumn($switch,3)
         $card.Child=$grid
@@ -32898,7 +36020,7 @@ function Refresh-AMRStartupManager {
                     $cardRef.Background.GradientStops[1].BeginAnimation([System.Windows.Media.GradientStop]::ColorProperty,$g1)
                 }
                 if($cardRef.BorderBrush -is [System.Windows.Media.SolidColorBrush]){$cardRef.BorderBrush.BeginAnimation([System.Windows.Media.SolidColorBrush]::ColorProperty,$hoverEdge)}
-                if($cardRef.Effect -is [System.Windows.Media.Effects.DropShadowEffect]){$cardRef.Effect.Opacity=0.30;$cardRef.Effect.BlurRadius=12;$cardRef.Effect.Color=[System.Windows.Media.ColorConverter]::ConvertFromString('#B88D4D')}
+                if($cardRef.Effect -is [System.Windows.Media.Effects.DropShadowEffect]){$shadowUp=[System.Windows.Media.Animation.DoubleAnimation]::new(0.30,[TimeSpan]::FromMilliseconds(180));$shadowUp.EasingFunction=$hoverEase;$cardRef.Effect.BeginAnimation([System.Windows.Media.Effects.DropShadowEffect]::OpacityProperty,$shadowUp)}
                 $hoverLift=[System.Windows.Media.Animation.DoubleAnimation]::new(0,-2.5,[TimeSpan]::FromMilliseconds(160))
                 $hoverLift.EasingFunction=$hoverEase
                 $cardRef.RenderTransform.BeginAnimation([System.Windows.Media.TranslateTransform]::YProperty,$hoverLift)
@@ -32918,7 +36040,7 @@ function Refresh-AMRStartupManager {
                     $cardRef.Background.GradientStops[1].BeginAnimation([System.Windows.Media.GradientStop]::ColorProperty,$g1)
                 }
                 if($cardRef.BorderBrush -is [System.Windows.Media.SolidColorBrush]){$cardRef.BorderBrush.BeginAnimation([System.Windows.Media.SolidColorBrush]::ColorProperty,$leaveEdge)}
-                if($cardRef.Effect -is [System.Windows.Media.Effects.DropShadowEffect]){$cardRef.Effect.Opacity=0.16;$cardRef.Effect.BlurRadius=9;$cardRef.Effect.Color=[System.Windows.Media.Colors]::Black}
+                if($cardRef.Effect -is [System.Windows.Media.Effects.DropShadowEffect]){$shadowDown=[System.Windows.Media.Animation.DoubleAnimation]::new(0.16,[TimeSpan]::FromMilliseconds(210));$shadowDown.EasingFunction=$leaveEase;$cardRef.Effect.BeginAnimation([System.Windows.Media.Effects.DropShadowEffect]::OpacityProperty,$shadowDown)}
                 $leaveLift=[System.Windows.Media.Animation.DoubleAnimation]::new(-2.5,0,[TimeSpan]::FromMilliseconds(210))
                 $leaveLift.EasingFunction=$leaveEase
                 $cardRef.RenderTransform.BeginAnimation([System.Windows.Media.TranslateTransform]::YProperty,$leaveLift)
@@ -32951,7 +36073,7 @@ function Refresh-AMRStartupManager {
             $perfRt2 = Get-AMRPerfNow
             if(-not $state.SkipDeferredCim){Start-AMRStartupAppxScan}
             Add-AMRPerfSince 'startups.appxScanStart' $perfRt2
-            if($state.RefreshInventory -and $script:InstalledScanState -and -not $script:InstalledScanState.Current){
+            if($state.RefreshInventory -and $script:InstalledScanState -and -not $script:InstalledScanState.Current -and (Test-AMRInstalledRefreshNeeded -Context 'startups-tab')){
                 try{Start-AMRInstalledCatalogScan -Refresh}catch{Write-AMRLog ('Startup manager inventory refresh could not start: '+$_.Exception.Message) WARNING System}
             }
             $script:StartupRenderState=$null
@@ -32971,7 +36093,10 @@ function Start-AMRStartupIconHydration {
     param([object[]]$Entries)
     try { if($script:StartupIconTimer){$script:StartupIconTimer.Stop()} } catch {}
     $queue=New-Object 'System.Collections.Generic.Queue[object]'
-    foreach($entry in @($Entries)){if($entry.PSObject.Properties['IconControl'] -and $entry.PSObject.Properties['GlyphControl']){$queue.Enqueue($entry)}}
+    foreach($entry in @($Entries)){if($entry.PSObject.Properties['IconControl'] -and $entry.PSObject.Properties['GlyphControl']){
+        # Entries that already resolved an icon are not searched again after each deferred scan; only the empty slots are retried.
+        if($entry.PSObject.Properties['IconSource'] -and $entry.IconSource -and $entry.IconControl.Source){continue}
+        $queue.Enqueue($entry)}}
     $script:StartupIconQueue=$queue
     if($queue.Count -eq 0){return}
     $timer=New-Object System.Windows.Threading.DispatcherTimer
@@ -33525,7 +36650,7 @@ if(Get-Command Get-WmiObject -ErrorAction SilentlyContinue){
                 $perfPd = Get-AMRPerfNow
                 try{$items=@($state.PowerShell.EndInvoke($state.Handle));foreach($workerError in @($state.PowerShell.Streams.Error)){Write-AMRLog ('Deferred Windows startup inventory error: '+[string]$workerError) WARNING System};Add-AMRStartupCimEntries -Items $items}
                 catch{Write-AMRLog ('Deferred Windows startup inventory warning: '+$_.Exception.Message) WARNING System}
-                finally{try{$state.PowerShell.Dispose()}catch{};try{$state.Runspace.Close();$state.Runspace.Dispose()}catch{};$script:StartupCimState=@{Current=$false};Add-AMRPerfSince 'startups.cimComplete' $perfPd}
+                finally{try{$state.PowerShell.Dispose()}catch{};try{$state.Runspace.Close();$state.Runspace.Dispose()}catch{};$script:StartupCimState=@{Current=$false};try{$script:StartupCacheComplete=$true;[void](Save-AMRStartupManagerCache -Entries $script:StartupManagerEntries)}catch{};Add-AMRPerfSince 'startups.cimComplete' $perfPd}
             }
         })
         $script:StartupCimTimer=$poll;$poll.Start()
@@ -33535,27 +36660,37 @@ if(Get-Command Get-WmiObject -ErrorAction SilentlyContinue){
     }
 }
 
+# A8: Driver Backup action buttons use the shared glass style (220 ms hover handled in XAML, not per-event PowerShell).
+function Set-AMRDriverBackupGlassButtons {
+    $applied = 0
+    foreach($spec in @(@{N='DriverRestorePointCancelBtn';R='Red'})){
+        try {
+            $b = C $spec.N
+            if(-not $b){ continue }
+            $style = New-AMRGlassButtonStyle -Role $spec.R -Animated
+            $trigger = New-Object System.Windows.Trigger
+            $trigger.Property = [System.Windows.UIElement]::IsEnabledProperty
+            $trigger.Value = $false
+            $trigger.Setters.Add((New-Object System.Windows.Setter([System.Windows.UIElement]::OpacityProperty,[double]0.45)))
+            $style.Triggers.Add($trigger)
+            $b.Style = $style
+            $b.ClearValue([System.Windows.Controls.Control]::BackgroundProperty)
+            $b.ClearValue([System.Windows.Controls.Control]::ForegroundProperty)
+            $b.ClearValue([System.Windows.Controls.Control]::BorderBrushProperty)
+            $applied++
+        } catch {
+            try { Write-AMRDriverDiagnostic -Severity WARNING -Operation 'BackupGlass' -Stage 'ButtonFallback' -Message ('Driver Backup glass style fallback for ' + [string]$spec.N + ': ' + $_.Exception.Message) -Source 'Set-AMRDriverBackupGlassButtons' } catch {}
+        }
+    }
+    return $applied
+}
+
 function Set-AMRBackupSubTab {
- param([int]$Index)
+ param([int]$Index=0)
+ # System > Backups now hosts Driver Backup only (Backup Center moved to Control > Backup).
  $tabs=C 'BackupSubTabs'
  if(-not $tabs){return}
- $tabs.SelectedIndex=$Index
- $backupButton=C 'BackupCenterChoiceBtn'; $driverButton=C 'DriverBackupChoiceBtn'
- if($Index -eq 0){
-  $backupButton.Background=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#29384A')
-  $backupButton.Foreground=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#D9BD8B')
-  $backupButton.BorderBrush=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#B89A62')
-  $driverButton.Background=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#303D35')
-  $driverButton.Foreground=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#E7EFE8')
-  $driverButton.BorderBrush=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#40564A')
- } else {
-  $driverButton.Background=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#344A3C')
-  $driverButton.Foreground=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#E4F0E6')
-  $driverButton.BorderBrush=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#8EAE98')
-  $backupButton.Background=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#263646')
-  $backupButton.Foreground=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#E7EAF0')
-  $backupButton.BorderBrush=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#34465B')
- }
+ if($tabs.Items.Count -gt 0 -and $tabs.SelectedIndex -ne 0){$tabs.SelectedIndex=0}
 }
 (C 'AMRStartupRefreshBtn').Add_Click({ Start-AMRRefreshButtonAnimation -Button (C 'AMRStartupRefreshBtn'); Refresh-AMRStartupManager -RefreshInventory })
 
@@ -33594,29 +36729,8 @@ Set-AMRRefreshButtonVisual -Button (C 'AMRUpdateRefreshBtn') -Label 'Refresh Sta
 Add-AMRDeferredStartupAction -Name 'UpdateCenterStatus' -Action { try { Update-AMRUpdateCenterStatus } catch { Write-AMRLog ('Initial Update Center status refresh failed: '+$_.Exception.Message) WARNING System } }
 try { Set-AMRUpdateCheckVisual -Running $false } catch {}
 
-(C 'BackupCenterChoiceBtn').Add_Click({ Set-AMRBackupSubTab 0 })
-(C 'DriverBackupChoiceBtn').Add_Click({ Set-AMRBackupSubTab 1 })
-foreach($backupChoiceName in @('BackupCenterChoiceBtn','DriverBackupChoiceBtn')){
- $choice=C $backupChoiceName
- if(-not $choice){continue}
- $choice.Add_MouseEnter({
-  try {
-   $this.Opacity=1.0
-   $this.RenderTransformOrigin=[System.Windows.Point]::new(0.5,0.5)
-   if(-not ($this.RenderTransform -is [System.Windows.Media.ScaleTransform])){$this.RenderTransform=[System.Windows.Media.ScaleTransform]::new(1.0,1.0)}
-   $scale=New-Object System.Windows.Media.Animation.DoubleAnimation;$scale.To=1.035;$scale.Duration=[TimeSpan]::FromMilliseconds(130)
-   $this.RenderTransform.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleXProperty,$scale);$this.RenderTransform.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleYProperty,$scale)
-   $this.BorderBrush=[System.Windows.Media.BrushConverter]::new().ConvertFromString($(if($this.Name -eq 'DriverBackupChoiceBtn'){'#A6C4AE'}else{'#E2C68E'}))
-  }catch{}
- }.GetNewClosure())
- $choice.Add_MouseLeave({
-  try {
-   if($this.RenderTransform -is [System.Windows.Media.ScaleTransform]){$scale=New-Object System.Windows.Media.Animation.DoubleAnimation;$scale.To=1.0;$scale.Duration=[TimeSpan]::FromMilliseconds(150);$this.RenderTransform.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleXProperty,$scale);$this.RenderTransform.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleYProperty,$scale)}
-   if($this.IsMouseOver -eq $false){$active=($this.Name -eq 'BackupCenterChoiceBtn' -and (C 'BackupSubTabs').SelectedIndex -eq 0) -or ($this.Name -eq 'DriverBackupChoiceBtn' -and (C 'BackupSubTabs').SelectedIndex -eq 1);$this.BorderBrush=[System.Windows.Media.BrushConverter]::new().ConvertFromString($(if($active -and $this.Name -eq 'DriverBackupChoiceBtn'){'#8EAE98'}elseif($active){'#B89A62'}elseif($this.Name -eq 'DriverBackupChoiceBtn'){'#40564A'}else{'#34465B'}))}
-  }catch{}
- }.GetNewClosure())
-}
 Add-AMRStartupMark 'L30098 before-BackupSubTab'
+try { [void](Set-AMRDriverBackupGlassButtons) } catch { try { Write-AMRDriverDiagnostic -Severity WARNING -Operation 'BackupGlass' -Stage 'ButtonFallback' -Message $_.Exception.Message -Source 'Set-AMRDriverBackupGlassButtons' } catch {} }
 Set-AMRBackupSubTab 0
 Update-AMRBackupView
 
@@ -33687,6 +36801,7 @@ function Start-AMRUtility {
 # Utilities compact-card presentation, gold info buttons, search and category filtering.
 # Existing utility buttons and their original Click handlers are retained; they are hosted inside compact cards.
 $script:UtilityCardEntries = @()
+[void](Initialize-AMRToolCards -Area 'Utilities')
 $utilityPanel = C 'UtilButtonsPanel'
 $utilityButtons = @($utilityPanel.Children | Where-Object { $_ -is [System.Windows.Controls.Button] })
 foreach ($utilityButton in $utilityButtons) {
@@ -33754,6 +36869,7 @@ foreach ($utilityButton in $utilityButtons) {
     }
 
     [void]$utilityPanel.Children.Remove($utilityButton)
+    if ($script:AMRToolCards.ContainsKey('Utilities')) { $script:UtilityCardEntries += [pscustomobject]@{ Button=$utilityButton; Card=$null; Category=$utilityCategory; Name=$utilityName; Description=$utilityDescription }; continue }
     $card = New-Object System.Windows.Controls.Border
     $card.Width = [double]::NaN; $card.MinHeight = 42; $card.Padding = '4'; $card.Margin = '0,0,7,7'
     $card.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#202A35')
@@ -33805,6 +36921,7 @@ foreach ($utilityButton in $utilityButtons) {
     $script:UtilityCardEntries += [pscustomobject]@{ Button=$utilityButton; Card=$card; Category=$utilityCategory; Name=$utilityName }
 }
 function Update-AMRUtilitiesView {
+ if (Update-AMRToolCardsView -Area 'Utilities') { return }
     $query = [string](C 'UtilSearchBox').Text
     $selected = (C 'UtilCategoryFilter').SelectedItem
     $category = if ($selected -and $selected.Content) { [string]$selected.Content } else { 'All Categories' }
@@ -34115,8 +37232,15 @@ try {
 Write-AMRLog ('Amr | windows_utility initialized. ' + $script:AMRReliabilityPhase) INFO System
 $script:AMRStartupPhaseTimings['BeforeOverviewRefreshMs'] = [int]$script:AMRStartupStopwatch.ElapsedMilliseconds
 Write-AMRLog ('Startup checkpoint: BeforeOverviewRefresh={0}ms' -f $script:AMRStartupPhaseTimings['BeforeOverviewRefreshMs']) INFO Startup
-Refresh-AMROverview -DeferRestorePoint
-$script:AMRStartupPhaseTimings['AfterOverviewRefreshMs'] = [int]$script:AMRStartupStopwatch.ElapsedMilliseconds
+# A1: the first Overview refresh (0.70 s of the pre-window startup in A24) now runs first in the deferred queue, right after the first render.
+# The live telemetry loop, its 750 ms cadence and the sensor data are unchanged; only the start moves after the first paint.
+[void]$script:AMRDeferredStartupActions.Insert(0,[pscustomobject]@{ Name = 'OverviewFirstRefresh'; Action = {
+    $ovFirstWatch = [System.Diagnostics.Stopwatch]::StartNew()
+    Refresh-AMROverview -DeferRestorePoint
+    Write-AMRLog ('Startup checkpoint: OverviewFirstRefresh ran after first render in {0} ms.' -f $ovFirstWatch.ElapsedMilliseconds) INFO Startup
+    # Refresh-AMROverview queued the restore-point status after the queue was released: run that entry now.
+    Invoke-AMRDeferredStartupWork
+} })
 Write-AMRLog ('Startup checkpoint: AfterOverviewRefresh={0}ms; OverviewRefreshCost={1}ms' -f $script:AMRStartupPhaseTimings['AfterOverviewRefreshMs'],($script:AMRStartupPhaseTimings['AfterOverviewRefreshMs']-$script:AMRStartupPhaseTimings['BeforeOverviewRefreshMs'])) INFO Startup
 Write-AMRLog 'Utility Ready.' SUCCESS System
 # --- ISOLATED PROGRESSIVE SOFTWARE-ICON REFRESH (V6 - CACHE-FIRST + FASTER LOCAL DELIVERY) ---
@@ -34603,20 +37727,31 @@ function Start-AMRBackgroundIconRefresh {
 $script:Window.Add_Loaded({
     # Hydrate the last completed snapshot first so installed dots and Show Installed
     # are immediately available; then refresh the snapshot without blocking WPF.
+    $perfLd = Get-AMRPerfNow
     $cacheReady = Import-AMRInstalledInventoryCache
+    Add-AMRPerfSince 'startup.loaded.importCache' $perfLd
     if ($cacheReady) {
         try {
+            $perfLd = Get-AMRPerfNow
             if ($script:AppsView) {
                 $script:AppsView.Refresh()
                 Reset-AMRSoftwareGridPages -View $script:AppsView
             }
+            Add-AMRPerfSince 'startup.loaded.viewRefresh' $perfLd
         } catch {
             Write-AMRLog "Could not apply cached installed indicators: $($_.Exception.Message)" WARNING Software
         }
     }
+    $perfLd = Get-AMRPerfNow
     Start-AMRBackgroundIconRefresh
-    Start-AMRInstalledCatalogScan -Refresh
+    Add-AMRPerfSince 'startup.loaded.iconRefreshStart' $perfLd
+    $perfLd = Get-AMRPerfNow
+    if (-not $cacheReady -or (Test-AMRInstalledRefreshNeeded -Context 'startup')) { Start-AMRInstalledCatalogScan -Refresh }
+    Add-AMRPerfSince 'startup.loaded.installedScanStart' $perfLd
+    try { Start-AMRInstalledChangeWatcher } catch { try { Write-AMRLog ('Installed change watcher could not start: ' + $_.Exception.Message) WARNING Software } catch {} }
+    $perfLd = Get-AMRPerfNow
     try { Invoke-AMRSoftwarePremiumEntrance } catch {}
+    Add-AMRPerfSince 'startup.loaded.premiumEntrance' $perfLd
 })
 # Runs the queued startup-only refreshes after the first render. Each action gets its own
 # dispatcher turn (Background priority) so input and rendering can run between them, and a
