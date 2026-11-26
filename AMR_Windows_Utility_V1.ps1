@@ -86,6 +86,14 @@ if ($amrNeedsSta -or $amrNeedsAdmin -or $amrIsIseHost) {
 Set-StrictMode -Version 2
 $ErrorActionPreference = 'Stop'
 
+# Startup-only status refreshes that are not needed to draw the first frame are queued here
+# and run one at a time, after the window has rendered (see Invoke-AMRDeferredStartupWork).
+$script:AMRDeferredStartupActions = New-Object 'System.Collections.Generic.List[object]'
+function Add-AMRDeferredStartupAction {
+    param([string]$Name,[scriptblock]$Action)
+    [void]$script:AMRDeferredStartupActions.Add([pscustomobject]@{ Name = $Name; Action = $Action })
+}
+
 # WinForms remains available for existing DoEvents calls; no welcome UI is shown by the main application.
 Add-Type -AssemblyName System.Windows.Forms
 
@@ -155,6 +163,69 @@ public static class AMRLogDiskWriter {
         Flush(true);
     }
 }
+
+// Compiled catalog card model. Replaces the per-card PSCustomObject so WPF binds
+// through direct CLR property access (no PowerShell adapter round trip per Binding)
+// and receives PropertyChanged. Every property is typed object so assignment
+// semantics are identical to the former untyped NoteProperty members.
+namespace AMR {
+    public sealed class SoftwareCatalogItem : System.ComponentModel.INotifyPropertyChanged {
+        public event System.ComponentModel.PropertyChangedEventHandler PropertyChanged;
+        private void Raise(string name) {
+            System.ComponentModel.PropertyChangedEventHandler handler = PropertyChanged;
+            if (handler != null) handler(this, new System.ComponentModel.PropertyChangedEventArgs(name));
+        }
+        private object _isSelected;
+        public object IsSelected { get { return _isSelected; } set { if (object.Equals(_isSelected, value)) return; _isSelected = value; Raise("IsSelected"); } }
+        private object _isInstalled;
+        public object IsInstalled { get { return _isInstalled; } set { if (object.Equals(_isInstalled, value)) return; _isInstalled = value; Raise("IsInstalled"); } }
+        private object _name;
+        public object Name { get { return _name; } set { if (object.Equals(_name, value)) return; _name = value; Raise("Name"); } }
+        private object _category;
+        public object Category { get { return _category; } set { if (object.Equals(_category, value)) return; _category = value; Raise("Category"); } }
+        private object _id;
+        public object Id { get { return _id; } set { if (object.Equals(_id, value)) return; _id = value; Raise("Id"); } }
+        private object _iconAliases;
+        public object IconAliases { get { return _iconAliases; } set { if (object.Equals(_iconAliases, value)) return; _iconAliases = value; Raise("IconAliases"); } }
+        private object _chocoId;
+        public object ChocoId { get { return _chocoId; } set { if (object.Equals(_chocoId, value)) return; _chocoId = value; Raise("ChocoId"); } }
+        private object _directUrl;
+        public object DirectUrl { get { return _directUrl; } set { if (object.Equals(_directUrl, value)) return; _directUrl = value; Raise("DirectUrl"); } }
+        private object _directArgs;
+        public object DirectArgs { get { return _directArgs; } set { if (object.Equals(_directArgs, value)) return; _directArgs = value; Raise("DirectArgs"); } }
+        private object _publisher;
+        public object Publisher { get { return _publisher; } set { if (object.Equals(_publisher, value)) return; _publisher = value; Raise("Publisher"); } }
+        private object _browserUrl;
+        public object BrowserUrl { get { return _browserUrl; } set { if (object.Equals(_browserUrl, value)) return; _browserUrl = value; Raise("BrowserUrl"); } }
+        private object _catalogUrl;
+        public object CatalogUrl { get { return _catalogUrl; } set { if (object.Equals(_catalogUrl, value)) return; _catalogUrl = value; Raise("CatalogUrl"); } }
+        private object _googleUrl;
+        public object GoogleUrl { get { return _googleUrl; } set { if (object.Equals(_googleUrl, value)) return; _googleUrl = value; Raise("GoogleUrl"); } }
+        private object _sha256;
+        public object Sha256 { get { return _sha256; } set { if (object.Equals(_sha256, value)) return; _sha256 = value; Raise("Sha256"); } }
+        private object _installerType;
+        public object InstallerType { get { return _installerType; } set { if (object.Equals(_installerType, value)) return; _installerType = value; Raise("InstallerType"); } }
+        private object _interactiveArgs;
+        public object InteractiveArgs { get { return _interactiveArgs; } set { if (object.Equals(_interactiveArgs, value)) return; _interactiveArgs = value; Raise("InteractiveArgs"); } }
+        private object _allowedHosts;
+        public object AllowedHosts { get { return _allowedHosts; } set { if (object.Equals(_allowedHosts, value)) return; _allowedHosts = value; Raise("AllowedHosts"); } }
+        private object _installTimeoutSeconds;
+        public object InstallTimeoutSeconds { get { return _installTimeoutSeconds; } set { if (object.Equals(_installTimeoutSeconds, value)) return; _installTimeoutSeconds = value; Raise("InstallTimeoutSeconds"); } }
+        private object _initials;
+        public object Initials { get { return _initials; } set { if (object.Equals(_initials, value)) return; _initials = value; Raise("Initials"); } }
+        private object _icon;
+        public object Icon { get { return _icon; } set { if (object.Equals(_icon, value)) return; _icon = value; Raise("Icon"); } }
+        private object _isCategorySpacer;
+        public object IsCategorySpacer { get { return _isCategorySpacer; } set { if (object.Equals(_isCategorySpacer, value)) return; _isCategorySpacer = value; Raise("IsCategorySpacer"); } }
+        private object _isCategoryStart;
+        public object IsCategoryStart { get { return _isCategoryStart; } set { if (object.Equals(_isCategoryStart, value)) return; _isCategoryStart = value; Raise("IsCategoryStart"); } }
+        private object _isCategoryHeaderRow;
+        public object IsCategoryHeaderRow { get { return _isCategoryHeaderRow; } set { if (object.Equals(_isCategoryHeaderRow, value)) return; _isCategoryHeaderRow = value; Raise("IsCategoryHeaderRow"); } }
+        private object _categoryNumber;
+        public object CategoryNumber { get { return _categoryNumber; } set { if (object.Equals(_categoryNumber, value)) return; _categoryNumber = value; Raise("CategoryNumber"); } }
+        public override string ToString() { string n = _name as string; return n != null ? n : "AMR.SoftwareCatalogItem"; }
+    }
+}
 '@
 }
 
@@ -217,6 +288,11 @@ try {
 }
 $script:DriverRestorePointLastFailure = $null
 $script:AMRSessionId = [guid]::NewGuid().ToString()
+$script:AMRSessionStartedAt = Get-Date
+# Session separator inside the same daily log file (file only; never shown in the in-app consoles).
+try {
+    [AMRLogDiskWriter]::Enqueue(('[{0}] [INFO] [System] ===== SESSION START | Id={1} | PID={2} | PowerShell={3} =====' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'),$script:AMRSessionId,$PID,$PSVersionTable.PSVersion))
+} catch { }
 # AMR_PHASE1_DEFINITIONS_BEGIN# AMR Driver Center Phase 1 stabilization state.
 $script:AMRDriverOpLockState = [pscustomobject]@{ Mutex=$null; Name=''; Held=$false; OwnerThread=0; Operation=''; AcquiredAt=$null }
 $script:AMRDriverTimeouts = @{ Scan=600; Download=1200; Install=10800; CatalogDiscovery=1200; CatalogAcquisition=1200; CatalogStaging=1200; RestorePoint=600; RollbackCheck=600; VendorDiscovery=1200; VendorPackageAcquisition=1200 }
@@ -315,6 +391,7 @@ $script:DriverScanJob = $null
 $script:DriverScanTimer = $null
 
 $script:DriverActionJob = $null
+$script:DriverActionCancelRequested = $false
 $script:DriverActionTimer = $null
 # Phase 6.4: one coordinated background-operation slot for professional driver work.
 $script:DriverManagedJob = $null
@@ -347,6 +424,26 @@ $script:DriverOEMModelProfile = $null
 $script:DriverWindowsContext = ''
 $script:DriverExperienceMode = 'Smart'
 $script:DriverAllDeviceRows = @()
+# A10: state for the read-only whole-system diagnosis (phases 1-2).
+$script:DriverDiagJob = $null
+$script:DriverDiagTimer = $null
+$script:DriverDiagStartedAt = $null
+$script:DriverDiagLast = $null
+# A12 state
+$script:DriverRepairJob = $null
+$script:DriverRepairTimer = $null
+$script:DriverRepairStartedAt = $null
+$script:DriverRepairUndoIds = @()
+$script:DriverRepairMode = 'Repair'
+$script:DriverRepairCandidates = @()
+$script:DriverDiagSnapshot = $null
+$script:DriverDiagAutoMode = $false
+$script:DriverDiagCardsShown = 0
+$script:DriverRestorePromptShown = $false
+$script:DriverRestorePromptApproved = $false
+$script:DriverRestorePointPollTimer = $null
+$script:AMRRowDiagLogged = 0
+$script:AMRButtonStateLast = ''
 $script:DriverSearchQuery = ''
 $script:DriverProfessionalCandidateSelection = $null
 $script:DriverProfessionalSourceContext = $null
@@ -385,8 +482,21 @@ $script:LogControls = @{
 $script:LogUIQueue = New-Object 'System.Collections.Concurrent.ConcurrentQueue[object]'
 # Disk persistence is handled by the isolated .NET writer, independent of WPF.
 $script:LogUIFlushTimer = $null
-$script:LogUIBatchLimit = 120
+$script:LogUIBatchLimit = 150
 $script:LogUIRetentionChars = 250000
+# In-app log view only (the disk log is never filtered): summary view by default,
+# consecutive similar lines merged, bounded in-memory ring of this session's lines.
+$script:LogUIRing = New-Object 'System.Collections.Generic.List[object]'
+$script:LogUIRingMax = 1500
+$script:LogUIRingKeep = 1200
+$script:LogUIShowAll = $false
+$script:LogUIDirty = @{}
+$script:LogUIAppended = @{}
+$script:LogUIAppendRebuildThreshold = 400
+$script:LogUISensorCounters = New-Object 'System.Collections.Generic.Dictionary[string,int]'
+$script:LogUIDigitRegex = [regex]::new('\d+')
+$script:LogUIMajorRegex = [regex]::new('\b(scan (started|completed|finished|failed|cancelled)|inventory scanned|first-render completed|windows_utility initialized|installed-app snapshot|exported|cleared|cancelled|uninstall|install(ation)? (started|completed|finished)|installed successfully|restore point|backup|curation|inventory displayed|discovery completed|reboot|utility ready|startup catalog ready|deferred startup work released)\b',[System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+$script:LogUINoiseRegex = [regex]::new('^Overview telemetry snapshot updated')
 
 # --- PHASE 7: CENTRAL DIAGNOSTIC / EXCEPTION CAPTURE ---
 function Write-AMRDiagnostic {
@@ -451,6 +561,30 @@ function Write-AMRDiagnostic {
     }
 }
 
+# Diagnostics only: cheap in-memory startup phase marks (no I/O); flushed once to the diagnostics file.
+$script:AMRStartupMarks = New-Object 'System.Collections.Generic.List[string]'
+# StrictMode 2 is active: every script variable used by the icon sync / timing hooks must exist up front.
+$script:SoftwareIconSyncPanel = $null
+$script:SoftwareIconSyncPanelGrid = $null
+$script:SoftwareIconElementCache = New-Object 'System.Collections.Hashtable'
+$script:PerfLastClickTicks = [long]0
+$script:PerfIdleQueue = New-Object 'System.Collections.Generic.Queue[object]'
+$script:PerfLoadedQueue = New-Object 'System.Collections.Generic.Queue[object]'
+$script:AMRStartupMarkLast = [long]-1
+function Add-AMRStartupMark {
+    param([string]$Name)
+    try {
+        $now = [long]$script:AMRStartupStopwatch.ElapsedMilliseconds
+        if ($script:AMRStartupMarkLast -lt 0) {
+            $script:AMRStartupMarkLast = $now
+            if ($script:AMRStartupPhaseTimings.Contains('InitialCatalogPreparedMs')) { $script:AMRStartupMarkLast = [long]$script:AMRStartupPhaseTimings['InitialCatalogPreparedMs'] }
+        }
+        [void]$script:AMRStartupMarks.Add(('{0}={1}(+{2})' -f $Name,$now,($now - $script:AMRStartupMarkLast)))
+        $script:AMRStartupMarkLast = $now
+    } catch { }
+}
+
+$script:AMRDispatcherExState = $null
 function Register-AMRExceptionHandlers {
     try {
         $script:DispatcherUnhandledHandler = [System.Windows.Threading.DispatcherUnhandledExceptionEventHandler]{
@@ -464,7 +598,57 @@ function Register-AMRExceptionHandlers {
                     } else { $contextMessage += ' CleanupScan=Idle.' }
                     $contextMessage += (' LogPumpEnabled={0}.' -f [bool]($script:LogUIFlushTimer -and $script:LogUIFlushTimer.IsEnabled))
                 } catch {}
-                Write-AMRDiagnostic -Severity 'ERROR' -Area 'WPF' -Operation 'DispatcherUnhandledException' -Message $contextMessage -ErrorRecord $eventArgs.Exception
+                # A13g: log the first occurrence of each distinct dispatcher exception in full, then one summary line per 5 s.
+                # A repeating layout exception used to write about 16 KB per frame (22 MB in 6 minutes).
+                $exSig = ''
+                try { $exSig = ([string]$eventArgs.Exception.GetType().FullName) + '|' + ([string]$eventArgs.Exception.Message) } catch { $exSig = 'unknown' }
+                if ($exSig.Length -gt 300) { $exSig = $exSig.Substring(0,300) }
+                if (-not $script:AMRDispatcherExState) { $script:AMRDispatcherExState = @{} }
+                $exNow = [datetime]::UtcNow
+                $exLogFull = $false
+                $exSummaryText = ''
+                if (-not $script:AMRDispatcherExState.ContainsKey($exSig)) {
+                    $script:AMRDispatcherExState[$exSig] = [pscustomobject]@{ LastSummary = $exNow; Suppressed = 0 }
+                    $exLogFull = $true
+                    try {
+                        $selCatalog = -1; $selInstalled = -1
+                        try { $selCatalog = @($script:SoftwareCatalog | Where-Object { $_ -and $_.IsSelected -eq $true }).Count } catch {}
+                        try { $selInstalled = @($script:InstalledAppsInventory | Where-Object { $_ -and $_.IsSelected -eq $true }).Count } catch {}
+                        $contextMessage += (' Software context: ShowInstalledOnly={0}; SelectedInCatalog={1}; SelectedInInstalled={2}.' -f [bool]$script:ShowInstalledOnly,$selCatalog,$selInstalled)
+                    } catch {}
+                } else {
+                    $exState = $script:AMRDispatcherExState[$exSig]
+                    $exState.Suppressed = [int]$exState.Suppressed + 1
+                    if (($exNow - [datetime]$exState.LastSummary).TotalSeconds -ge 5) {
+                        $exSummaryText = ('The same dispatcher exception repeated {0} more time(s) in the last {1:N0} s (full details were logged at its first occurrence): {2}' -f [int]$exState.Suppressed,($exNow - [datetime]$exState.LastSummary).TotalSeconds,$exSig)
+                        $exState.Suppressed = 0
+                        $exState.LastSummary = $exNow
+                    }
+                }
+                if (-not $exLogFull) {
+                    if ($exSummaryText) { Write-AMRDiagnostic -Severity 'ERROR' -Area 'WPF' -Operation 'DispatcherExceptionRepeated' -Message $exSummaryText }
+                } else {
+                    Write-AMRDiagnostic -Severity 'ERROR' -Area 'WPF' -Operation 'DispatcherUnhandledException' -Message $contextMessage -ErrorRecord $eventArgs.Exception
+                    # Diagnostics only (file log, never the in-app Logs tab): script position of the failing statement.
+                    try {
+                        $diagEx = $eventArgs.Exception
+                        $diagDetail = New-Object System.Text.StringBuilder
+                        [void]$diagDetail.AppendLine('DispatcherException detail | ExceptionType=' + $diagEx.GetType().FullName)
+                        if ($diagEx -is [System.Management.Automation.IContainsErrorRecord] -and $diagEx.ErrorRecord) {
+                            $diagRec = $diagEx.ErrorRecord
+                            if ($diagRec.InvocationInfo) {
+                                [void]$diagDetail.AppendLine('ScriptLineNumber=' + [string]$diagRec.InvocationInfo.ScriptLineNumber + '; OffsetInLine=' + [string]$diagRec.InvocationInfo.OffsetInLine + '; ScriptName=' + [string]$diagRec.InvocationInfo.ScriptName)
+                                [void]$diagDetail.AppendLine('Line=' + [string]$diagRec.InvocationInfo.Line)
+                                [void]$diagDetail.AppendLine('PositionMessage=' + [string]$diagRec.InvocationInfo.PositionMessage)
+                            }
+                            [void]$diagDetail.AppendLine('ErrorRecordScriptStackTrace=' + [string]$diagRec.ScriptStackTrace)
+                        }
+                        if ($diagEx.InnerException) { [void]$diagDetail.AppendLine('InnerException=' + $diagEx.InnerException.GetType().FullName + ': ' + $diagEx.InnerException.Message) }
+                        [void]$diagDetail.AppendLine('SenderType=' + $(if ($null -ne $sender) { $sender.GetType().FullName } else { '<null>' }))
+                        [void]$diagDetail.AppendLine('DotNetStackTrace=' + [string]$diagEx.StackTrace)
+                        Write-AMRDiagnostic -Severity 'ERROR' -Area 'WPF' -Operation 'DispatcherExceptionDetail' -Message $diagDetail.ToString()
+                    } catch { }
+                }
                 if ($script:Status) { $script:Status.Text = 'An unexpected interface error was logged. Review Diagnostics.' }
                 # Keep the utility responsive after recording the failure; the affected action may not have completed.
                 $eventArgs.Handled = $true
@@ -527,12 +711,26 @@ function Write-AMRLog {
         Write-AMRDiagnostic -Severity 'ERROR' -Area 'Logging' -Operation 'QueueMainLog' -Message 'Could not queue an application log entry for disk persistence.' -ErrorRecord $_ -Target $script:LogFile
     }
     try {
-        [void]$script:LogUIQueue.Enqueue([pscustomobject]@{
-            Line = $logLine
-            Area = [string]$Area
-            Level = [string]$Level
-            Message = [string]$Message
-        })
+        # In-app view only: show 1 of every 3 LIVE_SENSOR readings (per sensor); WARNING/ERROR always pass.
+        # The disk queue above already received every line.
+        $uiPass = $true
+        if ($Level -ne 'WARNING' -and $Level -ne 'ERROR' -and $Message.StartsWith('LIVE_SENSOR [')) {
+            $sensorEnd = $Message.IndexOf(']')
+            $sensorKey = if ($sensorEnd -gt 0) { $Message.Substring(0,$sensorEnd) } else { 'LIVE_SENSOR' }
+            $sensorCount = 0
+            if ($script:LogUISensorCounters.TryGetValue($sensorKey,[ref]$sensorCount)) { $sensorCount++ } else { $sensorCount = 1 }
+            $script:LogUISensorCounters[$sensorKey] = $sensorCount
+            $uiPass = ((($sensorCount - 1) % 3) -eq 0)
+        }
+        if ($uiPass) {
+            [void]$script:LogUIQueue.Enqueue([pscustomobject]@{
+                Line = $logLine
+                Area = [string]$Area
+                Level = [string]$Level
+                Message = [string]$Message
+                Major = $false
+            })
+        }
     } catch {
         # UI logging is best-effort; the independent disk queue remains authoritative.
         Write-AMRDiagnostic -Severity 'WARNING' -Area 'Logging' -Operation 'QueueLogUI' -Message 'Could not queue a log entry for UI display.' -ErrorRecord $_
@@ -556,84 +754,140 @@ function Trim-AMRLogTextBox {
     }
 }
 
-function Start-AMRLogUIPump {
-    try { [AMRLogDiskWriter]::Configure([string]$script:LogFile) } catch {}
-    if ($script:LogUIFlushTimer) {
-        try { $script:LogUIFlushTimer.Stop() } catch {}
-        $script:LogUIFlushTimer = $null
-    }
+function Test-AMRLogEntryMajor {
+    param($Entry)
+    try {
+        if ([bool]$Entry.Major) { return $true }
+        $level = [string]$Entry.Level
+        if ($level -eq 'WARNING' -or $level -eq 'ERROR') { return $true }
+        $message = [string]$Entry.Message
+        if ($level -eq 'SUCCESS') { return (-not $script:LogUINoiseRegex.IsMatch($message)) }
+        if ($level -eq 'INFO') { return $script:LogUIMajorRegex.IsMatch($message) }
+    } catch {}
+    return $false
+}
 
-    $script:LogUIFlushTimer = New-Object System.Windows.Threading.DispatcherTimer
-    $script:LogUIFlushTimer.Interval = [TimeSpan]::FromMilliseconds(150)
-    $script:LogUIFlushTimer.Add_Tick({
-      try {
+# Builds the display lines for each console from a list of entries. Consecutive similar
+# lines (same area/level/text apart from digits) are merged into one line with (xN).
+function ConvertTo-AMRLogDisplayMap {
+    param($Entries, [bool]$ShowAll)
+    $lists = @{}
+    $lastSig = @{}
+    $lastBase = @{}
+    $lastCount = @{}
+    $toolAreas = @('Network','Security','Optimize','Backup','Activation')
+    foreach ($entry in $Entries) {
+        $level = [string]$entry.Level
+        if ($level -eq 'DEBUG') { continue }
+        $line = [string]$entry.Line
+        if ([string]::IsNullOrWhiteSpace($line)) { continue }
+        if (-not $ShowAll -and -not (Test-AMRLogEntryMajor -Entry $entry)) { continue }
+        $area = [string]$entry.Area
+        $sig = $null
+        if (-not [bool]$entry.Major) {
+            $basis = [string]$entry.Message
+            if ($level -ne 'WARNING' -and $level -ne 'ERROR') {
+                $cut = $basis.IndexOf(' | ')
+                if ($cut -gt 0) { $basis = $basis.Substring(0,$cut) }
+            }
+            $sig = $area + '|' + $level + '|' + $script:LogUIDigitRegex.Replace($basis,'#')
+        }
+        $keys = @('All',$area)
+        if ($toolAreas -contains $area) { $keys += 'Tools' }
+        foreach ($key in $keys) {
+            if (-not $lists.ContainsKey($key)) {
+                $lists[$key] = New-Object 'System.Collections.Generic.List[string]'
+                $lastSig[$key] = $null
+                $lastBase[$key] = ''
+                $lastCount[$key] = 0
+            }
+            $target = $lists[$key]
+            if ($null -ne $sig -and $null -ne $lastSig[$key] -and $lastSig[$key] -eq $sig) {
+                $lastCount[$key] = [int]$lastCount[$key] + 1
+                $target[$target.Count - 1] = ('{0} (x{1})' -f $lastBase[$key],$lastCount[$key])
+            } else {
+                [void]$target.Add($line)
+                $lastSig[$key] = $sig
+                $lastBase[$key] = $line
+                $lastCount[$key] = 1
+            }
+        }
+    }
+    return $lists
+}
+
+# One bounded UI pass: drain a small batch into the session ring, then update only the
+# consoles that are currently visible. Hidden consoles are marked dirty and rebuilt from
+# the ring when they become visible. No disk I/O and no Text.Length reads here.
+function Invoke-AMRLogUIPumpTick {
+    $perfPumpStart = [long]0
+    try { $perfPumpStart = [AMR.PerfStats]::Now() } catch {}
+    try {
         if ($null -eq $script:LogUIQueue) { return }
-        $batch = New-Object 'System.Collections.Generic.List[object]'
+        $consoleKeys = @('All','System','Overview','Software','Customize','Tweaks','Cleanup','Tools')
+        $newEntries = New-Object 'System.Collections.Generic.List[object]'
         $item = $null
         $limit = [Math]::Max(1, [int]$script:LogUIBatchLimit)
-        while ($batch.Count -lt $limit -and $script:LogUIQueue.TryDequeue([ref]$item)) {
-            if ($null -ne $item) { [void]$batch.Add($item) }
+        while ($newEntries.Count -lt $limit -and $script:LogUIQueue.TryDequeue([ref]$item)) {
+            if ($null -ne $item -and [string]$item.Level -ne 'DEBUG') { [void]$newEntries.Add($item) }
             $item = $null
         }
-        if ($batch.Count -eq 0) { return }
-
-        $byArea = @{}
-        $allLines = New-Object 'System.Collections.Generic.List[string]'
-        foreach ($entry in $batch) {
-            if ([string]$entry.Level -eq 'DEBUG') { continue }
-            $line = [string]$entry.Line
-            if ([string]::IsNullOrWhiteSpace($line)) { continue }
-            [void]$allLines.Add($line)
-            $areaKey = [string]$entry.Area
-            if (-not $byArea.ContainsKey($areaKey)) { $byArea[$areaKey] = New-Object 'System.Collections.Generic.List[string]' }
-            [void]$byArea[$areaKey].Add($line)
-        }
-        if ($allLines.Count -eq 0) { return }
-
-        # Each pane is isolated: a failure in one TextBox must not discard the
-        # batch or prevent the other panes from receiving their events.
-        $allControl = $script:LogControls['All']
-        if ($allControl) {
-            try {
-                $allControl.AppendText(($allLines -join "`r`n") + "`r`n")
-                Trim-AMRLogTextBox -Control $allControl -MaxChars $script:LogUIRetentionChars
-                $allControl.ScrollToEnd()
-            } catch {
-                try {
-                    $fallback = '[Log UI warning] All Logs pane could not render a batch: ' + $_.Exception.Message
-                    $allControl.AppendText($fallback + "`r`n")
-                } catch {}
+        if ($newEntries.Count -gt 0) {
+            $script:LogUIRing.AddRange($newEntries)
+            if ($script:LogUIRing.Count -gt [int]$script:LogUIRingMax) {
+                $script:LogUIRing.RemoveRange(0, $script:LogUIRing.Count - [int]$script:LogUIRingKeep)
+                foreach ($dirtyKey in $consoleKeys) { $script:LogUIDirty[$dirtyKey] = $true }
+            }
+            if ($script:Status) {
+                for ($statusIndex = $newEntries.Count - 1; $statusIndex -ge 0; $statusIndex--) {
+                    if (Test-AMRLogEntryMajor -Entry $newEntries[$statusIndex]) {
+                        try { $script:Status.Text = "[$($newEntries[$statusIndex].Area)] $($newEntries[$statusIndex].Message)" } catch {}
+                        break
+                    }
+                }
             }
         }
-        foreach ($areaKey in $byArea.Keys) {
-            $control = $script:LogControls[$areaKey]
+        $newMap = $null
+        $fullMap = $null
+        foreach ($key in $consoleKeys) {
+            $control = $script:LogControls[$key]
             if (-not $control) { continue }
-            try {
-                $control.AppendText(($byArea[$areaKey] -join "`r`n") + "`r`n")
-                Trim-AMRLogTextBox -Control $control -MaxChars $script:LogUIRetentionChars
-                $control.ScrollToEnd()
-            } catch {
-                # Preserve the failure in the All pane if an individual category pane breaks.
+            if (-not $control.IsVisible) { $script:LogUIDirty[$key] = $true; continue }
+            $isDirty = (-not $script:LogUIDirty.ContainsKey($key)) -or [bool]$script:LogUIDirty[$key]
+            $appended = 0
+            if ($script:LogUIAppended.ContainsKey($key)) { $appended = [int]$script:LogUIAppended[$key] }
+            if ($isDirty -or $appended -ge [int]$script:LogUIAppendRebuildThreshold) {
+                if ($null -eq $fullMap) { $fullMap = ConvertTo-AMRLogDisplayMap -Entries $script:LogUIRing -ShowAll ([bool]$script:LogUIShowAll) }
+                $text = ''
+                if ($fullMap.ContainsKey($key) -and $fullMap[$key].Count -gt 0) { $text = ($fullMap[$key] -join "`r`n") + "`r`n" }
                 try {
-                    $allControl = $script:LogControls['All']
-                    if ($allControl) { $allControl.AppendText(('[Log UI warning] {0} pane: {1}' -f $areaKey,$_.Exception.Message) + "`r`n") }
-                } catch {}
+                    $control.Text = $text
+                    $script:LogUIDirty[$key] = $false
+                    $script:LogUIAppended[$key] = 0
+                    $control.ScrollToEnd()
+                } catch {
+                    try {
+                        $allControl = $script:LogControls['All']
+                        if ($allControl) { $allControl.AppendText(('[Log UI warning] {0} pane: {1}' -f $key,$_.Exception.Message) + "`r`n") }
+                    } catch {}
+                }
+            } elseif ($newEntries.Count -gt 0) {
+                if ($null -eq $newMap) { $newMap = ConvertTo-AMRLogDisplayMap -Entries $newEntries -ShowAll ([bool]$script:LogUIShowAll) }
+                if ($newMap.ContainsKey($key) -and $newMap[$key].Count -gt 0) {
+                    try {
+                        $control.AppendText(($newMap[$key] -join "`r`n") + "`r`n")
+                        $script:LogUIAppended[$key] = $appended + $newMap[$key].Count
+                        $control.ScrollToEnd()
+                    } catch {
+                        try {
+                            $allControl = $script:LogControls['All']
+                            if ($allControl) { $allControl.AppendText(('[Log UI warning] {0} pane: {1}' -f $key,$_.Exception.Message) + "`r`n") }
+                        } catch {}
+                    }
+                }
             }
         }
-        $toolAreaKeys = @('Network','Security','Optimize','Backup','Activation')
-        $toolLines = New-Object 'System.Collections.Generic.List[string]'
-        foreach ($toolAreaKey in $toolAreaKeys) {
-            if ($byArea.ContainsKey($toolAreaKey)) { foreach ($toolLine in $byArea[$toolAreaKey]) { [void]$toolLines.Add([string]$toolLine) } }
-        }
-        $toolsControl = $script:LogControls['Tools']
-        if ($toolsControl -and $toolLines.Count -gt 0) {
-            try { $toolsControl.AppendText(($toolLines -join "`r`n") + "`r`n"); Trim-AMRLogTextBox -Control $toolsControl -MaxChars $script:LogUIRetentionChars; $toolsControl.ScrollToEnd() } catch {}
-        }
-        $latest = $batch[$batch.Count - 1]
-        if ($script:Status -and $latest) {
-            try { $script:Status.Text = "[$($latest.Area)] $($latest.Message)" } catch {}
-        }
-      } catch {
+    } catch {
         $uiLogError = $_
         try {
             $fallbackPath = Join-Path $env:ProgramData 'AMR-Utility\Logs\AMR_LogUI_Fallback.log'
@@ -642,12 +896,21 @@ function Start-AMRLogUIPump {
             $fallbackLine = ('[{0:yyyy-MM-dd HH:mm:ss.fff}] [ERROR] [LogUIPump] {1} | {2}' -f (Get-Date),$uiLogError.Exception.Message,$uiLogError.ScriptStackTrace)
             [System.IO.File]::AppendAllText($fallbackPath,$fallbackLine + [Environment]::NewLine,[System.Text.Encoding]::UTF8)
         } catch {}
-        try {
-            $allControl = $script:LogControls['All']
-            if ($allControl) { $allControl.AppendText(('[Log UI ERROR] ' + $uiLogError.Exception.Message) + "`r`n") }
-        } catch {}
-      }
-    }.GetNewClosure())
+    } finally {
+        if ($perfPumpStart -ne 0) { try { [AMR.PerfStats]::Add('ps.logPumpTick', [AMR.PerfStats]::Now() - $perfPumpStart) } catch {} }
+    }
+}
+
+function Start-AMRLogUIPump {
+    try { [AMRLogDiskWriter]::Configure([string]$script:LogFile) } catch {}
+    if ($script:LogUIFlushTimer) {
+        try { $script:LogUIFlushTimer.Stop() } catch {}
+        $script:LogUIFlushTimer = $null
+    }
+
+    $script:LogUIFlushTimer = New-Object System.Windows.Threading.DispatcherTimer
+    $script:LogUIFlushTimer.Interval = [TimeSpan]::FromMilliseconds(1000)
+    $script:LogUIFlushTimer.Add_Tick({ Invoke-AMRLogUIPumpTick })
     $script:LogUIFlushTimer.Start()
 }
 
@@ -2676,7 +2939,10 @@ function Test-AMRIconCacheUsable {
 function Get-AMRIconImageSource {
     param(
         [Parameter(Mandatory = $true)]
-        [string]$Path
+        [string]$Path,
+        # Optional: when greater than zero and the image is wider than this value,
+        # decode it at this pixel width (aspect ratio preserved). 0 keeps the original behavior.
+        [int]$MaxPixelWidth = 0
     )
 
     if ([string]::IsNullOrWhiteSpace($Path) -or
@@ -2697,6 +2963,21 @@ function Get-AMRIconImageSource {
             )
             if ($null -eq $decoder -or $decoder.Frames.Count -lt 1) { return $null }
             $bitmap = $decoder.Frames[0]
+            if ($MaxPixelWidth -gt 0 -and $bitmap.PixelWidth -gt $MaxPixelWidth) {
+                try {
+                    # Downscale oversized artwork at decode time. Any failure falls back to the full-size frame above.
+                    $fileStream.Position = 0
+                    $scaled = [System.Windows.Media.Imaging.BitmapImage]::new()
+                    $scaled.BeginInit()
+                    $scaled.CacheOption = [System.Windows.Media.Imaging.BitmapCacheOption]::OnLoad
+                    $scaled.CreateOptions = [System.Windows.Media.Imaging.BitmapCreateOptions]::IgnoreImageCache
+                    $scaled.DecodePixelWidth = $MaxPixelWidth
+                    $scaled.StreamSource = $fileStream
+                    $scaled.EndInit()
+                    if ($scaled.CanFreeze) { $scaled.Freeze() }
+                    return $scaled
+                } catch {}
+            }
             if ($bitmap.CanFreeze) { $bitmap.Freeze() }
             return $bitmap
         } finally { $fileStream.Dispose() }
@@ -2710,6 +2991,18 @@ function Get-AMRIconImageSource {
 $script:SoftwareCatalog = New-Object 'System.Collections.ObjectModel.ObservableCollection[object]'
 $script:IconCacheUsableAtStartup = Test-AMRIconCacheUsable -Minimum $script:IconMinFileCount
 
+# One directory listing replaces one Test-Path per (app id x extension) in the startup catalog loop.
+# Keys are lower-case file names (Windows file names are case-insensitive).
+$script:AMRStartupIconIndex = New-Object 'System.Collections.Generic.Dictionary[string,string]'
+if ($script:IconCacheUsableAtStartup) {
+    try {
+        foreach ($indexedIconPath in [System.IO.Directory]::EnumerateFiles([string]$script:IconDir)) {
+            $script:AMRStartupIconIndex[[System.IO.Path]::GetFileName($indexedIconPath).ToLowerInvariant()] = $indexedIconPath
+        }
+    } catch {}
+}
+
+$script:AMRCatalogItemCompiled = ($null -ne ('AMR.SoftwareCatalogItem' -as [type]))
 $RawApps | ForEach-Object {
     $initial  = if ($_.Name.Length -gt 0) { $_.Name.Substring(0,1).ToUpper() } else { 'A' }
 
@@ -2724,9 +3017,10 @@ $RawApps | ForEach-Object {
         }
         foreach ($localIconId in $localIconIds) {
             foreach ($localIconExtension in $script:AMRIconImageExtensions) {
-                $localIconPath = Join-Path $script:IconDir ($localIconId + $localIconExtension)
-                if (Test-Path -LiteralPath $localIconPath -PathType Leaf) {
-                    $iconSource = Get-AMRIconImageSource -Path $localIconPath
+                $localIconPath = $null
+                if ($script:AMRStartupIconIndex.TryGetValue(($localIconId + $localIconExtension).ToLowerInvariant(), [ref]$localIconPath)) {
+                    # Catalog icons are shown at 30x30 DIPs; 96 px keeps them sharp on high-DPI displays.
+                    $iconSource = Get-AMRIconImageSource -Path $localIconPath -MaxPixelWidth 96
                     if ($null -ne $iconSource) { break }
                 }
             }
@@ -2734,7 +3028,7 @@ $RawApps | ForEach-Object {
         }
     }
 
-    $script:SoftwareCatalog.Add([pscustomobject]@{
+    $catalogItemProps = [ordered]@{
         IsSelected    = $false
         IsInstalled   = $false
         Name          = $_.Name
@@ -2757,12 +3051,16 @@ $RawApps | ForEach-Object {
         InstallTimeoutSeconds = if ($_.PSObject.Properties['InstallTimeoutSeconds'] -and $_.PSObject.Properties['InstallTimeoutSeconds'].Value) { [int]$_.PSObject.Properties['InstallTimeoutSeconds'].Value } else { 1800 }
         Initials      = $initial
         Icon          = [System.Windows.Media.ImageSource]$iconSource
-    })
+    }
+    # Compiled model when available; the former PSCustomObject remains the fallback.
+    $catalogItem = if ($script:AMRCatalogItemCompiled) { New-Object -TypeName 'AMR.SoftwareCatalogItem' -Property $catalogItemProps } else { [pscustomobject]$catalogItemProps }
+    $script:SoftwareCatalog.Add($catalogItem)
 }
 
 $loadedIconCount = @($script:SoftwareCatalog | Where-Object { $null -ne $_.Icon }).Count
 $script:AMRStartupPhaseTimings['IconCatalogReadyMs'] = [int]$script:AMRStartupStopwatch.ElapsedMilliseconds
 Write-AMRLog ("Startup catalog ready: {0} preloaded icons from local cache. Cache='{1}'." -f $loadedIconCount,$script:IconDir) INFO Software
+Write-AMRLog ("Catalog item model: {0} ({1} items)." -f $(if ($script:AMRCatalogItemCompiled) { 'compiled AMR.SoftwareCatalogItem with INotifyPropertyChanged' } else { 'PSCustomObject fallback' }),$script:SoftwareCatalog.Count) INFO Software
 
 # --- 4. FULL WPF XAML INTERFACE WITH PROGRESS BAR & 27 CUSTOMIZE TOOLS ---
 [xml]$xaml = @'
@@ -2773,6 +3071,275 @@ Write-AMRLog ("Startup catalog ready: {0} preloaded icons from local cache. Cach
         MinHeight="600" MinWidth="900" WindowStartupLocation="CenterScreen" WindowState="Normal" 
         Background="#18181B" Foreground="#E4E4E7" FontFamily="Segoe UI">
  <Window.Resources>
+  <!-- Full card template (details popup/toggle) used only by the Installed surface; the catalog uses a lean inline template. -->
+  <DataTemplate x:Key="AMRInstalledCardTemplate">
+          <!-- Fixed item-slot geometry prevents category-header visibility and progressive
+               page appends from changing UniformGrid's measured row height. -->
+          <Grid Height="76" HorizontalAlignment="Stretch" VerticalAlignment="Stretch">
+           <Grid.RowDefinitions><RowDefinition Height="12"/><RowDefinition Height="64"/></Grid.RowDefinitions>
+           <Grid.Style>
+            <Style TargetType="Grid">
+             <Style.Triggers>
+              <DataTrigger Binding="{Binding IsCategorySpacer}" Value="True"><Setter Property="Visibility" Value="Hidden"/></DataTrigger>
+             </Style.Triggers>
+            </Style>
+           </Grid.Style>
+           <StackPanel Grid.Row="0" Orientation="Horizontal" HorizontalAlignment="Left" Width="34" Height="12" FlowDirection="LeftToRight" Margin="3,0,0,0">
+            <StackPanel.Style>
+             <Style TargetType="StackPanel">
+              <Setter Property="Visibility" Value="Collapsed"/>
+              <Style.Triggers>
+               <!-- Reserve the same header-row height across all columns so cards stay aligned. -->
+               <DataTrigger Binding="{Binding IsCategoryHeaderRow}" Value="True"><Setter Property="Visibility" Value="Hidden"/></DataTrigger>
+               <DataTrigger Binding="{Binding IsCategoryStart}" Value="True"><Setter Property="Visibility" Value="Visible"/></DataTrigger>
+              </Style.Triggers>
+             </Style>
+            </StackPanel.Style>
+            <Border Width="12" Height="2" CornerRadius="1" Background="#3B82F6" VerticalAlignment="Center" Margin="0,0,5,0"/>
+            <TextBlock Text="{Binding CategoryNumber}" Foreground="#8DBBFA" FontSize="9.5" FontWeight="SemiBold" VerticalAlignment="Center" Margin="0,0,0,0"/>
+           </StackPanel>
+          <!-- Static shadow layer (no Effect): cheap to render and to scroll. -->
+          <Border Grid.Row="1" IsHitTestVisible="False" HorizontalAlignment="Stretch" VerticalAlignment="Bottom" Height="63" Margin="2.5,0.5" CornerRadius="10.5" Background="#000000" Opacity="0.09"/>
+          <!-- Static shadow layer (no Effect): cheap to render and to scroll. -->
+          <Border Grid.Row="1" IsHitTestVisible="False" HorizontalAlignment="Stretch" VerticalAlignment="Bottom" Height="66" Margin="1,-1" CornerRadius="12" Background="#000000" Opacity="0.06"/>
+          <!-- Static shadow layer (no Effect): cheap to render and to scroll. -->
+          <Border Grid.Row="1" IsHitTestVisible="False" HorizontalAlignment="Stretch" VerticalAlignment="Bottom" Height="69" Margin="-0.5,-2.5" CornerRadius="13.5" Background="#000000" Opacity="0.035"/>
+          <Border x:Name="SoftwareCardSurface" Grid.Row="1" Background="#FF27272A" BorderBrush="#FF3F3F46" BorderThickness="1" CornerRadius="9" HorizontalAlignment="Stretch" VerticalAlignment="Bottom" RenderTransformOrigin="0.5,0.5">
+           <Border.Style>
+            <Style TargetType="Border">
+             <Setter Property="Height" Value="60"/>
+             <Setter Property="Padding" Value="5,3"/>
+             <Setter Property="Margin" Value="4,2"/>
+             <Setter Property="RenderTransform">
+              <Setter.Value><TransformGroup><ScaleTransform ScaleX="1" ScaleY="1"/><TranslateTransform X="0" Y="0"/></TransformGroup></Setter.Value>
+             </Setter>
+             <Style.Triggers>
+              <MultiTrigger><MultiTrigger.Conditions><Condition Property="IsMouseOver" Value="True"/><Condition Property="IsVisible" Value="True"/></MultiTrigger.Conditions>
+               <MultiTrigger.EnterActions>
+                <BeginStoryboard>
+                 <Storyboard>
+                  <ColorAnimation Storyboard.TargetProperty="(Border.Background).(SolidColorBrush.Color)" To="#FF3B4652" Duration="0:0:0.16">
+                   <ColorAnimation.EasingFunction><CubicEase EasingMode="EaseOut"/></ColorAnimation.EasingFunction>
+                  </ColorAnimation>
+                  <ColorAnimation Storyboard.TargetProperty="(Border.BorderBrush).(SolidColorBrush.Color)" To="#FFFFE0AD" Duration="0:0:0.18">
+                   <ColorAnimation.EasingFunction><CubicEase EasingMode="EaseOut"/></ColorAnimation.EasingFunction>
+                  </ColorAnimation>
+                  <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TransformGroup.Children)[1].(TranslateTransform.Y)" To="-3" Duration="0:0:0.16">
+                   <DoubleAnimation.EasingFunction><CubicEase EasingMode="EaseOut"/></DoubleAnimation.EasingFunction>
+                  </DoubleAnimation>
+                  <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TransformGroup.Children)[0].(ScaleTransform.ScaleX)" To="1.025" Duration="0:0:0.16">
+                   <DoubleAnimation.EasingFunction><CubicEase EasingMode="EaseOut"/></DoubleAnimation.EasingFunction>
+                  </DoubleAnimation>
+                  <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TransformGroup.Children)[0].(ScaleTransform.ScaleY)" To="1.025" Duration="0:0:0.16">
+                   <DoubleAnimation.EasingFunction><CubicEase EasingMode="EaseOut"/></DoubleAnimation.EasingFunction>
+                  </DoubleAnimation>
+                 </Storyboard>
+                </BeginStoryboard>
+               </MultiTrigger.EnterActions>
+               <MultiTrigger.ExitActions>
+                <BeginStoryboard>
+                 <Storyboard>
+                  <ColorAnimation Storyboard.TargetProperty="(Border.Background).(SolidColorBrush.Color)" To="#FF27272A" Duration="0:0:0.21">
+                   <ColorAnimation.EasingFunction><CubicEase EasingMode="EaseOut"/></ColorAnimation.EasingFunction>
+                  </ColorAnimation>
+                  <ColorAnimation Storyboard.TargetProperty="(Border.BorderBrush).(SolidColorBrush.Color)" To="#FF3F3F46" Duration="0:0:0.21">
+                   <ColorAnimation.EasingFunction><CubicEase EasingMode="EaseOut"/></ColorAnimation.EasingFunction>
+                  </ColorAnimation>
+                  <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TransformGroup.Children)[1].(TranslateTransform.Y)" To="0" Duration="0:0:0.21">
+                   <DoubleAnimation.EasingFunction><CubicEase EasingMode="EaseOut"/></DoubleAnimation.EasingFunction>
+                  </DoubleAnimation>
+                  <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TransformGroup.Children)[0].(ScaleTransform.ScaleX)" To="1" Duration="0:0:0.21">
+                   <DoubleAnimation.EasingFunction><CubicEase EasingMode="EaseOut"/></DoubleAnimation.EasingFunction>
+                  </DoubleAnimation>
+                  <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TransformGroup.Children)[0].(ScaleTransform.ScaleY)" To="1" Duration="0:0:0.21">
+                   <DoubleAnimation.EasingFunction><CubicEase EasingMode="EaseOut"/></DoubleAnimation.EasingFunction>
+                  </DoubleAnimation>
+                 </Storyboard>
+                </BeginStoryboard>
+               </MultiTrigger.ExitActions>
+              </MultiTrigger>
+              <DataTrigger Binding="{Binding IsSelected}" Value="True">
+               <Setter Property="Background" Value="#FF2C4054"/>
+               <Setter Property="BorderBrush" Value="#FFD7B77C"/>
+               <Setter Property="BorderThickness" Value="1.4"/>
+               </DataTrigger>
+              <!-- A13g: the selection fade starts only once the card is in the visual tree (IsVisible). Starting a Storyboard on Border.Background while the template was still being built threw XamlParseException. -->
+              <MultiDataTrigger><MultiDataTrigger.Conditions><Condition Binding="{Binding IsSelected}" Value="True"/><Condition Binding="{Binding RelativeSource={RelativeSource Self},Path=IsVisible}" Value="True"/></MultiDataTrigger.Conditions><MultiDataTrigger.EnterActions>
+                <BeginStoryboard>
+                 <Storyboard>
+                  <ColorAnimation Storyboard.TargetProperty="(Border.Background).(SolidColorBrush.Color)" To="#FF31475B" Duration="0:0:0.18"/>
+                  <ColorAnimation Storyboard.TargetProperty="(Border.BorderBrush).(SolidColorBrush.Color)" To="#FFFFDFA8" Duration="0:0:0.20"/>
+                 </Storyboard>
+                </BeginStoryboard>
+               </MultiDataTrigger.EnterActions><MultiDataTrigger.ExitActions>
+                <BeginStoryboard>
+                 <Storyboard>
+                  <ColorAnimation Storyboard.TargetProperty="(Border.Background).(SolidColorBrush.Color)" To="#FF27272A" Duration="0:0:0.16"/>
+                  <ColorAnimation Storyboard.TargetProperty="(Border.BorderBrush).(SolidColorBrush.Color)" To="#FF3F3F46" Duration="0:0:0.16"/>
+                 </Storyboard>
+                </BeginStoryboard>
+               </MultiDataTrigger.ExitActions></MultiDataTrigger>
+             </Style.Triggers>
+            </Style>
+           </Border.Style>
+           <Grid>
+            <Grid.RowDefinitions><RowDefinition Height="*"/></Grid.RowDefinitions>
+            <Grid Grid.Row="0" VerticalAlignment="Center">
+             <Grid.ColumnDefinitions>
+              <ColumnDefinition Width="Auto"/>
+              <ColumnDefinition Width="Auto"/>
+              <ColumnDefinition Width="*"/>
+              <ColumnDefinition Width="Auto"/>
+             </Grid.ColumnDefinitions>
+             <CheckBox IsChecked="{Binding IsSelected, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                       VerticalAlignment="Center" HorizontalAlignment="Center" Margin="0,0,12,0"
+                       ToolTip="Select this application" Cursor="Hand" FocusVisualStyle="{x:Null}"
+                       Width="19" Height="19" VerticalContentAlignment="Center" HorizontalContentAlignment="Center">
+              <CheckBox.Template>
+               <ControlTemplate TargetType="CheckBox">
+                <Border x:Name="SelectionSurface" Width="18" Height="18" CornerRadius="5"
+                        Background="#FF202C3B" BorderBrush="#FF65758B" BorderThickness="1.2"
+                        SnapsToDevicePixels="True">
+                 <Grid>
+                  <Path x:Name="SelectionTick" Data="M 3,9 L 7,13 L 15,4"
+                        Stroke="#FFFFFFFF" StrokeThickness="2.0" StrokeStartLineCap="Round"
+                        StrokeEndLineCap="Round" StrokeLineJoin="Round" Visibility="Collapsed"
+                        HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                 </Grid>
+                </Border>
+                <ControlTemplate.Triggers>
+                 <Trigger Property="IsMouseOver" Value="True">
+                  <Setter TargetName="SelectionSurface" Property="BorderBrush" Value="#FFE0AD"/>
+                  <Setter TargetName="SelectionSurface" Property="Background" Value="#FF34465A"/>
+                 </Trigger>
+                 <Trigger Property="IsChecked" Value="True">
+                  <Setter TargetName="SelectionSurface" Property="Background" Value="#FFB88D4D"/>
+                  <Setter TargetName="SelectionSurface" Property="BorderBrush" Value="#FFFFE0AD"/>
+                  <Setter TargetName="SelectionTick" Property="Visibility" Value="Visible"/>
+                 </Trigger>
+                 <Trigger Property="IsEnabled" Value="False">
+                  <Setter TargetName="SelectionSurface" Property="Opacity" Value="0.45"/>
+                 </Trigger>
+                </ControlTemplate.Triggers>
+               </ControlTemplate>
+              </CheckBox.Template>
+             </CheckBox>
+             <Grid Grid.Column="1" Width="36" Height="36" Margin="0,0,8,0">
+              <Border Background="#3F3F46" CornerRadius="9"/>
+              <TextBlock x:Name="SoftwareIconInitials" Text="{Binding Initials}" Foreground="#A1A1AA" FontSize="16" FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center">
+               <TextBlock.Style>
+                <Style TargetType="TextBlock">
+                 <Setter Property="Visibility" Value="Collapsed"/>
+                 <Style.Triggers>
+                  <DataTrigger Binding="{Binding Icon}" Value="{x:Null}"><Setter Property="Visibility" Value="Visible"/></DataTrigger>
+                 </Style.Triggers>
+                </Style>
+               </TextBlock.Style>
+              </TextBlock>
+              <Image x:Name="SoftwareIconImage" Source="{Binding Icon, Mode=OneWay, TargetNullValue={x:Null}, FallbackValue={x:Null}}" Width="30" Height="30" Stretch="Uniform" HorizontalAlignment="Center" VerticalAlignment="Center" SnapsToDevicePixels="True" RenderOptions.BitmapScalingMode="LowQuality"/>
+             </Grid>
+             <StackPanel Grid.Column="2" VerticalAlignment="Center">
+              <TextBlock Text="{Binding Name}" FontSize="14" FontWeight="SemiBold" Foreground="#FFFFFF" TextWrapping="Wrap">
+               <TextBlock.Style>
+                <Style TargetType="TextBlock">
+                 <Style.Triggers>
+                  <DataTrigger Binding="{Binding IsUniversalInventory}" Value="True">
+                   <Setter Property="Text" Value="{Binding CardDisplayName}"/>
+                   <Setter Property="TextWrapping" Value="NoWrap"/>
+                   <Setter Property="TextTrimming" Value="CharacterEllipsis"/>
+                  </DataTrigger>
+                  <DataTrigger Binding="{Binding DetailsExpanded}" Value="True">
+                   <Setter Property="TextWrapping" Value="Wrap"/>
+                   <Setter Property="TextTrimming" Value="None"/>
+                  </DataTrigger>
+                 </Style.Triggers>
+                </Style>
+               </TextBlock.Style>
+              </TextBlock>
+              <TextBlock Text="{Binding Id}" FontSize="10" Foreground="#71717A" TextWrapping="Wrap" Margin="0,3,0,0">
+               <TextBlock.Style>
+                <Style TargetType="TextBlock">
+                 <Style.Triggers>
+                  <DataTrigger Binding="{Binding IsUniversalInventory}" Value="True"><Setter Property="Visibility" Value="Collapsed"/></DataTrigger>
+                 </Style.Triggers>
+                </Style>
+               </TextBlock.Style>
+              </TextBlock>
+             </StackPanel>
+             <ToggleButton x:Name="InstalledDetailsToggle" Grid.Column="3" IsChecked="{Binding DetailsExpanded, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" Width="25" Height="25" Margin="8,0,3,0" FontSize="15" FontWeight="Bold" Foreground="#FFFFFF" Background="#52525B" BorderBrush="#71717A" BorderThickness="1" Cursor="Hand" FocusVisualStyle="{x:Null}" VerticalAlignment="Center" HorizontalAlignment="Right" ToolTip="Show installation details">
+              <ToggleButton.Template>
+               <ControlTemplate TargetType="ToggleButton">
+                <Border x:Name="ArrowSurface" Background="#52525B" BorderBrush="#71717A" BorderThickness="1" CornerRadius="5" SnapsToDevicePixels="True">
+                 <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" RecognizesAccessKey="True"/>
+                </Border>
+                <ControlTemplate.Triggers>
+                 <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="ArrowSurface" Property="Background" Value="#52525B"/><Setter TargetName="ArrowSurface" Property="BorderBrush" Value="#71717A"/></Trigger>
+                 <Trigger Property="IsPressed" Value="True"><Setter TargetName="ArrowSurface" Property="Background" Value="#52525B"/><Setter TargetName="ArrowSurface" Property="BorderBrush" Value="#71717A"/></Trigger>
+                 <Trigger Property="IsChecked" Value="True"><Setter Property="Content" Value="⌃"/></Trigger>
+                </ControlTemplate.Triggers>
+               </ControlTemplate>
+              </ToggleButton.Template>
+              <ToggleButton.Style>
+               <Style TargetType="ToggleButton">
+                <Setter Property="Visibility" Value="Collapsed"/>
+                <Setter Property="Content" Value="⌄"/>
+                <Style.Triggers>
+                 <DataTrigger Binding="{Binding IsUniversalInventory}" Value="True"><Setter Property="Visibility" Value="Visible"/></DataTrigger>
+                </Style.Triggers>
+               </Style>
+              </ToggleButton.Style>
+             </ToggleButton>
+            </Grid>
+            <Border Width="8" Height="8" HorizontalAlignment="Right" VerticalAlignment="Top" Margin="0,1,2,0"
+                    Background="#3B82F6" CornerRadius="4" ToolTip="This app is installed"
+                    SnapsToDevicePixels="True">
+             <Border.Style>
+              <Style TargetType="Border">
+               <Setter Property="Visibility" Value="Collapsed"/>
+               <Style.Triggers>
+                <DataTrigger Binding="{Binding IsInstalled}" Value="True">
+                 <Setter Property="Visibility" Value="Visible"/>
+                </DataTrigger>
+                <DataTrigger Binding="{Binding IsUniversalInventory}" Value="True">
+                 <Setter Property="Visibility" Value="Collapsed"/>
+                </DataTrigger>
+               </Style.Triggers>
+              </Style>
+             </Border.Style>
+            </Border>
+            <Popup x:Name="InstalledDetailsPopup" PlacementTarget="{Binding ElementName=InstalledDetailsToggle}" Placement="Bottom" HorizontalOffset="-225" VerticalOffset="5" AllowsTransparency="True" StaysOpen="False" PopupAnimation="Fade" IsOpen="{Binding IsChecked, ElementName=InstalledDetailsToggle, Mode=OneWay}">
+             <Control Focusable="False" IsTabStop="False">
+<Control.Template>
+<ControlTemplate TargetType="Control">
+<Border x:Name="InstalledDetailsPanel" Width="250" Margin="0" Padding="8" Background="#202B3B" BorderBrush="#527AA8" BorderThickness="1" CornerRadius="7" SnapsToDevicePixels="True">
+             <StackPanel>
+              <TextBlock Text="Installation details" Foreground="#8FB8E8" FontSize="10" FontWeight="Bold" Margin="0,0,0,5"/>
+              <TextBlock Text="Full application name" Foreground="#94A3B8" FontSize="9"/>
+              <TextBlock Text="{Binding DisplayName}" Foreground="#E2E8F0" FontSize="10" TextWrapping="Wrap" Margin="0,1,0,5"/>
+              <TextBlock Text="Application ID" Foreground="#94A3B8" FontSize="9"/>
+              <TextBlock Text="{Binding Id}" Foreground="#E2E8F0" FontSize="10" TextWrapping="Wrap" Margin="0,1,0,5"/>
+              <TextBlock Text="Install path" Foreground="#94A3B8" FontSize="9"/>
+              <DockPanel LastChildFill="True" Margin="0,1,0,5">
+               <Button x:Name="InstalledCopyPathBtn" DockPanel.Dock="Right" Content="⧉" Tag="{Binding DisplayInstallPath}" Width="24" Height="22" Margin="6,0,0,0" Padding="0" FontSize="13" Foreground="#FFFFFF" Background="#465569" BorderBrush="#718096" BorderThickness="1" Cursor="Hand" FocusVisualStyle="{x:Null}" ToolTip="Copy installation path">
+                <Button.Style><Style TargetType="Button"><Setter Property="Visibility" Value="Collapsed"/><Style.Triggers><DataTrigger Binding="{Binding HasCopyableInstallPath}" Value="True"><Setter Property="Visibility" Value="Visible"/></DataTrigger></Style.Triggers></Style></Button.Style>
+               </Button>
+               <TextBlock Text="{Binding DisplayInstallPath, TargetNullValue='Not recorded by Windows', FallbackValue='Not recorded by Windows'}" Foreground="#E2E8F0" FontSize="10" TextWrapping="Wrap" VerticalAlignment="Center"/>
+              </DockPanel>
+              <TextBlock Text="Version" Foreground="#94A3B8" FontSize="9"/>
+              <TextBlock Text="{Binding DisplayVersion, TargetNullValue='Not recorded', FallbackValue='Not recorded'}" Foreground="#E2E8F0" FontSize="10" Margin="0,1,0,5"/>
+              <TextBlock Text="Publisher / Source" Foreground="#94A3B8" FontSize="9"/>
+              <TextBlock Text="{Binding Publisher}" Foreground="#E2E8F0" FontSize="10" TextWrapping="Wrap"/>
+              <TextBlock Text="{Binding Source}" Foreground="#94A3B8" FontSize="9" TextWrapping="Wrap" Margin="0,4,0,0"/>
+             </StackPanel>
+            </Border>
+</ControlTemplate>
+</Control.Template>
+</Control>
+            </Popup>
+           </Grid>
+          </Border>
+          </Grid>
+         </DataTemplate>
   <!-- Activation Center: opaque glass-like graphite layers with warm reflective edges. -->
   <LinearGradientBrush x:Key="ActivationOuterGlassBrush" StartPoint="0,0" EndPoint="0.9,1">
    <GradientStop Color="#D65B554B" Offset="0"/><GradientStop Color="#E83A3B3F" Offset="0.20"/><GradientStop Color="#E52A2C31" Offset="0.62"/><GradientStop Color="#D91D1F23" Offset="1"/>
@@ -3632,6 +4199,40 @@ Write-AMRLog ("Startup catalog ready: {0} preloaded icons from local cache. Cach
            </Setter.Value>
           </Setter>
          </Style>
+         <Style x:Key="AMRDriverDownloadsButtonStyle" TargetType="{x:Type Button}">
+          <Setter Property="BorderThickness" Value="1"/>
+          <Setter Property="Padding" Value="12,8"/>
+          <Setter Property="Cursor" Value="Hand"/>
+          <Setter Property="Template">
+           <Setter.Value>
+            <ControlTemplate TargetType="{x:Type Button}">
+             <Border x:Name="DriverDownloadsSurface" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="10" Padding="{TemplateBinding Padding}" RenderTransformOrigin="0.5,0.5">
+              <Border.RenderTransform><TransformGroup><ScaleTransform ScaleX="1" ScaleY="1"/><TranslateTransform X="0" Y="0"/><RotateTransform Angle="0"/></TransformGroup></Border.RenderTransform>
+              <Border.Effect><DropShadowEffect Color="#000000" BlurRadius="8" ShadowDepth="2" Opacity="0.16"/></Border.Effect>
+              <ContentPresenter HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}" VerticalAlignment="{TemplateBinding VerticalContentAlignment}" RecognizesAccessKey="True"/>
+             </Border>
+             <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True">
+               <Setter TargetName="DriverDownloadsSurface" Property="BorderBrush" Value="#D0B985"/>
+               <Setter TargetName="DriverDownloadsSurface" Property="Effect"><Setter.Value><DropShadowEffect Color="#B89A62" BlurRadius="16" ShadowDepth="0" Opacity="0.30"/></Setter.Value></Setter>
+               <Trigger.EnterActions><BeginStoryboard><Storyboard>
+                <DoubleAnimation Storyboard.TargetName="DriverDownloadsSurface" Storyboard.TargetProperty="(UIElement.RenderTransform).(TransformGroup.Children)[0].(ScaleTransform.ScaleX)" To="1.02" Duration="0:0:0.22"/>
+                <DoubleAnimation Storyboard.TargetName="DriverDownloadsSurface" Storyboard.TargetProperty="(UIElement.RenderTransform).(TransformGroup.Children)[0].(ScaleTransform.ScaleY)" To="1.02" Duration="0:0:0.22"/>
+                <DoubleAnimation Storyboard.TargetName="DriverDownloadsSurface" Storyboard.TargetProperty="(UIElement.RenderTransform).(TransformGroup.Children)[1].(TranslateTransform.Y)" To="-1" Duration="0:0:0.22"/>
+               </Storyboard></BeginStoryboard></Trigger.EnterActions>
+               <Trigger.ExitActions><BeginStoryboard><Storyboard>
+                <DoubleAnimation Storyboard.TargetName="DriverDownloadsSurface" Storyboard.TargetProperty="(UIElement.RenderTransform).(TransformGroup.Children)[0].(ScaleTransform.ScaleX)" To="1" Duration="0:0:0.22"/>
+                <DoubleAnimation Storyboard.TargetName="DriverDownloadsSurface" Storyboard.TargetProperty="(UIElement.RenderTransform).(TransformGroup.Children)[0].(ScaleTransform.ScaleY)" To="1" Duration="0:0:0.22"/>
+                <DoubleAnimation Storyboard.TargetName="DriverDownloadsSurface" Storyboard.TargetProperty="(UIElement.RenderTransform).(TransformGroup.Children)[1].(TranslateTransform.Y)" To="0" Duration="0:0:0.22"/>
+                               </Storyboard></BeginStoryboard></Trigger.ExitActions>
+              </Trigger>
+              <Trigger Property="IsPressed" Value="True"><Setter TargetName="DriverDownloadsSurface" Property="Opacity" Value="0.88"/></Trigger>
+              <Trigger Property="IsEnabled" Value="False"><Setter TargetName="DriverDownloadsSurface" Property="Opacity" Value="0.48"/></Trigger>
+             </ControlTemplate.Triggers>
+            </ControlTemplate>
+           </Setter.Value>
+          </Setter>
+         </Style>
         </StackPanel.Resources>
         <StackPanel.RenderTransform><TranslateTransform Y="10"/></StackPanel.RenderTransform>
         <StackPanel.Triggers>
@@ -3737,7 +4338,7 @@ Write-AMRLog ("Startup catalog ready: {0} preloaded icons from local cache. Cach
         </Grid>
         <Grid Margin="0,0,0,8">
          <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-         <StackPanel Grid.Column="0"><TextBlock Name="DriverModeSectionHeading" Text="" Visibility="Collapsed"/><TextBlock Name="DriverScanStatus" Text="Select Scan Device to inspect this computer. No driver will be downloaded or installed automatically." Foreground="#94A3B8" FontSize="11" TextWrapping="Wrap" Margin="0,0,8,0"/><TextBlock Name="DriverModeDescription" Text="" Foreground="#94A3B8" FontSize="10" TextWrapping="Wrap" Margin="0,3,8,0"/></StackPanel>
+         <StackPanel Grid.Column="0"><TextBlock Name="DriverModeSectionHeading" Text="" Visibility="Collapsed"/><TextBlock Name="DriverScanStatus" Text="Select Scan Device to inspect this computer. No driver will be downloaded or installed automatically." Foreground="#94A3B8" FontSize="11" TextWrapping="Wrap" Margin="0,0,8,0"><TextBlock.Style><Style TargetType="{x:Type TextBlock}"><Style.Triggers><DataTrigger Binding="{Binding Text, RelativeSource={RelativeSource Self}}" Value=""><Setter Property="Visibility" Value="Collapsed"/></DataTrigger></Style.Triggers></Style></TextBlock.Style></TextBlock><TextBlock Name="DriverModeDescription" Text="" Foreground="#94A3B8" FontSize="10" TextWrapping="Wrap" Margin="0,3,8,0"/></StackPanel>
         </Grid>
         <TextBlock Name="DriverRollbackStatus" Text="Select a device to check for retained driver alternatives. Windows determines whether Roll Back Driver is available." Foreground="#D6B58C" FontSize="10" TextWrapping="Wrap" Margin="3,0,3,8"/>
         <Grid Margin="3,0,3,8">
@@ -3745,16 +4346,56 @@ Write-AMRLog ("Startup catalog ready: {0} preloaded icons from local cache. Cach
          <StackPanel Grid.Column="0" Margin="0,0,10,0">
           <TextBlock Name="DriverActionStatus" Text="Select a device row to view available actions. Downloads and installs require your confirmation." Foreground="#94A3B8" FontSize="10" TextWrapping="Wrap" Margin="0,0,0,3"/>
           <TextBlock Name="DriverSelectionSummary" Text="Selection: 0 selected • 0 ready to install • 0 unique updates available" Foreground="#7DD3FC" FontSize="10" TextWrapping="Wrap" Margin="0,0,0,5"/>
+          <StackPanel Orientation="Horizontal" Margin="0,0,0,6">
+           <Button Name="DriverRepairBtn" Content="Repair essential device" Visibility="Collapsed" IsEnabled="False" Background="#5A4A1F" Foreground="#FEF3C7" BorderBrush="#B08D3C" Padding="10,5" FontSize="10" Margin="0,0,6,0" ToolTip="Enables a disabled (Code 22) essential device, verifies it, rescans. Logged and reversible with Undo repair."/>
+           <Button Name="DriverRepairUndoBtn" Content="Undo repair" Visibility="Collapsed" IsEnabled="False" Background="#303846" Foreground="#E2E8F0" BorderBrush="#526176" Padding="10,5" FontSize="10" ToolTip="Disables the device that was just enabled by Repair (this session)."/>
+          </StackPanel>
           <ProgressBar Name="DriverOperationProgress" Height="5" IsIndeterminate="True" Visibility="Collapsed" Background="#263548" Foreground="#60A5FA" BorderThickness="0"/>
           <Button Name="DriverCancelManagedOperationBtn" Content="Cancel background operation" Visibility="Collapsed" IsEnabled="False" HorizontalAlignment="Left" Background="#7F1D1D" Foreground="#FEE2E2" BorderBrush="#991B1B" Padding="8,3" FontSize="9" Margin="0,4,0,0"/>
          </StackPanel>
          <StackPanel Grid.Column="1" Orientation="Horizontal">
           <Button Name="DriverExportReportBtn" Content="Export Scan Report" Background="#303846" Foreground="#E2E8F0" BorderBrush="#526176" Padding="10,5" FontSize="10" VerticalAlignment="Center" Margin="0,0,6,0"/>
           <Button Name="DriverExportHistoryBtn" Content="Export History" Background="#303846" Foreground="#E2E8F0" BorderBrush="#526176" Padding="10,5" FontSize="10" VerticalAlignment="Center" Margin="0,0,6,0"/>
-          <Button Name="DriverOpenDownloadsBtn" Content="Open Driver Downloads" Background="#263B52" Foreground="#DBEAFE" BorderBrush="#456B8A" Padding="10,5" FontSize="10" VerticalAlignment="Center"/>
+          <Button Name="DriverOpenDownloadsBtn" Style="{StaticResource AMRDriverDownloadsButtonStyle}" Content="Driver Downloads" Background="#263B52" Foreground="#DBEAFE" BorderBrush="#456B8A" Padding="10,5" FontSize="10" VerticalAlignment="Center" Margin="0,0,6,0"/>
+          <Button Name="DriverDiagnosisBtn" Style="{StaticResource AMRDriverDownloadsButtonStyle}" Content="Diagnose Devices" IsEnabled="False" MinWidth="118" VerticalAlignment="Center" Background="#315047" Foreground="#E7FFF5" BorderBrush="#5C9A82" Padding="10,5" FontSize="10" Margin="0,0,0,0" ToolTip="Read-only diagnosis of all devices: what each problem code means, likely causes and suggested fixes. Changes nothing."/>
          </StackPanel>
         </Grid>
-        <Border Background="{DynamicResource ActivationOuterGlassBrush}" BorderBrush="{DynamicResource ActivationGlassEdgeBrush}" BorderThickness="1" CornerRadius="10" Padding="4">
+        <Border Name="DriverTabStrip" HorizontalAlignment="Left" Margin="2,2,0,10" Padding="4" CornerRadius="15" Background="{DynamicResource ActivationInnerGlassBrush}" BorderBrush="{DynamicResource ActivationGlassEdgeBrush}" BorderThickness="1">
+         <Grid>
+          <Grid.Resources>
+           <Style x:Key="AMRDriverTabStyle" TargetType="{x:Type Button}">
+            <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Foreground" Value="#FFA9B4C4"/>
+            <Setter Property="Template">
+             <Setter.Value>
+              <ControlTemplate TargetType="{x:Type Button}">
+               <Border Background="#00000000" CornerRadius="11" Padding="{TemplateBinding Padding}">
+                <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" RecognizesAccessKey="True"/>
+               </Border>
+              </ControlTemplate>
+             </Setter.Value>
+            </Setter>
+            <Style.Triggers>
+             <Trigger Property="IsMouseOver" Value="True"><Setter Property="Foreground" Value="#FFEEF2F8"/></Trigger>
+             <Trigger Property="Tag" Value="Active"><Setter Property="Foreground" Value="#FFF7ECD0"/></Trigger>
+            </Style.Triggers>
+           </Style>
+          </Grid.Resources>
+          <Border Name="DriverTabPill" Width="168" Height="38" HorizontalAlignment="Left" CornerRadius="11" BorderThickness="1" BorderBrush="#B0B89A62" IsHitTestVisible="False">
+           <Border.Background>
+            <LinearGradientBrush StartPoint="0,0" EndPoint="0,1"><GradientStop Color="#A0788796" Offset="0"/><GradientStop Color="#70505D6A" Offset="1"/></LinearGradientBrush>
+           </Border.Background>
+           <Border.RenderTransform><TranslateTransform X="0"/></Border.RenderTransform>
+          </Border>
+          <StackPanel Orientation="Horizontal">
+           <Button Name="DriverTabUpdateBtn" Style="{StaticResource AMRDriverTabStyle}" Tag="Active" Content="Driver Update" Width="168" Height="38" FontSize="13" FontWeight="SemiBold" Background="Transparent" BorderThickness="0"/>
+           <Button Name="DriverTabProblemsBtn" Style="{StaticResource AMRDriverTabStyle}" Content="Problems" Width="168" Height="38" FontSize="13" FontWeight="SemiBold" Background="Transparent" BorderThickness="0"/>
+          </StackPanel>
+         </Grid>
+        </Border>
+        <Grid Name="DriverTabHost">
+        <Border Name="DriverUpdatePane" Height="400" Background="{DynamicResource ActivationOuterGlassBrush}" BorderBrush="{DynamicResource ActivationGlassEdgeBrush}" BorderThickness="1" CornerRadius="10" Padding="4">
          <ListView Name="DriverDeviceList" SelectionMode="Extended" Background="Transparent" Foreground="#E4E4E7" BorderThickness="0" MinHeight="260" MaxHeight="100000" ScrollViewer.HorizontalScrollBarVisibility="Auto" ScrollViewer.VerticalScrollBarVisibility="Auto" ScrollViewer.CanContentScroll="True" ScrollViewer.PanningMode="Both" VirtualizingPanel.IsVirtualizing="True" VirtualizingPanel.VirtualizationMode="Recycling">
           <ListView.Resources>
            <!-- Premium glass row and selection visuals; all original row bindings and selection behavior remain intact. -->
@@ -3899,6 +4540,32 @@ Write-AMRLog ("Startup catalog ready: {0} preloaded icons from local cache. Cach
           </ListView.View>
          </ListView>
         </Border>
+         <Border Name="DriverProblemsPane" Visibility="Collapsed" Background="{DynamicResource ActivationOuterGlassBrush}" BorderBrush="{DynamicResource ActivationGlassEdgeBrush}" BorderThickness="1" CornerRadius="14" Padding="18,16" Height="400">
+          <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+          <StackPanel>
+           <Border Name="DriverProblemsEmpty" Background="#33000000" BorderBrush="#33FFFFFF" BorderThickness="1" CornerRadius="12" Padding="22,26">
+            <StackPanel HorizontalAlignment="Center">
+             <TextBlock Text="&#x2713;" FontSize="30" Foreground="#FFD8B56D" HorizontalAlignment="Center"/>
+             <TextBlock Text="No diagnosis yet" FontSize="15" FontWeight="Bold" Foreground="#FFEAF0FF" HorizontalAlignment="Center" Margin="0,6,0,4"/>
+             <TextBlock Text="Run Scan Device. AMR then checks every device in the background and lists problems here with the likely cause and a suggested fix." FontSize="12" Foreground="#FF9FB0CF" TextWrapping="Wrap" TextAlignment="Center" MaxWidth="460"/>
+            </StackPanel>
+           </Border>
+                <Border Name="DriverDiagPanel" Visibility="Collapsed" Margin="0" Background="Transparent" BorderThickness="0" CornerRadius="12" Padding="0">
+                 <StackPanel>
+                  <Grid>
+                   <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                   <TextBlock Name="DriverDiagBadge" Text="" FontSize="16" FontWeight="Bold" Foreground="#E9D8B5" VerticalAlignment="Center" TextWrapping="Wrap"/>
+                   <Button Name="DriverDiagViewTextBtn" Grid.Column="1" Content="View as text" Background="#303846" Foreground="#E2E8F0" BorderBrush="#526176" Padding="9,3" FontSize="10"/>
+                  </Grid>
+                  <TextBlock Name="DriverDiagSummary" Text="" Visibility="Collapsed" FontSize="10" Foreground="#94A3B8" TextWrapping="Wrap" Margin="0,3,0,6"/>
+                  <StackPanel Name="DriverDiagCards" Margin="0,4,0,0"/>
+                  <Button Name="DriverDiagShowMoreBtn" Content="Show 10 more" Visibility="Collapsed" HorizontalAlignment="Left" Background="#303846" Foreground="#E2E8F0" BorderBrush="#526176" Padding="14,6" FontSize="11" Margin="0,2,0,0"/>
+                 </StackPanel>
+                </Border>
+         </StackPanel>
+          </ScrollViewer>
+         </Border>
+        </Grid>
        </StackPanel>
       </ScrollViewer>
      </TabItem>
@@ -4569,6 +5236,12 @@ Write-AMRLog ("Startup catalog ready: {0} preloaded icons from local cache. Cach
             <Border Width="12" Height="2" CornerRadius="1" Background="#3B82F6" VerticalAlignment="Center" Margin="0,0,5,0"/>
             <TextBlock Text="{Binding CategoryNumber}" Foreground="#8DBBFA" FontSize="9.5" FontWeight="SemiBold" VerticalAlignment="Center" Margin="0,0,0,0"/>
            </StackPanel>
+          <!-- Static shadow layer (no Effect): cheap to render and to scroll. -->
+          <Border Grid.Row="1" IsHitTestVisible="False" HorizontalAlignment="Stretch" VerticalAlignment="Bottom" Height="63" Margin="2.5,0.5" CornerRadius="10.5" Background="#000000" Opacity="0.09"/>
+          <!-- Static shadow layer (no Effect): cheap to render and to scroll. -->
+          <Border Grid.Row="1" IsHitTestVisible="False" HorizontalAlignment="Stretch" VerticalAlignment="Bottom" Height="66" Margin="1,-1" CornerRadius="12" Background="#000000" Opacity="0.06"/>
+          <!-- Static shadow layer (no Effect): cheap to render and to scroll. -->
+          <Border Grid.Row="1" IsHitTestVisible="False" HorizontalAlignment="Stretch" VerticalAlignment="Bottom" Height="69" Margin="-0.5,-2.5" CornerRadius="13.5" Background="#000000" Opacity="0.035"/>
           <Border x:Name="SoftwareCardSurface" Grid.Row="1" Background="#FF27272A" BorderBrush="#FF3F3F46" BorderThickness="1" CornerRadius="9" HorizontalAlignment="Stretch" VerticalAlignment="Bottom" RenderTransformOrigin="0.5,0.5">
            <Border.Style>
             <Style TargetType="Border">
@@ -4576,19 +5249,11 @@ Write-AMRLog ("Startup catalog ready: {0} preloaded icons from local cache. Cach
              <Setter Property="Padding" Value="5,3"/>
              <Setter Property="Margin" Value="4,2"/>
              <Setter Property="RenderTransform">
-              <Setter.Value><TranslateTransform X="0" Y="0"/></Setter.Value>
-             </Setter>
-             <Setter Property="Effect">
-              <Setter.Value><DropShadowEffect Color="#000000" BlurRadius="19" ShadowDepth="0" Opacity="0.20"/></Setter.Value>
+              <Setter.Value><TransformGroup><ScaleTransform ScaleX="1" ScaleY="1"/><TranslateTransform X="0" Y="0"/></TransformGroup></Setter.Value>
              </Setter>
              <Style.Triggers>
-              <DataTrigger Binding="{Binding IsUniversalInventory}" Value="True">
-               <Setter Property="Padding" Value="5,3"/>
-               <Setter Property="Margin" Value="4,2"/>
-               <Setter Property="Height" Value="60"/>
-              </DataTrigger>
-              <Trigger Property="IsMouseOver" Value="True">
-               <Trigger.EnterActions>
+              <MultiTrigger><MultiTrigger.Conditions><Condition Property="IsMouseOver" Value="True"/><Condition Property="IsVisible" Value="True"/></MultiTrigger.Conditions>
+               <MultiTrigger.EnterActions>
                 <BeginStoryboard>
                  <Storyboard>
                   <ColorAnimation Storyboard.TargetProperty="(Border.Background).(SolidColorBrush.Color)" To="#FF3B4652" Duration="0:0:0.16">
@@ -4597,15 +5262,19 @@ Write-AMRLog ("Startup catalog ready: {0} preloaded icons from local cache. Cach
                   <ColorAnimation Storyboard.TargetProperty="(Border.BorderBrush).(SolidColorBrush.Color)" To="#FFFFE0AD" Duration="0:0:0.18">
                    <ColorAnimation.EasingFunction><CubicEase EasingMode="EaseOut"/></ColorAnimation.EasingFunction>
                   </ColorAnimation>
-                  <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.Y)" To="-2.5" Duration="0:0:0.16">
+                  <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TransformGroup.Children)[1].(TranslateTransform.Y)" To="-3" Duration="0:0:0.16">
                    <DoubleAnimation.EasingFunction><CubicEase EasingMode="EaseOut"/></DoubleAnimation.EasingFunction>
                   </DoubleAnimation>
-                  <DoubleAnimation Storyboard.TargetProperty="(Border.Effect).(DropShadowEffect.Opacity)" To="0.48" Duration="0:0:0.16"/>
-                  <DoubleAnimation Storyboard.TargetProperty="(Border.Effect).(DropShadowEffect.BlurRadius)" To="24" Duration="0:0:0.16"/>
+                  <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TransformGroup.Children)[0].(ScaleTransform.ScaleX)" To="1.025" Duration="0:0:0.16">
+                   <DoubleAnimation.EasingFunction><CubicEase EasingMode="EaseOut"/></DoubleAnimation.EasingFunction>
+                  </DoubleAnimation>
+                  <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TransformGroup.Children)[0].(ScaleTransform.ScaleY)" To="1.025" Duration="0:0:0.16">
+                   <DoubleAnimation.EasingFunction><CubicEase EasingMode="EaseOut"/></DoubleAnimation.EasingFunction>
+                  </DoubleAnimation>
                  </Storyboard>
                 </BeginStoryboard>
-               </Trigger.EnterActions>
-               <Trigger.ExitActions>
+               </MultiTrigger.EnterActions>
+               <MultiTrigger.ExitActions>
                 <BeginStoryboard>
                  <Storyboard>
                   <ColorAnimation Storyboard.TargetProperty="(Border.Background).(SolidColorBrush.Color)" To="#FF27272A" Duration="0:0:0.21">
@@ -4614,41 +5283,40 @@ Write-AMRLog ("Startup catalog ready: {0} preloaded icons from local cache. Cach
                   <ColorAnimation Storyboard.TargetProperty="(Border.BorderBrush).(SolidColorBrush.Color)" To="#FF3F3F46" Duration="0:0:0.21">
                    <ColorAnimation.EasingFunction><CubicEase EasingMode="EaseOut"/></ColorAnimation.EasingFunction>
                   </ColorAnimation>
-                  <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.Y)" To="0" Duration="0:0:0.21">
+                  <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TransformGroup.Children)[1].(TranslateTransform.Y)" To="0" Duration="0:0:0.21">
                    <DoubleAnimation.EasingFunction><CubicEase EasingMode="EaseOut"/></DoubleAnimation.EasingFunction>
                   </DoubleAnimation>
-                  <DoubleAnimation Storyboard.TargetProperty="(Border.Effect).(DropShadowEffect.Opacity)" To="0.20" Duration="0:0:0.21"/>
-                  <DoubleAnimation Storyboard.TargetProperty="(Border.Effect).(DropShadowEffect.BlurRadius)" To="19" Duration="0:0:0.21"/>
+                  <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TransformGroup.Children)[0].(ScaleTransform.ScaleX)" To="1" Duration="0:0:0.21">
+                   <DoubleAnimation.EasingFunction><CubicEase EasingMode="EaseOut"/></DoubleAnimation.EasingFunction>
+                  </DoubleAnimation>
+                  <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TransformGroup.Children)[0].(ScaleTransform.ScaleY)" To="1" Duration="0:0:0.21">
+                   <DoubleAnimation.EasingFunction><CubicEase EasingMode="EaseOut"/></DoubleAnimation.EasingFunction>
+                  </DoubleAnimation>
                  </Storyboard>
                 </BeginStoryboard>
-               </Trigger.ExitActions>
-              </Trigger>
+               </MultiTrigger.ExitActions>
+              </MultiTrigger>
               <DataTrigger Binding="{Binding IsSelected}" Value="True">
                <Setter Property="Background" Value="#FF2C4054"/>
                <Setter Property="BorderBrush" Value="#FFD7B77C"/>
                <Setter Property="BorderThickness" Value="1.4"/>
-               <Setter Property="Effect">
-                <Setter.Value><DropShadowEffect Color="#C9B58A" BlurRadius="17" ShadowDepth="0" Opacity="0.34"/></Setter.Value>
-               </Setter>
-               <DataTrigger.EnterActions>
+               </DataTrigger>
+              <!-- A13g: the selection fade starts only once the card is in the visual tree (IsVisible). Starting a Storyboard on Border.Background while the template was still being built threw XamlParseException. -->
+              <MultiDataTrigger><MultiDataTrigger.Conditions><Condition Binding="{Binding IsSelected}" Value="True"/><Condition Binding="{Binding RelativeSource={RelativeSource Self},Path=IsVisible}" Value="True"/></MultiDataTrigger.Conditions><MultiDataTrigger.EnterActions>
                 <BeginStoryboard>
                  <Storyboard>
                   <ColorAnimation Storyboard.TargetProperty="(Border.Background).(SolidColorBrush.Color)" To="#FF31475B" Duration="0:0:0.18"/>
                   <ColorAnimation Storyboard.TargetProperty="(Border.BorderBrush).(SolidColorBrush.Color)" To="#FFFFDFA8" Duration="0:0:0.20"/>
-                  <DoubleAnimation Storyboard.TargetProperty="(Border.Effect).(DropShadowEffect.Opacity)" To="0.52" Duration="0:0:0.20"/>
                  </Storyboard>
                 </BeginStoryboard>
-               </DataTrigger.EnterActions>
-               <DataTrigger.ExitActions>
+               </MultiDataTrigger.EnterActions><MultiDataTrigger.ExitActions>
                 <BeginStoryboard>
                  <Storyboard>
                   <ColorAnimation Storyboard.TargetProperty="(Border.Background).(SolidColorBrush.Color)" To="#FF27272A" Duration="0:0:0.16"/>
                   <ColorAnimation Storyboard.TargetProperty="(Border.BorderBrush).(SolidColorBrush.Color)" To="#FF3F3F46" Duration="0:0:0.16"/>
-                  <DoubleAnimation Storyboard.TargetProperty="(Border.Effect).(DropShadowEffect.Opacity)" To="0.20" Duration="0:0:0.16"/>
                  </Storyboard>
                 </BeginStoryboard>
-               </DataTrigger.ExitActions>
-              </DataTrigger>
+               </MultiDataTrigger.ExitActions></MultiDataTrigger>
              </Style.Triggers>
             </Style>
            </Border.Style>
@@ -4695,11 +5363,6 @@ Write-AMRLog ("Startup catalog ready: {0} preloaded icons from local cache. Cach
               </CheckBox.Template>
              </CheckBox>
              <Grid Grid.Column="1" Width="36" Height="36" Margin="0,0,8,0">
-              <Grid.Style>
-               <Style TargetType="Grid">
-                <Setter Property="Visibility" Value="Visible"/>
-               </Style>
-              </Grid.Style>
               <Border Background="#3F3F46" CornerRadius="9"/>
               <TextBlock x:Name="SoftwareIconInitials" Text="{Binding Initials}" Foreground="#A1A1AA" FontSize="16" FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center">
                <TextBlock.Style>
@@ -4715,55 +5378,10 @@ Write-AMRLog ("Startup catalog ready: {0} preloaded icons from local cache. Cach
              </Grid>
              <StackPanel Grid.Column="2" VerticalAlignment="Center">
               <TextBlock Text="{Binding Name}" FontSize="14" FontWeight="SemiBold" Foreground="#FFFFFF" TextWrapping="Wrap">
-               <TextBlock.Style>
-                <Style TargetType="TextBlock">
-                 <Style.Triggers>
-                  <DataTrigger Binding="{Binding IsUniversalInventory}" Value="True">
-                   <Setter Property="Text" Value="{Binding CardDisplayName}"/>
-                   <Setter Property="TextWrapping" Value="NoWrap"/>
-                   <Setter Property="TextTrimming" Value="CharacterEllipsis"/>
-                  </DataTrigger>
-                  <DataTrigger Binding="{Binding DetailsExpanded}" Value="True">
-                   <Setter Property="TextWrapping" Value="Wrap"/>
-                   <Setter Property="TextTrimming" Value="None"/>
-                  </DataTrigger>
-                 </Style.Triggers>
-                </Style>
-               </TextBlock.Style>
               </TextBlock>
               <TextBlock Text="{Binding Id}" FontSize="10" Foreground="#71717A" TextWrapping="Wrap" Margin="0,3,0,0">
-               <TextBlock.Style>
-                <Style TargetType="TextBlock">
-                 <Style.Triggers>
-                  <DataTrigger Binding="{Binding IsUniversalInventory}" Value="True"><Setter Property="Visibility" Value="Collapsed"/></DataTrigger>
-                 </Style.Triggers>
-                </Style>
-               </TextBlock.Style>
               </TextBlock>
              </StackPanel>
-             <ToggleButton x:Name="InstalledDetailsToggle" Grid.Column="3" IsChecked="{Binding DetailsExpanded, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" Width="25" Height="25" Margin="8,0,3,0" FontSize="15" FontWeight="Bold" Foreground="#FFFFFF" Background="#52525B" BorderBrush="#71717A" BorderThickness="1" Cursor="Hand" FocusVisualStyle="{x:Null}" VerticalAlignment="Center" HorizontalAlignment="Right" ToolTip="Show installation details">
-              <ToggleButton.Template>
-               <ControlTemplate TargetType="ToggleButton">
-                <Border x:Name="ArrowSurface" Background="#52525B" BorderBrush="#71717A" BorderThickness="1" CornerRadius="5" SnapsToDevicePixels="True">
-                 <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" RecognizesAccessKey="True"/>
-                </Border>
-                <ControlTemplate.Triggers>
-                 <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="ArrowSurface" Property="Background" Value="#52525B"/><Setter TargetName="ArrowSurface" Property="BorderBrush" Value="#71717A"/></Trigger>
-                 <Trigger Property="IsPressed" Value="True"><Setter TargetName="ArrowSurface" Property="Background" Value="#52525B"/><Setter TargetName="ArrowSurface" Property="BorderBrush" Value="#71717A"/></Trigger>
-                 <Trigger Property="IsChecked" Value="True"><Setter Property="Content" Value="⌃"/></Trigger>
-                </ControlTemplate.Triggers>
-               </ControlTemplate>
-              </ToggleButton.Template>
-              <ToggleButton.Style>
-               <Style TargetType="ToggleButton">
-                <Setter Property="Visibility" Value="Collapsed"/>
-                <Setter Property="Content" Value="⌄"/>
-                <Style.Triggers>
-                 <DataTrigger Binding="{Binding IsUniversalInventory}" Value="True"><Setter Property="Visibility" Value="Visible"/></DataTrigger>
-                </Style.Triggers>
-               </Style>
-              </ToggleButton.Style>
-             </ToggleButton>
             </Grid>
             <Border Width="8" Height="8" HorizontalAlignment="Right" VerticalAlignment="Top" Margin="0,1,2,0"
                     Background="#3B82F6" CornerRadius="4" ToolTip="This app is installed"
@@ -4775,36 +5393,10 @@ Write-AMRLog ("Startup catalog ready: {0} preloaded icons from local cache. Cach
                 <DataTrigger Binding="{Binding IsInstalled}" Value="True">
                  <Setter Property="Visibility" Value="Visible"/>
                 </DataTrigger>
-                <DataTrigger Binding="{Binding IsUniversalInventory}" Value="True">
-                 <Setter Property="Visibility" Value="Collapsed"/>
-                </DataTrigger>
                </Style.Triggers>
               </Style>
              </Border.Style>
             </Border>
-            <Popup x:Name="InstalledDetailsPopup" PlacementTarget="{Binding ElementName=InstalledDetailsToggle}" Placement="Bottom" HorizontalOffset="-225" VerticalOffset="5" AllowsTransparency="True" StaysOpen="False" PopupAnimation="Fade" IsOpen="{Binding IsChecked, ElementName=InstalledDetailsToggle, Mode=OneWay}">
-             <Border x:Name="InstalledDetailsPanel" Width="250" Margin="0" Padding="8" Background="#202B3B" BorderBrush="#527AA8" BorderThickness="1" CornerRadius="7" SnapsToDevicePixels="True">
-             <StackPanel>
-              <TextBlock Text="Installation details" Foreground="#8FB8E8" FontSize="10" FontWeight="Bold" Margin="0,0,0,5"/>
-              <TextBlock Text="Full application name" Foreground="#94A3B8" FontSize="9"/>
-              <TextBlock Text="{Binding DisplayName}" Foreground="#E2E8F0" FontSize="10" TextWrapping="Wrap" Margin="0,1,0,5"/>
-              <TextBlock Text="Application ID" Foreground="#94A3B8" FontSize="9"/>
-              <TextBlock Text="{Binding Id}" Foreground="#E2E8F0" FontSize="10" TextWrapping="Wrap" Margin="0,1,0,5"/>
-              <TextBlock Text="Install path" Foreground="#94A3B8" FontSize="9"/>
-              <DockPanel LastChildFill="True" Margin="0,1,0,5">
-               <Button x:Name="InstalledCopyPathBtn" DockPanel.Dock="Right" Content="⧉" Tag="{Binding DisplayInstallPath}" Width="24" Height="22" Margin="6,0,0,0" Padding="0" FontSize="13" Foreground="#FFFFFF" Background="#465569" BorderBrush="#718096" BorderThickness="1" Cursor="Hand" FocusVisualStyle="{x:Null}" ToolTip="Copy installation path">
-                <Button.Style><Style TargetType="Button"><Setter Property="Visibility" Value="Collapsed"/><Style.Triggers><DataTrigger Binding="{Binding HasCopyableInstallPath}" Value="True"><Setter Property="Visibility" Value="Visible"/></DataTrigger></Style.Triggers></Style></Button.Style>
-               </Button>
-               <TextBlock Text="{Binding DisplayInstallPath, TargetNullValue='Not recorded by Windows', FallbackValue='Not recorded by Windows'}" Foreground="#E2E8F0" FontSize="10" TextWrapping="Wrap" VerticalAlignment="Center"/>
-              </DockPanel>
-              <TextBlock Text="Version" Foreground="#94A3B8" FontSize="9"/>
-              <TextBlock Text="{Binding DisplayVersion, TargetNullValue='Not recorded', FallbackValue='Not recorded'}" Foreground="#E2E8F0" FontSize="10" Margin="0,1,0,5"/>
-              <TextBlock Text="Publisher / Source" Foreground="#94A3B8" FontSize="9"/>
-              <TextBlock Text="{Binding Publisher}" Foreground="#E2E8F0" FontSize="10" TextWrapping="Wrap"/>
-              <TextBlock Text="{Binding Source}" Foreground="#94A3B8" FontSize="9" TextWrapping="Wrap" Margin="0,4,0,0"/>
-             </StackPanel>
-            </Border>
-            </Popup>
            </Grid>
           </Border>
           </Grid>
@@ -6149,6 +6741,7 @@ Write-AMRLog ("Startup catalog ready: {0} preloaded icons from local cache. Cach
        </StackPanel>
        <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
         <Button Name="ExportLogsBtn" Content="💾 Export Log File" Background="#2563EB" Foreground="#FFFFFF" BorderThickness="0" Margin="0,0,10,0"/>
+        <Button Name="LogShowAllBtn" Content="👁 Show All" Background="#0F766E" Foreground="#FFFFFF" BorderThickness="0" Margin="0,0,10,0"/>
         <Button Name="ClearAllLogsBtn" Content="🗑 Clear All Consoles" Background="#3F3F46" Foreground="#FFFFFF" BorderThickness="0"/>
        </StackPanel>
       </Grid>
@@ -6708,15 +7301,15 @@ function Remove-AMRUpdatePolicyValues {
 
 function Invoke-AMRUpdateProfile {
     param([ValidateSet('Recommended','Default','Restricted')][string]$Profile)
-    if (-not (Test-AMRAdmin)) { Show-AMRMessage 'This profile requires Administrator permissions. Restart AMR as Administrator.' 'Update Center' OK Warning | Out-Null; return }
+    if (-not (Test-AMRAdmin)) { Show-AMRMessageGlass 'This profile requires Administrator permissions. Restart AMR as Administrator.' 'Update Center' OK Warning | Out-Null; return }
     $managed = $false
     try { $cs = Get-CimInstance Win32_ComputerSystem -ErrorAction Stop; $managed = [bool]$cs.PartOfDomain } catch {}
-    if ($managed) { Show-AMRMessage 'This PC appears to be domain-managed. Group Policy or MDM may overwrite local Windows Update settings. AMR will not apply a profile to avoid fighting your organization policies.' 'Managed Device' OK Warning | Out-Null; return }
+    if ($managed) { Show-AMRMessageGlass 'This PC appears to be domain-managed. Group Policy or MDM may overwrite local Windows Update settings. AMR will not apply a profile to avoid fighting your organization policies.' 'Managed Device' OK Warning | Out-Null; return }
     if ($Profile -eq 'Restricted') {
-        $answer = Show-AMRMessage 'This advanced profile changes automatic-update policy (NoAutoUpdate=1). Security updates may not install automatically. It does not disable or delete Windows Update services, tasks, or caches. You can restore the previous policy using Undo Last Profile or Windows Default. Continue?' 'Restrict Automatic Updates' YesNo Warning
+        $answer = Show-AMRMessageGlass 'This advanced profile changes automatic-update policy (NoAutoUpdate=1). Security updates may not install automatically. It does not disable or delete Windows Update services, tasks, or caches. You can restore the previous policy using Undo Last Profile or Windows Default. Continue?' 'Restrict Automatic Updates' YesNo Warning
         if ($answer -ne 'Yes') { return }
     } elseif ($Profile -eq 'Default') {
-        $answer = Show-AMRMessage 'Restore Windows Update policy defaults? AMR will first save the exact current values, then remove only the known Windows Update profile values. This does not reset third-party/organization management outside these exact values.' 'Restore Windows Defaults' YesNo Warning
+        $answer = Show-AMRMessageGlass 'Restore Windows Update policy defaults? AMR will first save the exact current values, then remove only the known Windows Update profile values. This does not reset third-party/organization management outside these exact values.' 'Restore Windows Defaults' YesNo Warning
         if ($answer -ne 'Yes') { return }
     }
     $backup = $null
@@ -6769,7 +7362,7 @@ function Invoke-AMRUpdateProfile {
         if ($backup -and (Test-Path -LiteralPath $backup)) { try { Restore-AMRUpdateProfileBackup -Path $backup -Quiet } catch { $failure += ' | Automatic rollback failed: '+$_.Exception.Message } }
         (C 'AMRUpdateActionStatus').Text = 'Profile failed: '+$failure
         Write-AMRLog ('Windows Update profile failed: '+$failure) ERROR System
-        Show-AMRMessage $failure 'Windows Update Profile Failed' OK Error | Out-Null
+        Show-AMRMessageGlass $failure 'Windows Update Profile Failed' OK Error | Out-Null
     }
 }
 
@@ -6923,8 +7516,8 @@ function Start-AMRUpdateWorker {
     if ($script:AMRUpdateJob -and $script:AMRUpdateJob.State -in @('Running','NotStarted')) { (C 'AMRUpdateActionStatus').Text='An update operation is already running. Wait for it to finish.'; return }
     try { if ($script:AMRUpdateJob) { Remove-Job -Job $script:AMRUpdateJob -Force -ErrorAction SilentlyContinue } } catch {}
     $selectedIds=@($Selected | ForEach-Object { [string]$_.UpdateId } | Where-Object { $_ -match '^[0-9a-fA-F-]{36}$' } | Select-Object -Unique)
-    if ($Action -in @('Download','Install') -and -not (Test-AMRAdmin)) { Show-AMRMessage 'Downloading or installing Windows updates requires AMR to run as Administrator.' 'Administrator Required' OK Warning | Out-Null; return }
-    if ($Action -in @('Download','Install') -and $selectedIds.Count -eq 0) { Show-AMRMessage 'Select one or more updates first.' 'Update Center' OK Information | Out-Null; return }
+    if ($Action -in @('Download','Install') -and -not (Test-AMRAdmin)) { Show-AMRMessageGlass 'Downloading or installing Windows updates requires AMR to run as Administrator.' 'Administrator Required' OK Warning | Out-Null; return }
+    if ($Action -in @('Download','Install') -and $selectedIds.Count -eq 0) { Show-AMRMessageGlass 'Select one or more updates first.' 'Update Center' OK Information | Out-Null; return }
     $progressPath = Join-Path $env:TEMP ('AMR_WU_Search_' + [guid]::NewGuid().ToString('N') + '.status')
     $script:AMRUpdateProgressPath = $progressPath
     $worker = {
@@ -7084,6 +7677,19 @@ function Start-AMRUpdateWorker {
                 $pollMessage = [string]$pollError.Exception.Message
                 $pollLine = ''
                 try { $pollLine = [string]$pollError.InvocationInfo.Line } catch {}
+                # Diagnostics only: log what the worker result looked like when the property read failed.
+                try {
+                    $pollResultVar = Get-Variable -Name 'result' -ErrorAction SilentlyContinue
+                    $pollResultObject = if ($pollResultVar) { $pollResultVar.Value } else { $null }
+                    $pollResultMode = ''; $pollResultProps = ''; $pollResultOk = ''
+                    if ($null -ne $pollResultObject) {
+                        try { $pollResultMode = [string]$pollResultObject.PSObject.Properties['Mode'].Value } catch {}
+                        try { $pollResultOk = [string]$pollResultObject.PSObject.Properties['Ok'].Value } catch {}
+                        try { $pollResultProps = (@($pollResultObject.PSObject.Properties | ForEach-Object { $_.Name }) -join ',') } catch {}
+                    }
+                    $pollStateVar = Get-Variable -Name 'completedState' -ErrorAction SilentlyContinue
+                    Write-AMRLog ('Update worker polling error context | ExceptionType={0} | ErrorId={1} | ScriptLine={2} | ResultMode={3} | ResultOk={4} | ResultProperties=[{5}] | JobState={6}' -f $pollError.Exception.GetType().FullName,[string]$pollError.FullyQualifiedErrorId,[string]$pollError.InvocationInfo.ScriptLineNumber,$pollResultMode,$pollResultOk,$pollResultProps,$(if ($pollStateVar) { [string]$pollStateVar.Value } else { '' })) WARNING System
+                } catch {}
                 $pollDiagnostic = 'Update worker polling error: ' + $pollMessage
                 if ($pollLine) { $pollDiagnostic += ' | At: ' + $pollLine.Trim() }
                 try { $statusErrorControl = C 'AMRUpdateActionStatus'; if ($statusErrorControl) { $statusErrorControl.Text = $pollDiagnostic } } catch {}
@@ -7095,8 +7701,8 @@ function Start-AMRUpdateWorker {
 }
 
 function Invoke-AMRUpdateServiceRepair {
-    if (-not (Test-AMRAdmin)) { Show-AMRMessage 'Administrator permissions are required.' 'Update Repair' OK Warning | Out-Null; return }
-    $answer=Show-AMRMessage 'AMR will attempt to start the standard Windows Update services (BITS, Cryptographic Services and Windows Update) and verify their resulting states. This is a non-destructive service repair; it does not delete caches or reset update history. Continue?' 'Repair Update Services' YesNo Warning
+    if (-not (Test-AMRAdmin)) { Show-AMRMessageGlass 'Administrator permissions are required.' 'Update Repair' OK Warning | Out-Null; return }
+    $answer=Show-AMRMessageGlass 'AMR will attempt to start the standard Windows Update services (BITS, Cryptographic Services and Windows Update) and verify their resulting states. This is a non-destructive service repair; it does not delete caches or reset update history. Continue?' 'Repair Update Services' YesNo Warning
     if($answer -ne 'Yes'){return}
     $results=New-Object System.Collections.Generic.List[string]
     foreach($serviceName in @('cryptsvc','bits','wuauserv')){
@@ -7106,7 +7712,7 @@ function Invoke-AMRUpdateServiceRepair {
     (C 'AMRUpdateActionStatus').Text=($results -join ' | ')
     Write-AMRLog ('Windows Update service repair: '+($results -join '; ')) $(if($failed){'WARNING'}else{'SUCCESS'}) System
     Update-AMRUpdateCenterStatus
-    Show-AMRMessage (($results -join "`n")) 'Update Service Repair Results' OK $(if($failed){[System.Windows.MessageBoxImage]::Warning}else{[System.Windows.MessageBoxImage]::Information}) | Out-Null
+    Show-AMRMessageGlass (($results -join "`n")) 'Update Service Repair Results' OK $(if($failed){[System.Windows.MessageBoxImage]::Warning}else{[System.Windows.MessageBoxImage]::Information}) | Out-Null
 }
 
 # Four-column real virtualization for the existing Software card template.
@@ -7119,37 +7725,123 @@ try {
         $wpfReferences = @(
             [System.Windows.Controls.ItemsControl].Assembly.Location,
             [System.Windows.Media.Visual].Assembly.Location,
-            [System.Windows.DependencyObject].Assembly.Location
+            [System.Windows.DependencyObject].Assembly.Location,
+            # VirtualizingPanel inherits from types whose base chain lives in System.Xaml
+            # (System.Windows.Markup.IQueryAmbient); the compiler requires that reference.
+            [System.Windows.Markup.IQueryAmbient].Assembly.Location
         ) | Select-Object -Unique
         Add-Type -Language CSharp -ReferencedAssemblies $wpfReferences -TypeDefinition @'
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
+using System.Text;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Media;
+using System.Windows.Threading;
 
 namespace AMR {
+    // UI-thread timing aggregator (diagnostics only). Samples are folded into per-key
+    // count/total/max in memory; nothing touches the disk until Take() is called by a timer.
+    public static class PerfStats {
+        private static readonly Dictionary<string, long[]> Timers = new Dictionary<string, long[]>();
+        private static readonly Dictionary<string, long> Counters = new Dictionary<string, long>();
+        private static readonly object Gate = new object();
+
+        public static long Now() { return Stopwatch.GetTimestamp(); }
+
+        public static void Add(string key, long ticks) {
+            lock (Gate) {
+                long[] slot;
+                if (!Timers.TryGetValue(key, out slot)) { slot = new long[3]; Timers[key] = slot; }
+                slot[0]++;
+                slot[1] += ticks;
+                if (ticks > slot[2]) slot[2] = ticks;
+            }
+        }
+
+        public static void Count(string key, long amount) {
+            lock (Gate) {
+                long current;
+                Counters.TryGetValue(key, out current);
+                Counters[key] = current + amount;
+            }
+        }
+
+        // Returns one compact line and resets the window; null when nothing was recorded.
+        public static string Take() {
+            lock (Gate) {
+                if (Timers.Count == 0 && Counters.Count == 0) return null;
+                double toMs = 1000.0 / Stopwatch.Frequency;
+                StringBuilder text = new StringBuilder();
+                List<string> keys = new List<string>(Timers.Keys);
+                keys.Sort(StringComparer.Ordinal);
+                foreach (string key in keys) {
+                    long[] slot = Timers[key];
+                    if (text.Length > 0) text.Append(" ; ");
+                    text.Append(key).Append(" n=").Append(slot[0])
+                        .Append(" avgMs=").Append((slot[1] * toMs / slot[0]).ToString("0.00", System.Globalization.CultureInfo.InvariantCulture))
+                        .Append(" maxMs=").Append((slot[2] * toMs).ToString("0.00", System.Globalization.CultureInfo.InvariantCulture))
+                        .Append(" totalMs=").Append((slot[1] * toMs).ToString("0.0", System.Globalization.CultureInfo.InvariantCulture));
+                }
+                List<string> counterKeys = new List<string>(Counters.Keys);
+                counterKeys.Sort(StringComparer.Ordinal);
+                foreach (string key in counterKeys) {
+                    if (text.Length > 0) text.Append(" ; ");
+                    text.Append(key).Append('=').Append(Counters[key]);
+                }
+                Timers.Clear();
+                Counters.Clear();
+                return text.ToString();
+            }
+        }
+    }
+
+    // Diagnostics only: accumulates the time spent in a disposable generator scope.
+    internal sealed class AMRTimedScope : IDisposable {
+        private readonly IDisposable _inner;
+        private readonly long[] _acc;
+        public AMRTimedScope(IDisposable inner, long[] acc) { _inner = inner; _acc = acc; }
+        public void Dispose() {
+            long t = Stopwatch.GetTimestamp();
+            if (_inner != null) _inner.Dispose();
+            _acc[0] += Stopwatch.GetTimestamp() - t;
+        }
+    }
+
     // Four-column, vertically virtualized ItemsControl panel.
-    // Only viewport rows plus a small cache are generated; containers are recycled.
+    // The generator is the single source of truth: the item index of a realized child is always
+    // derived from the generator (IndexFromGeneratorPosition), never from a panel-side map.
+    //
+    // Realization windows (rows of ColumnCount items):
+    //   core     = visible rows plus CoreRows above and below. Always realized in the same pass.
+    //   extended = core plus a buffer, larger in the direction the user is scrolling
+    //              (AheadRows) than behind (BehindRows). Realized in small batches
+    //              (PrefetchBatchItems per pass) at Background priority, so a fast scroll finds
+    //              the cards already built, without ever creating a large block in one frame.
+    // Anything outside the extended window is recycled.
     public sealed class SoftwareVirtualizingUniformGridPanel : VirtualizingPanel {
         private const int ColumnCount = 4;
         private const double DefaultItemHeight = 76.0;
         private const double EndPadding = 24.0;
-        private const int CacheRows = 1;
-
-        private readonly SortedDictionary<int, UIElement> _realized =
-            new SortedDictionary<int, UIElement>();
+        private const int CoreRows = 1;
+        private const int AheadRows = 4;
+        private const int BehindRows = 2;
+        private const int PrefetchBatchItems = 8;
 
         private ScrollViewer _scrollHost;
         private double _viewportWidth = 800.0;
         private double _viewportHeight = 480.0;
         private double _verticalOffset;
+        private double _lastOffset;
+        private int _direction = 1;
+        private bool _prefetchScheduled;
         private double _extentHeight;
         private double _itemHeight = DefaultItemHeight;
 
-        public int RealizedItemCount { get { return _realized.Count; } }
+        public int RealizedItemCount { get { return InternalChildren.Count; } }
         public int TotalItemCount {
             get {
                 ItemsControl owner = ItemsControl.GetItemsOwner(this);
@@ -7158,15 +7850,24 @@ namespace AMR {
         }
         public int FirstRealizedIndex {
             get {
-                foreach (KeyValuePair<int, UIElement> item in _realized) return item.Key;
-                return -1;
+                UIElementCollection children = InternalChildren;
+                int first = -1;
+                for (int i = 0; i < children.Count; i++) {
+                    int index = ItemIndexOfChild(i);
+                    if (index >= 0 && (first < 0 || index < first)) first = index;
+                }
+                return first;
             }
         }
         public int LastRealizedIndex {
             get {
-                int result = -1;
-                foreach (KeyValuePair<int, UIElement> item in _realized) result = item.Key;
-                return result;
+                UIElementCollection children = InternalChildren;
+                int last = -1;
+                for (int i = 0; i < children.Count; i++) {
+                    int index = ItemIndexOfChild(i);
+                    if (index > last) last = index;
+                }
+                return last;
             }
         }
         public bool ScrollHostConnected {
@@ -7177,6 +7878,25 @@ namespace AMR {
         }
         public double LogicalExtentHeight { get { return _extentHeight; } }
         public double LogicalViewportHeight { get { return _viewportHeight; } }
+
+        // Item indexes of every currently realized child (used by the icon sync so it visits
+        // only the cards that exist, never the whole collection).
+        public int[] GetRealizedItemIndexes() {
+            UIElementCollection children = InternalChildren;
+            List<int> result = new List<int>(children.Count);
+            for (int i = 0; i < children.Count; i++) {
+                int index = ItemIndexOfChild(i);
+                if (index >= 0) result.Add(index);
+            }
+            return result.ToArray();
+        }
+
+        // Item index of the realized child at the given child position, or -1.
+        private int ItemIndexOfChild(int childIndex) {
+            IItemContainerGenerator generator = ItemContainerGenerator;
+            if (generator == null) return -1;
+            return generator.IndexFromGeneratorPosition(new GeneratorPosition(childIndex, 0));
+        }
 
         protected override void OnVisualParentChanged(DependencyObject oldParent) {
             base.OnVisualParentChanged(oldParent);
@@ -7212,6 +7932,7 @@ namespace AMR {
 
         private void OnScrollHostChanged(object sender, ScrollChangedEventArgs e) {
             _verticalOffset = _scrollHost == null ? 0.0 : _scrollHost.VerticalOffset;
+            PerfStats.Count("panel.scrollEvents", 1);
             InvalidateMeasure();
         }
 
@@ -7219,12 +7940,31 @@ namespace AMR {
             InvalidateMeasure();
         }
 
+        // Continue prefetching in a later, lower-priority pass so input and rendering stay first.
+        private void SchedulePrefetchPass() {
+            if (_prefetchScheduled) return;
+            _prefetchScheduled = true;
+            Dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(delegate {
+                _prefetchScheduled = false;
+                InvalidateMeasure();
+            }));
+        }
+
+        private string _surfaceTag = "catalog";
+
         protected override Size MeasureOverride(Size availableSize) {
+            long startTicks = Stopwatch.GetTimestamp();
             AttachScrollHost();
 
+            // Reading InternalChildren is what creates the item container generator for an
+            // items-host panel; ItemContainerGenerator is null until it has been read.
+            UIElementCollection children = InternalChildren;
+            IItemContainerGenerator generator = ItemContainerGenerator;
             ItemsControl owner = ItemsControl.GetItemsOwner(this);
-            if (owner == null) return new Size(0, 0);
+            if (owner == null || generator == null) return new Size(0, 0);
 
+            string tag = (owner.Uid == "AMR_INSTALLED_SURFACE_V1") ? "installed" : "catalog";
+            _surfaceTag = tag;
             int itemCount = owner.Items.Count;
             double width = availableSize.Width;
             if (Double.IsNaN(width) || Double.IsInfinity(width) || width <= 0) {
@@ -7242,97 +7982,218 @@ namespace AMR {
             _verticalOffset = _scrollHost == null ? 0.0 : Math.Max(0.0, _scrollHost.VerticalOffset);
             _itemHeight = DefaultItemHeight;
 
+            // Scroll direction decides which side gets the larger prefetch buffer.
+            if (_verticalOffset > _lastOffset + 0.5) _direction = 1;
+            else if (_verticalOffset < _lastOffset - 0.5) _direction = -1;
+            _lastOffset = _verticalOffset;
+
             int rowCount = (int)Math.Ceiling(itemCount / (double)ColumnCount);
             _extentHeight = rowCount == 0 ? 0.0 : (rowCount * _itemHeight) + EndPadding;
 
-            int firstRow = Math.Max(0, (int)Math.Floor(_verticalOffset / _itemHeight) - CacheRows);
-            int lastRow = Math.Min(rowCount - 1,
-                (int)Math.Ceiling((_verticalOffset + _viewportHeight) / _itemHeight) + CacheRows);
-            int firstIndex = rowCount == 0 ? 0 : firstRow * ColumnCount;
-            int lastIndex = rowCount == 0 ? -1 : Math.Min(itemCount - 1, ((lastRow + 1) * ColumnCount) - 1);
+            int coreFirstRow = Math.Max(0, (int)Math.Floor(_verticalOffset / _itemHeight) - CoreRows);
+            int coreLastRow = Math.Min(rowCount - 1,
+                (int)Math.Ceiling((_verticalOffset + _viewportHeight) / _itemHeight) + CoreRows);
+            int extFirstRow = Math.Max(0, coreFirstRow - ((_direction > 0 ? BehindRows : AheadRows) - CoreRows));
+            int extLastRow = Math.Min(rowCount - 1, coreLastRow + ((_direction > 0 ? AheadRows : BehindRows) - CoreRows));
+            if (rowCount == 0) { coreFirstRow = 0; coreLastRow = -1; extFirstRow = 0; extLastRow = -1; }
 
-            CleanUpItems(firstIndex, lastIndex);
+            int extFirstIndex = extFirstRow * ColumnCount;
+            int extLastIndex = rowCount == 0 ? -1 : Math.Min(itemCount - 1, ((extLastRow + 1) * ColumnCount) - 1);
 
-            if (lastIndex >= firstIndex) {
-                IItemContainerGenerator generator = ItemContainerGenerator;
-                for (int itemIndex = firstIndex; itemIndex <= lastIndex; itemIndex++) {
-                    UIElement child;
-                    if (_realized.TryGetValue(itemIndex, out child)) {
-                        child.Measure(new Size(_viewportWidth / ColumnCount, _itemHeight));
-                        continue;
-                    }
+            long setupEnd = Stopwatch.GetTimestamp();
+            CleanUpItems(extFirstIndex, extLastIndex);
+            long cleanEnd = Stopwatch.GetTimestamp();
 
+            Size cellSize = new Size(_viewportWidth / ColumnCount, _itemHeight);
+            long created = 0;
+            long existingTicks = 0, prepareTicks = 0, childMeasureNewTicks = 0, newCards = 0, recycledCards = 0;
+            int budget = PrefetchBatchItems;
+            bool pending = false;
+            long[] scopeAcc = new long[1];
+            long lookupTicks = 0, startAtTicks = 0, genTicks = 0, insertTicks = 0, prepTicks = 0;
+            long mNewTicks = 0, mRecTicks = 0, mExistTicks = 0, cNew = 0, cRec = 0, cExist = 0;
+            long mNewMax = 0, mRecMax = 0, genMax = 0, prepMax = 0;
+
+            // Rows in priority order: core first (all of it, this pass), then the buffer rows,
+            // the side the user is heading to first, nearest row first.
+            List<int> rowOrder = new List<int>();
+            for (int row = coreFirstRow; row <= coreLastRow; row++) rowOrder.Add(row);
+            if (_direction > 0) {
+                for (int row = coreLastRow + 1; row <= extLastRow; row++) rowOrder.Add(row);
+                for (int row = coreFirstRow - 1; row >= extFirstRow; row--) rowOrder.Add(row);
+            } else {
+                for (int row = coreFirstRow - 1; row >= extFirstRow; row--) rowOrder.Add(row);
+                for (int row = coreLastRow + 1; row <= extLastRow; row++) rowOrder.Add(row);
+            }
+
+            for (int orderIndex = 0; orderIndex < rowOrder.Count && !pending; orderIndex++) {
+                int row = rowOrder[orderIndex];
+                bool coreRow = row >= coreFirstRow && row <= coreLastRow;
+                int firstInRow = row * ColumnCount;
+                int lastInRow = Math.Min(itemCount - 1, firstInRow + ColumnCount - 1);
+                for (int itemIndex = firstInRow; itemIndex <= lastInRow; itemIndex++) {
+                    long lookupStart = Stopwatch.GetTimestamp();
                     GeneratorPosition position = generator.GeneratorPositionFromIndex(itemIndex);
-                    int childIndex = position.Index + (position.Offset == 0 ? 1 : 0);
-                    using (generator.StartAt(position, GeneratorDirection.Forward, true)) {
+                    lookupTicks += Stopwatch.GetTimestamp() - lookupStart;
+                    bool alreadyRealized = (position.Offset == 0);
+                    if (!alreadyRealized && !coreRow && budget <= 0) { pending = true; break; }
+
+                    // Offset 0: already realized at child position Index.
+                    // Offset > 0: unrealized, belongs right after child position Index.
+                    int childIndex = alreadyRealized ? position.Index : position.Index + 1;
+                    long itemStart = Stopwatch.GetTimestamp();
+                    long startAtBegin = Stopwatch.GetTimestamp();
+                    IDisposable startAtScope = generator.StartAt(position, GeneratorDirection.Forward, true);
+                    startAtTicks += Stopwatch.GetTimestamp() - startAtBegin;
+                    using (new AMRTimedScope(startAtScope, scopeAcc)) {
                         bool newlyRealized;
-                        child = generator.GenerateNext(out newlyRealized) as UIElement;
-                        if (child != null) {
-                            if (newlyRealized) {
-                                childIndex = Math.Max(0, Math.Min(childIndex, InternalChildren.Count));
-                                InsertInternalChild(childIndex, child);
-                                generator.PrepareItemContainer(child);
-                            }
-                            _realized[itemIndex] = child;
-                            child.Measure(new Size(_viewportWidth / ColumnCount, _itemHeight));
+                        long genBegin = Stopwatch.GetTimestamp();
+                        UIElement child = generator.GenerateNext(out newlyRealized) as UIElement;
+                        long genEnd = Stopwatch.GetTimestamp();
+                        genTicks += genEnd - genBegin;
+                        if (genEnd - genBegin > genMax) genMax = genEnd - genBegin;
+                        if (child == null) continue;
+
+                        // A container taken from the recycle queue is reported with newlyRealized == false,
+                        // yet it is not in this panel's children (it was removed when recycled). So the
+                        // test is "was the item unrealized" (Offset != 0), not newlyRealized alone.
+                        if (newlyRealized || !alreadyRealized) {
+                            long insBegin = Stopwatch.GetTimestamp();
+                            if (childIndex >= children.Count) AddInternalChild(child);
+                            else InsertInternalChild(childIndex, child);
+                            long insEnd = Stopwatch.GetTimestamp();
+                            insertTicks += insEnd - insBegin;
+                            generator.PrepareItemContainer(child);
+                            long prepEnd = Stopwatch.GetTimestamp();
+                            prepTicks += prepEnd - insEnd;
+                            if (prepEnd - insEnd > prepMax) prepMax = prepEnd - insEnd;
+                            created++;
+                            if (newlyRealized) newCards++; else recycledCards++;
+                            if (!coreRow) budget--;
+                            long preparedAt = Stopwatch.GetTimestamp();
+                            prepareTicks += preparedAt - itemStart;
+                            child.Measure(cellSize);
+                            long measuredAt = Stopwatch.GetTimestamp();
+                            childMeasureNewTicks += measuredAt - preparedAt;
+                            if (newlyRealized) { mNewTicks += measuredAt - preparedAt; cNew++; if (measuredAt - preparedAt > mNewMax) mNewMax = measuredAt - preparedAt; }
+                            else { mRecTicks += measuredAt - preparedAt; cRec++; if (measuredAt - preparedAt > mRecMax) mRecMax = measuredAt - preparedAt; }
+                            continue;
                         }
+                        long exMeasureBegin = Stopwatch.GetTimestamp();
+                        child.Measure(cellSize);
+                        mExistTicks += Stopwatch.GetTimestamp() - exMeasureBegin;
+                        cExist++;
                     }
+                    existingTicks += Stopwatch.GetTimestamp() - itemStart;
                 }
             }
 
+            if (pending) {
+                SchedulePrefetchPass();
+                PerfStats.Count("panel.prefetchPasses", 1);
+            }
+            if (created > 0) PerfStats.Count("panel.containersRealized", created);
+            if (newCards > 0) PerfStats.Count("panel.cardsBrandNew", newCards);
+            if (recycledCards > 0) PerfStats.Count("panel.cardsRecycledReused", recycledCards);
+            if (prepareTicks > 0) PerfStats.Add("panel.cardBind(generate+insert+prepare)", prepareTicks);
+            if (childMeasureNewTicks > 0) PerfStats.Add("panel.cardMeasure(new/rebound cards)", childMeasureNewTicks);
+            if (existingTicks > 0) PerfStats.Add("panel.existingCardsLoop", existingTicks);
+            long passEnd = Stopwatch.GetTimestamp();
+            PerfStats.Add("panel.measure", passEnd - startTicks);
+            // Diagnostics only: per-surface split of the same pass (keys m2.<surface>.*).
+            string k = "m2." + tag + ".";
+            PerfStats.Add(k + "pass", passEnd - startTicks);
+            PerfStats.Add(k + "setup(scroll/viewport/rows)", setupEnd - startTicks);
+            PerfStats.Add(k + "cleanUp(recycle)", cleanEnd - setupEnd);
+            if (created > 0 || cExist > 0) {
+                PerfStats.Add(k + "positionLookup", lookupTicks);
+                PerfStats.Add(k + "generatorStartAt", startAtTicks);
+                PerfStats.Add(k + "generatorScopeDispose", scopeAcc[0]);
+                if (genTicks > 0) PerfStats.Add(k + "generateNext", genTicks);
+                if (insertTicks > 0) PerfStats.Add(k + "insertChild", insertTicks);
+                if (prepTicks > 0) PerfStats.Add(k + "prepareContainer(bindings)", prepTicks);
+                if (mExistTicks > 0) PerfStats.Add(k + "measureExistingCards", mExistTicks);
+                long accounted = (cleanEnd - setupEnd) + lookupTicks + startAtTicks + scopeAcc[0] + genTicks + insertTicks + prepTicks + childMeasureNewTicks + mExistTicks;
+                long remainder = (passEnd - cleanEnd) - (accounted - (cleanEnd - setupEnd));
+                PerfStats.Add(k + "unattributedRemainder", remainder < 0 ? 0 : remainder);
+            }
+            if (cNew > 0) { PerfStats.Add(k + "measureNewCard", mNewTicks); PerfStats.Count(k + "cardsNew", cNew); PerfStats.Add(k + "maxMeasureNewCard", mNewMax); }
+            if (cRec > 0) { PerfStats.Add(k + "measureRecycledCard", mRecTicks); PerfStats.Count(k + "cardsRecycled", cRec); PerfStats.Add(k + "maxMeasureRecycledCard", mRecMax); }
+            if (genMax > 0) PerfStats.Add(k + "maxGenerateNextOneCard", genMax);
+            if (prepMax > 0) PerfStats.Add(k + "maxPrepareOneCard", prepMax);
+            if (cExist > 0) PerfStats.Count(k + "cardsExisting", cExist);
+
             // Return the full logical content height so the outer ScrollViewer
-            // gets a real extent. Only viewport rows plus one cache row exist
-            // in the visual tree; the 24px breathing room exists only at the
-            // actual end of the currently published list, never under each page.
+            // gets a real extent. Only the realized window exists in the visual tree;
+            // the 24px breathing room exists only at the actual end of the list.
             return new Size(_viewportWidth, _extentHeight);
         }
 
+        // Recycle every realized child whose item index lies outside [firstIndex, lastIndex].
         private void CleanUpItems(int firstIndex, int lastIndex) {
             IItemContainerGenerator generator = ItemContainerGenerator;
             IRecyclingItemContainerGenerator recycling = generator as IRecyclingItemContainerGenerator;
+            UIElementCollection children = InternalChildren;
+            long recycled = 0;
 
-            for (int childIndex = InternalChildren.Count - 1; childIndex >= 0; childIndex--) {
-                UIElement child = InternalChildren[childIndex];
-                int itemIndex = -1;
-                foreach (KeyValuePair<int, UIElement> pair in _realized) {
-                    if (Object.ReferenceEquals(pair.Value, child)) {
-                        itemIndex = pair.Key;
-                        break;
-                    }
-                }
-
+            for (int childIndex = children.Count - 1; childIndex >= 0; childIndex--) {
+                GeneratorPosition position = new GeneratorPosition(childIndex, 0);
+                int itemIndex = generator.IndexFromGeneratorPosition(position);
                 if (itemIndex >= firstIndex && itemIndex <= lastIndex) continue;
 
-                GeneratorPosition position = new GeneratorPosition(childIndex, 0);
                 if (recycling != null) recycling.Recycle(position, 1);
                 else generator.Remove(position, 1);
-
                 RemoveInternalChildRange(childIndex, 1);
-                if (itemIndex >= 0) _realized.Remove(itemIndex);
+                recycled++;
             }
+            if (recycled > 0) PerfStats.Count("panel.containersRecycled", recycled);
         }
 
         protected override Size ArrangeOverride(Size finalSize) {
+            long startTicks = Stopwatch.GetTimestamp();
+            IItemContainerGenerator generator = ItemContainerGenerator;
+            UIElementCollection children = InternalChildren;
+            if (generator == null) return finalSize;
+
             double columnWidth = Math.Max(1.0, finalSize.Width / ColumnCount);
-            foreach (KeyValuePair<int, UIElement> pair in _realized) {
-                int row = pair.Key / ColumnCount;
-                int column = pair.Key % ColumnCount;
-                double x = column * columnWidth;
-                double y = row * _itemHeight;
-                pair.Value.Arrange(new Rect(x, y, columnWidth, _itemHeight));
+            for (int childIndex = 0; childIndex < children.Count; childIndex++) {
+                int itemIndex = generator.IndexFromGeneratorPosition(new GeneratorPosition(childIndex, 0));
+                if (itemIndex < 0) continue;
+                int row = itemIndex / ColumnCount;
+                int column = itemIndex % ColumnCount;
+                children[childIndex].Arrange(new Rect(column * columnWidth, row * _itemHeight, columnWidth, _itemHeight));
             }
+            long arrangeTicks = Stopwatch.GetTimestamp() - startTicks;
+            PerfStats.Add("panel.arrange", arrangeTicks);
+            PerfStats.Add(_surfaceTag == "installed" ? "m2.installed.arrange" : "m2.catalog.arrange", arrangeTicks);
             return finalSize;
         }
 
         protected override void OnItemsChanged(object sender, ItemsChangedEventArgs args) {
             base.OnItemsChanged(sender, args);
 
-            if (args.Action == System.Collections.Specialized.NotifyCollectionChangedAction.Reset) {
-                try { ItemContainerGenerator.RemoveAll(); } catch { }
-                if (InternalChildren.Count > 0) RemoveInternalChildRange(0, InternalChildren.Count);
-                _realized.Clear();
-                _verticalOffset = 0.0;
-                if (_scrollHost != null) _scrollHost.ScrollToTop();
+            switch (args.Action) {
+                case System.Collections.Specialized.NotifyCollectionChangedAction.Reset:
+                    // The base panel has already cleared the generator and the children.
+                    _verticalOffset = 0.0;
+                    _lastOffset = 0.0;
+                    _direction = 1;
+                    if (_scrollHost != null) _scrollHost.ScrollToTop();
+                    break;
+
+                case System.Collections.Specialized.NotifyCollectionChangedAction.Remove:
+                case System.Collections.Specialized.NotifyCollectionChangedAction.Replace:
+                    // The generator has already dropped these containers; drop the matching children.
+                    if (args.ItemUICount > 0 && args.Position.Index >= 0) {
+                        RemoveInternalChildRange(args.Position.Index, args.ItemUICount);
+                    }
+                    break;
+
+                case System.Collections.Specialized.NotifyCollectionChangedAction.Move:
+                    if (args.ItemUICount > 0 && args.OldPosition.Index >= 0) {
+                        RemoveInternalChildRange(args.OldPosition.Index, args.ItemUICount);
+                    }
+                    break;
             }
 
             InvalidateMeasure();
@@ -7356,7 +8217,20 @@ namespace AMR {
     $script:SoftwareVirtualPanelReady = ($null -ne ('AMR.SoftwareVirtualizingUniformGridPanel' -as [type]))
 } catch {
     $script:SoftwareVirtualPanelReady = $false
+    $virtualPanelCompileError = $_
     Write-AMRLog ('Software virtualization panel type could not compile; keeping the original non-virtualized card panel as a safe fallback: ' + $_.Exception.Message) WARNING Software
+    # Diagnostics only: record exactly which assemblies were referenced and whether System.Xaml is loaded.
+    try {
+        $xamlLoadedFrom = 'not loaded'
+        foreach ($loadedAssembly in [System.AppDomain]::CurrentDomain.GetAssemblies()) {
+            if ($loadedAssembly.GetName().Name -eq 'System.Xaml') { $xamlLoadedFrom = [string]$loadedAssembly.Location }
+        }
+        $refVar = Get-Variable -Name 'wpfReferences' -ErrorAction SilentlyContinue
+        $refText = if ($refVar) { (@($refVar.Value) -join '; ') } else { '(reference list not built)' }
+        $innerText = ''
+        try { if ($virtualPanelCompileError.Exception.InnerException) { $innerText = $virtualPanelCompileError.Exception.InnerException.GetType().FullName + ': ' + $virtualPanelCompileError.Exception.InnerException.Message } } catch {}
+        Write-AMRLog ('Software virtualization compile diagnostics | ExceptionType={0} | PSVersion={1} | PSEdition={2} | CLR={3} | ReferencedAssemblies=[{4}] | System.Xaml loaded from=[{5}] | Inner=[{6}]' -f $virtualPanelCompileError.Exception.GetType().FullName,$PSVersionTable.PSVersion,$PSVersionTable.PSEdition,$PSVersionTable.CLRVersion,$refText,$xamlLoadedFrom,$innerText) WARNING Software
+    } catch {}
 }
 
 # Create a dedicated Installed ItemsControl using the exact catalog templates.
@@ -7366,7 +8240,8 @@ try {
     $script:SoftwareCatalogGrid = $script:Window.FindName('SoftwareGrid')
     $script:SoftwareOriginalItemsPanel = $script:SoftwareCatalogGrid.ItemsPanel
     $script:InstalledSoftwareGrid = New-Object System.Windows.Controls.ItemsControl
-    $script:InstalledSoftwareGrid.ItemTemplate = $script:SoftwareCatalogGrid.ItemTemplate
+    $installedCardTemplate = $script:Window.TryFindResource('AMRInstalledCardTemplate')
+    if ($null -ne $installedCardTemplate) { $script:InstalledSoftwareGrid.ItemTemplate = $installedCardTemplate } else { $script:InstalledSoftwareGrid.ItemTemplate = $script:SoftwareCatalogGrid.ItemTemplate }
     $script:InstalledSoftwareGrid.ItemsPanel = $script:SoftwareCatalogGrid.ItemsPanel
     $script:InstalledSoftwareGrid.ItemTemplateSelector = $script:SoftwareCatalogGrid.ItemTemplateSelector
     $script:InstalledSoftwareGrid.ItemContainerStyle = $script:SoftwareCatalogGrid.ItemContainerStyle
@@ -7414,6 +8289,8 @@ try {
         if ($fallbackSoftwareScroll) { $fallbackSoftwareScroll.CanContentScroll = $false }
     } catch {}
     $script:InstalledSoftwareGrid = $null
+    # Installed rows would then render in the catalog grid: give it the full card template.
+    try { $fallbackCardTemplate = $script:Window.TryFindResource('AMRInstalledCardTemplate'); if ($null -ne $fallbackCardTemplate -and $script:SoftwareCatalogGrid) { $script:SoftwareCatalogGrid.ItemTemplate = $fallbackCardTemplate } } catch {}
     Write-AMRLog ('Independent Installed visual surface could not initialize; original card panel fallback remains active: ' + $_.Exception.Message) WARNING Software
 }
 
@@ -7555,7 +8432,7 @@ foreach ($tweakName in $script:AMRBasicInfoNames) {
     $infoButton.Tag = $infoText
     $infoButton.Add_Click({
         $detail = [string]$infoButton.Tag
-        [void](Show-AMRMessage -Message $detail -Title 'AMR | Tweak Information' -Buttons OK -Icon Information)
+        [void](Show-AMRMessageGlass -Message $detail -Title 'AMR | Tweak Information' -Buttons OK -Icon Information)
     }.GetNewClosure())
     [System.Windows.Controls.Grid]::SetColumn($infoButton,1)
     [void]$rowGrid.Children.Add($infoButton)
@@ -9305,7 +10182,7 @@ function Open-AMRProgramFilesFolder {
         [void]$win.ShowDialog()
     } catch {
         try { Write-AMRLog ('Could not open AMR program files popup: ' + $_.Exception.Message) ERROR System } catch {}
-        try { Show-AMRMessage ('Could not open the AMR program files window: ' + $_.Exception.Message) 'AMR Program Files' OK Error | Out-Null } catch {}
+        try { Show-AMRMessageGlass ('Could not open the AMR program files window: ' + $_.Exception.Message) 'AMR Program Files' OK Error | Out-Null } catch {}
     }
 }
 
@@ -9976,16 +10853,23 @@ $kitTabs = C 'ToolKitSubTabs'
                 $activeSystemTabs = C 'OverviewSubTabs'
                 if ($activeSystemTabs -and $activeSystemTabs.SelectedItem) {
                     # Keep navigation immediate while giving the selected page a subtle root-only transition.
+                    $perfMainSel = Get-AMRPerfNow
                     Invoke-AMRNavigationTilePressAnimation -Element $activeSystemTabs.SelectedItem
                     Invoke-AMRSystemPageTransition -TabItem $activeSystemTabs.SelectedItem
+                    Add-AMRPerfSince 'ov.main.tileAndTransition' $perfMainSel
                     if ([string]$activeSystemTabs.SelectedItem.Header -eq 'Overview') {
                         try {
+                            $perfOv = Get-AMRPerfNow
+                            Set-AMRPerfMark 'overview.entryTelemetry(main)'
                             Start-AMROverviewTelemetry -Force
+                            Add-AMRPerfSince 'ov.main.telemetryForce' $perfOv
                             $overviewState = $script:OverviewTelemetryState
                             if ($overviewState -and -not $overviewState.InventoryCurrent -and
                                 ((Get-Date) - $overviewState.LastInventoryRefresh).TotalSeconds -ge $overviewState.InventoryIntervalSeconds) {
                                 $overviewState.LastInventoryRefresh = Get-Date
+                                $perfOv = Get-AMRPerfNow
                                 Start-AMROverviewInventoryRefresh
+                                Add-AMRPerfSince 'ov.main.inventoryRefreshStart' $perfOv
                             }
                             $overviewStatus = C 'ovLiveRefreshStatus'
                             if ($overviewStatus) { $overviewStatus.Text = 'Refreshing live system readings…' }
@@ -10035,6 +10919,7 @@ $kitTabs = C 'ToolKitSubTabs'
             # WPF can report a TabItem/content element as OriginalSource even when
             # OverviewSubTabs itself has changed selection.
             $selectedSystemPage = $this.SelectedItem
+            Set-AMRPerfMark ('sel:' + (Get-AMRPerfTabHeader $selectedSystemPage))
             if ($selectedSystemPage -and [string]$selectedSystemPage.Header -eq 'Startups') {
                 if (-not $script:StartupAutoFirstRefreshDone -and
                     -not $script:StartupEntryWorkQueued -and
@@ -10055,8 +10940,12 @@ $kitTabs = C 'ToolKitSubTabs'
                             if (-not $startupHostPanel) { throw 'Startup applications panel is unavailable.' }
                             # Match the real Refresh button action, including its visual
                             # feedback and installed-inventory refresh.
+                            $perfFirst = Get-AMRPerfNow
+                            Set-AMRPerfMark 'startups.firstRefresh'
                             try { Start-AMRRefreshButtonAnimation -Button (C 'AMRStartupRefreshBtn') } catch {}
+                            Add-AMRPerfSince 'startups.refreshButtonAnim' $perfFirst
                             Refresh-AMRStartupManager -RefreshInventory
+                            Add-AMRPerfSince 'startups.firstRefreshTotalSync' $perfFirst
                             $script:StartupAutoFirstRefreshDone = $true
                         } catch {
                             $script:StartupAutoFirstRefreshDone = $false
@@ -10068,23 +10957,34 @@ $kitTabs = C 'ToolKitSubTabs'
                 }
             }
             if ($_.OriginalSource -ne $this) { return }
+            $perfSel = Get-AMRPerfNow
             Update-AMRSmartSearchContext
+            Add-AMRPerfSince 'ov.sel.smartSearchContext' $perfSel
             $selectedSystemPage = $this.SelectedItem
             if ($selectedSystemPage) {
                 # Animate only the page surface: subtle, smooth, and layout-neutral.
+                $perfSel = Get-AMRPerfNow
                 Invoke-AMRNavigationTilePressAnimation -Element $selectedSystemPage
+                Add-AMRPerfSince 'ov.sel.tilePressAnim' $perfSel
+                $perfSel = Get-AMRPerfNow
                 Invoke-AMRSystemPageTransition -TabItem $selectedSystemPage
+                Add-AMRPerfSince 'ov.sel.pageTransition' $perfSel
 
                 # Overview must perform a fresh live sample when the user opens it,
                 # rather than relying only on the startup snapshot or placeholder text.
                 if ([string]$selectedSystemPage.Header -eq 'Overview') {
                     try {
+                        $perfOv = Get-AMRPerfNow
+                        Set-AMRPerfMark 'overview.entryTelemetry'
                         Start-AMROverviewTelemetry -Force
+                        Add-AMRPerfSince 'ov.sel.telemetryForce' $perfOv
                         $overviewState = $script:OverviewTelemetryState
                         if ($overviewState -and -not $overviewState.InventoryCurrent -and
                             ((Get-Date) - $overviewState.LastInventoryRefresh).TotalSeconds -ge $overviewState.InventoryIntervalSeconds) {
                             $overviewState.LastInventoryRefresh = Get-Date
+                            $perfOv = Get-AMRPerfNow
                             Start-AMROverviewInventoryRefresh
+                            Add-AMRPerfSince 'ov.sel.inventoryRefreshStart' $perfOv
                         }
                         $overviewStatus = C 'ovLiveRefreshStatus'
                         if ($overviewStatus) { $overviewStatus.Text = 'Refreshing live system readings…' }
@@ -10154,7 +11054,7 @@ try {
     $logInteractiveButtonNames = @(
         'LogCopyAllBtn','LogCopySystemBtn','LogCopyToolsBtn','LogCopyOverviewBtn',
         'LogCopySoftwareBtn','LogCopyCustomizeBtn','LogCopyTweaksBtn','LogCopyCleanupBtn',
-        'ExportLogsBtn','ClearAllLogsBtn','DriverLogRefreshBtn','DriverLogCopyBtn','DriverLogExportBtn'
+        'ExportLogsBtn','LogShowAllBtn','ClearAllLogsBtn','DriverLogRefreshBtn','DriverLogCopyBtn','DriverLogExportBtn'
     )
     foreach ($logButtonName in $logInteractiveButtonNames) {
         $logButton = C $logButtonName
@@ -10213,57 +11113,17 @@ foreach ($buttonName in $logCopyTargets.Keys) {
                     [System.Windows.Clipboard]::SetText([string]$target.Text)
                     Write-AMRLog ("Copied the visible {0} log console." -f $targetKey) SUCCESS System
                 } else {
-                    Show-AMRMessage 'There is no log text to copy yet.' 'Copy Logs' OK Information | Out-Null
+                    Show-AMRMessageGlass 'There is no log text to copy yet.' 'Copy Logs' OK Information | Out-Null
                 }
             } catch {
-                Show-AMRMessage ('Could not copy log text: ' + $_.Exception.Message) 'Copy Logs' OK Warning | Out-Null
+                Show-AMRMessageGlass ('Could not copy log text: ' + $_.Exception.Message) 'Copy Logs' OK Warning | Out-Null
             }
         }.GetNewClosure())
     }
 }
 
-# Hydrate the UI consoles with recent events written before the WPF log pump
-# was initialized. Startup events are already persisted to the daily log file;
-# without this step the on-screen consoles can look empty until a new action logs.
-try {
-    if (Test-Path -LiteralPath $script:LogFile) {
-        $startupLogLines = @(Get-Content -LiteralPath $script:LogFile -Tail 500 -ErrorAction Stop)
-        if ($startupLogLines.Count -gt 0) {
-            $allStartupText = New-Object 'System.Collections.Generic.List[string]'
-            $areaStartupText = @{}
-            foreach ($startupLine in $startupLogLines) {
-                $lineText = [string]$startupLine
-                # Keep verbose DEBUG entries on disk only; UI panes show actionable levels.
-                if ($lineText -match '^\[[^\]]+\] \[DEBUG\] \[') { continue }
-                [void]$allStartupText.Add($lineText)
-                if ($lineText -match '^\[[^\]]+\] \[[^\]]+\] \[(?<Area>[^\]]+)\]') {
-                    $areaName = [string]$matches['Area']
-                    if (-not $areaStartupText.ContainsKey($areaName)) {
-                        $areaStartupText[$areaName] = New-Object 'System.Collections.Generic.List[string]'
-                    }
-                    [void]$areaStartupText[$areaName].Add($lineText)
-                    if ($areaName -in @('Network','Security','Optimize','Backup','Activation')) {
-                        if (-not $areaStartupText.ContainsKey('Tools')) { $areaStartupText['Tools'] = New-Object 'System.Collections.Generic.List[string]' }
-                        $areaStartupText['Tools'].Add($lineText)
-                    }
-                }
-            }
-            if ($script:LogControls['All']) {
-                $script:LogControls['All'].Text = $allStartupText -join "`r`n"
-                Trim-AMRLogTextBox -Control $script:LogControls['All'] -MaxChars $script:LogUIRetentionChars
-            }
-            foreach ($areaName in $areaStartupText.Keys) {
-                $areaControl = $script:LogControls[$areaName]
-                if ($areaControl) {
-                    $areaControl.Text = $areaStartupText[$areaName] -join "`r`n"
-                    Trim-AMRLogTextBox -Control $areaControl -MaxChars $script:LogUIRetentionChars
-                }
-            }
-        }
-    }
-} catch {
-    Write-AMRDiagnostic -Severity 'WARNING' -Area 'Logging' -Operation 'HydrateStartupLogViews' -Message 'Could not preload recent persisted log entries into the UI consoles.' -ErrorRecord $_ -Target $script:LogFile
-}
+# Each session starts with empty in-app consoles and shows only its own lines. The daily log
+# file is not read back into the UI (it stays fully written by the background disk writer).
 
 Start-AMRLogUIPump
 $script:Window.Add_Closed({
@@ -10320,6 +11180,15 @@ $script:Window.Add_Closed({
         if($gpuJob){if('AMRRunspaceCleanupV1' -as [type]){[AMRRunspaceCleanupV1]::Queue($gpuJob.PowerShell,$gpuJob.Runspace)}else{try{$gpuJob.PowerShell.Stop()}catch{};try{$gpuJob.PowerShell.Dispose()}catch{};try{$gpuJob.Runspace.Close()}catch{};try{$gpuJob.Runspace.Dispose()}catch{}};$script:OverviewTelemetryState.GpuCurrent=$null}
         $networkJob=$script:OverviewTelemetryState.NetworkCurrent
         if($networkJob){if('AMRRunspaceCleanupV1' -as [type]){[AMRRunspaceCleanupV1]::Queue($networkJob.PowerShell,$networkJob.Runspace)}else{try{$networkJob.PowerShell.Stop()}catch{};try{$networkJob.PowerShell.Dispose()}catch{};try{$networkJob.Runspace.Close()}catch{};try{$networkJob.Runspace.Dispose()}catch{}};$script:OverviewTelemetryState.NetworkCurrent=$null}
+        # Idle persistent sensor runspaces (a runspace that still belongs to a running job was queued above).
+        try { foreach($statKey in @($script:OverviewSensorRunspaceStats.Keys)){ $statItem=$script:OverviewSensorRunspaceStats[$statKey]; Write-AMRLog ('LIVE_SENSOR [Runspace] shutdown key={0} created={1} reused={2} stillRegistered={3}' -f $statKey,$statItem.Created,$statItem.Reused,$script:OverviewSensorRunspaces.ContainsKey($statKey)) INFO Overview } } catch {}
+        foreach($sensorKey in @($script:OverviewSensorRunspaces.Keys)){
+            $sensorRunspace=$script:OverviewSensorRunspaces[$sensorKey]
+            $alreadyQueued=$false
+            foreach($closingJob in @($diskJob,$activityJob,$gpuJob,$networkJob)){if($closingJob -and [object]::ReferenceEquals($closingJob.Runspace,$sensorRunspace)){$alreadyQueued=$true}}
+            if($sensorRunspace -and -not $alreadyQueued){if('AMRRunspaceCleanupV1' -as [type]){[AMRRunspaceCleanupV1]::Queue($null,$sensorRunspace)}else{try{$sensorRunspace.Close()}catch{};try{$sensorRunspace.Dispose()}catch{}}}
+        }
+        $script:OverviewSensorRunspaces.Clear()
     }
     if ($script:IconRefreshTimer) {
         try { $script:IconRefreshTimer.Stop() } catch {}
@@ -10358,15 +11227,36 @@ $script:Window.Add_Closed({
             $script:InstalledScanState.Current = $null
         }
     } catch {}
+    # Session end line (with open duration) goes to the same daily log file, then the disk queue is flushed.
+    try {
+        $sessionOpen = (Get-Date) - $script:AMRSessionStartedAt
+        [AMRLogDiskWriter]::Enqueue(('[{0}] [INFO] [System] ===== SESSION END | Id={1} | OpenDuration={2:00}:{3:00}:{4:00} =====' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss.fff'),$script:AMRSessionId,[int][math]::Floor($sessionOpen.TotalHours),$sessionOpen.Minutes,$sessionOpen.Seconds))
+    } catch {}
     # Flush the independent disk queue only after all window-owned workers are stopped.
     try { [AMRLogDiskWriter]::Shutdown() } catch {}
 })
 
 # Logs Tab Actions
+(C 'LogShowAllBtn').Add_Click({
+    try {
+        $script:LogUIShowAll = -not [bool]$script:LogUIShowAll
+        $showAllButton = C 'LogShowAllBtn'
+        if ($showAllButton) { $showAllButton.Content = $(if ($script:LogUIShowAll) { '📋 Summary Only' } else { '👁 Show All' }) }
+        foreach ($dirtyKey in @('All','System','Overview','Software','Customize','Tweaks','Cleanup','Tools')) { $script:LogUIDirty[$dirtyKey] = $true }
+        Invoke-AMRLogUIPumpTick
+    } catch {
+        Write-AMRDiagnostic -Severity 'WARNING' -Area 'Logging' -Operation 'ToggleShowAllLogs' -Message 'Could not switch the in-app log view.' -ErrorRecord $_
+    }
+})
+
 (C 'ClearAllLogsBtn').Add_Click({
     foreach ($ctl in $script:LogControls.Values) {
         if ($ctl) { $ctl.Text = "" }
     }
+    try {
+        $script:LogUIRing.Clear()
+        foreach ($appendedKey in @($script:LogUIAppended.Keys)) { $script:LogUIAppended[$appendedKey] = 0 }
+    } catch {}
     Write-AMRLog "All log consoles cleared." INFO System
 })
 
@@ -10381,7 +11271,7 @@ $driverLogRefreshAction = {
 (C 'DriverLogSeverityFilter').Add_SelectionChanged($driverLogRefreshAction)
 (C 'DriverLogCopyBtn').Add_Click({
     try { [System.Windows.Clipboard]::SetText([string](C 'DriverLogConsole').Text); Write-AMRLog 'Copied the visible Driver Center diagnostic events.' SUCCESS System }
-    catch { Show-AMRMessage ('Could not copy Driver Center diagnostics: ' + $_.Exception.Message) 'Copy Diagnostics' OK Warning | Out-Null }
+    catch { Show-AMRMessageGlass ('Could not copy Driver Center diagnostics: ' + $_.Exception.Message) 'Copy Diagnostics' OK Warning | Out-Null }
 })
 (C 'DriverLogExportBtn').Add_Click({
     try {
@@ -10399,9 +11289,9 @@ $driverLogRefreshAction = {
         if (Test-Path -LiteralPath $script:DriverDiagnosticFile -PathType Leaf) { Copy-Item -LiteralPath $script:DriverDiagnosticFile -Destination $destination -Force -ErrorAction Stop }
         else { [System.IO.File]::WriteAllText($destination,'',([System.Text.UTF8Encoding]::new($false))) }
         $exportedFiles += $destination
-        Show-AMRMessage ('Driver Center diagnostics exported (' + $exportedFiles.Count + ' file(s)):' + "`n" + ($exportedFiles -join "`n")) 'Driver Diagnostics Export' OK Information | Out-Null
+        Show-AMRMessageGlass ('Driver Center diagnostics exported (' + $exportedFiles.Count + ' file(s)):' + "`n" + ($exportedFiles -join "`n")) 'Driver Diagnostics Export' OK Information | Out-Null
         Write-AMRLog ('Exported Driver Center diagnostic log: ' + $destination) SUCCESS System
-    } catch { Write-AMRDriverDiagnostic -Severity ERROR -Operation LogExport -Stage Failed -Message 'Could not export Driver Center diagnostics.' -ErrorRecord $_; Show-AMRMessage ('Export failed: ' + $_.Exception.Message) 'Driver Diagnostics Export' OK Error | Out-Null }
+    } catch { Write-AMRDriverDiagnostic -Severity ERROR -Operation LogExport -Stage Failed -Message 'Could not export Driver Center diagnostics.' -ErrorRecord $_; Show-AMRMessageGlass ('Export failed: ' + $_.Exception.Message) 'Driver Diagnostics Export' OK Error | Out-Null }
 })
 $script:DriverLogRefreshTimer = New-Object System.Windows.Threading.DispatcherTimer
 $script:DriverLogRefreshTimer.Interval = [TimeSpan]::FromSeconds(2)
@@ -10414,7 +11304,7 @@ $script:DriverLogRefreshTimer.Add_Tick({
     }
 })
 $script:DriverLogRefreshTimer.Start()
-Refresh-AMRDriverLogView -Force
+Add-AMRDeferredStartupAction -Name 'DriverLogView' -Action { Refresh-AMRDriverLogView -Force }
 
 (C 'ExportLogsBtn').Add_Click({
     try {
@@ -10436,11 +11326,11 @@ Refresh-AMRDriverLogView -Force
         if ($diagnosticExported) { $exportMessage += "`nApplication diagnostics:`n$diagnosticExportPath" }
         if ($driverDiagnosticExported) { $exportMessage += "`nDriver Center diagnostics:`n$driverDiagnosticExportPath" }
         if (-not $diagnosticExported -and -not $driverDiagnosticExported) { $exportMessage += "`nNo diagnostic files exist yet." }
-        Show-AMRMessage $exportMessage "Export Complete" OK Information | Out-Null
+        Show-AMRMessageGlass $exportMessage "Export Complete" OK Information | Out-Null
         Write-AMRLog "Exported application log to: $exportPath" SUCCESS System
     } catch {
         Write-AMRDiagnostic -Severity 'ERROR' -Area 'Logging' -Operation 'ExportLogs' -Message 'Could not export application/diagnostic logs.' -ErrorRecord $_
-        Show-AMRMessage "Failed to export logs: $_" "Export Error" OK Error | Out-Null
+        Show-AMRMessageGlass "Failed to export logs: $_" "Export Error" OK Error | Out-Null
     }
 })
 
@@ -11247,7 +12137,7 @@ function Apply-AMROverviewSnapshot {
         }
         if($null -eq $Snapshot.CPUPercent){$cpuGaugeValue=C 'ovLiveCPUValue';if($cpuGaugeValue){$cpuGaugeValue.Text=if($Snapshot.CPUSensorError){'N/A'}else{'Sampling…'}}}
         $nowForLog=Get-Date
-        $shouldLogSensors=(($nowForLog-$script:OverviewTelemetryState.LastSensorLog).TotalSeconds -ge 5)
+        $shouldLogSensors=(($nowForLog-$script:OverviewTelemetryState.LastSensorLog).TotalSeconds -ge 30)
         if($shouldLogSensors){
             $script:OverviewTelemetryState.LastSensorLog=$nowForLog
         $stamp=(Get-Date).ToString('o')
@@ -11421,10 +12311,12 @@ function Start-AMROverviewInventoryRefresh {
     if(-not $state -or $state.InventoryCurrent){return}
     $rs=$null;$ps=$null
     try {
+        $perfInv = Get-AMRPerfNow
         $rs=[System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace()
         $rs.ApartmentState=[System.Threading.ApartmentState]::MTA
         $rs.ThreadOptions=[System.Management.Automation.Runspaces.PSThreadOptions]::ReuseThread
         $rs.Open()
+        Add-AMRPerfSince 'overview.inventoryRunspaceOpen' $perfInv
         $ps=[PowerShell]::Create();$ps.Runspace=$rs
         [void]$ps.AddScript($script:OverviewTelemetryWorker).AddArgument($false).AddArgument($true)
         $async=$ps.BeginInvoke()
@@ -11436,19 +12328,63 @@ function Start-AMROverviewInventoryRefresh {
     }
 }
 
+# One persistent runspace per independent sensor. The previous code created and opened a new
+# runspace for every sample on the UI thread. The sample scripts, their intervals, the timeout
+# handling and the one-job-per-sensor rule are unchanged; scripts run in a local scope so no
+# variables leak from one sample to the next (same isolation as a fresh runspace).
+$script:OverviewSensorRunspaces = @{}
+# Diagnostics only: per-sensor counters for the create / reuse / replace log lines.
+$script:OverviewSensorRunspaceStats = @{}
+function Get-AMROverviewSensorRunspace {
+    param([Parameter(Mandatory=$true)][string]$Key)
+    $existing = $script:OverviewSensorRunspaces[$Key]
+    $sensorStat = $null
+    try {
+        $sensorStat = $script:OverviewSensorRunspaceStats[$Key]
+        if (-not $sensorStat) { $sensorStat = [pscustomobject]@{ Created = 0; Reused = 0 }; $script:OverviewSensorRunspaceStats[$Key] = $sensorStat }
+    } catch {}
+    if ($existing) {
+        $usable = $false
+        try {
+            $usable = ($existing.RunspaceStateInfo.State -eq [System.Management.Automation.Runspaces.RunspaceState]::Opened -and
+                       $existing.RunspaceAvailability -eq [System.Management.Automation.Runspaces.RunspaceAvailability]::Available)
+        } catch { $usable = $false }
+        if ($usable) {
+            # Log the first reuse and then every 200th, so the log shows reuse without one line per sample.
+            try {
+                $sensorStat.Reused = [int]$sensorStat.Reused + 1
+                if ($sensorStat.Reused -eq 1 -or ($sensorStat.Reused % 200) -eq 0) {
+                    Write-AMRLog ('LIVE_SENSOR [Runspace] reused key={0} id={1} reuseCount={2} createdCount={3}' -f $Key,$existing.InstanceId,$sensorStat.Reused,$sensorStat.Created) INFO Overview
+                }
+            } catch {}
+            return $existing
+        }
+        try { Write-AMRLog ('LIVE_SENSOR [Runspace] key={0} id={1} not reusable (state={2}, availability={3}); disposing and creating a new one.' -f $Key,$existing.InstanceId,$existing.RunspaceStateInfo.State,$existing.RunspaceAvailability) WARNING Overview } catch {}
+        [void]$script:OverviewSensorRunspaces.Remove($Key)
+        try { $existing.Dispose() } catch {}
+    }
+    $runspace = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace()
+    $runspace.ApartmentState = [System.Threading.ApartmentState]::MTA
+    $runspace.ThreadOptions = [System.Management.Automation.Runspaces.PSThreadOptions]::ReuseThread
+    $runspace.Open()
+    $script:OverviewSensorRunspaces[$Key] = $runspace
+    try {
+        $sensorStat.Created = [int]$sensorStat.Created + 1
+        Write-AMRLog ('LIVE_SENSOR [Runspace] created key={0} id={1} createdCount={2} activeRunspaces={3}' -f $Key,$runspace.InstanceId,$sensorStat.Created,$script:OverviewSensorRunspaces.Count) INFO Overview
+    } catch {}
+    return $runspace
+}
+
 function Start-AMROverviewNetworkTelemetry {
     $state=$script:OverviewTelemetryState
     if(-not $state -or $state.NetworkCurrent){return}
     $rs=$null;$ps=$null
     try{
-        $rs=[System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace()
-        $rs.ApartmentState=[System.Threading.ApartmentState]::MTA
-        $rs.ThreadOptions=[System.Management.Automation.Runspaces.PSThreadOptions]::ReuseThread
-        $rs.Open()
+        $rs=Get-AMROverviewSensorRunspace -Key 'Network'
         $ps=[PowerShell]::Create();$ps.Runspace=$rs
         $now=Get-Date;$doInternetProbe=(($now-$state.LastInternetProbe).TotalSeconds -ge 5)
         if($doInternetProbe){$state.LastInternetProbe=$now}
-        [void]$ps.AddScript($script:OverviewNetworkTelemetryWorker).AddArgument([bool]$doInternetProbe).AddArgument($state.LastInternetReachable)
+        [void]$ps.AddScript($script:OverviewNetworkTelemetryWorker,$true).AddArgument([bool]$doInternetProbe).AddArgument($state.LastInternetReachable)
         $async=$ps.BeginInvoke()
         $state.NetworkCurrent=[pscustomobject]@{PowerShell=$ps;Runspace=$rs;Async=$async;StartedAt=(Get-Date)}
     }catch{
@@ -11463,12 +12399,9 @@ function Start-AMROverviewGpuTelemetry {
     if(-not $state -or $state.GpuCurrent){return}
     $rs=$null;$ps=$null
     try{
-        $rs=[System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace()
-        $rs.ApartmentState=[System.Threading.ApartmentState]::MTA
-        $rs.ThreadOptions=[System.Management.Automation.Runspaces.PSThreadOptions]::ReuseThread
-        $rs.Open()
+        $rs=Get-AMROverviewSensorRunspace -Key 'Gpu'
         $ps=[PowerShell]::Create();$ps.Runspace=$rs
-        [void]$ps.AddScript($script:OverviewGpuTelemetryWorker)
+        [void]$ps.AddScript($script:OverviewGpuTelemetryWorker,$true)
         $async=$ps.BeginInvoke()
         $state.GpuCurrent=[pscustomobject]@{PowerShell=$ps;Runspace=$rs;Async=$async;StartedAt=(Get-Date)}
     }catch{
@@ -11483,11 +12416,9 @@ function Start-AMROverviewDiskTelemetry {
     if(-not $state -or $state.DiskCurrent){return}
     $rs=$null;$ps=$null
     try{
-        $rs=[System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace()
-        $rs.ApartmentState=[System.Threading.ApartmentState]::MTA
-        $rs.ThreadOptions=[System.Management.Automation.Runspaces.PSThreadOptions]::ReuseThread
-        $rs.Open();$ps=[PowerShell]::Create();$ps.Runspace=$rs
-        [void]$ps.AddScript($script:OverviewDiskTelemetryWorker)
+        $rs=Get-AMROverviewSensorRunspace -Key 'Disk'
+        $ps=[PowerShell]::Create();$ps.Runspace=$rs
+        [void]$ps.AddScript($script:OverviewDiskTelemetryWorker,$true)
         $async=$ps.BeginInvoke()
         $state.DiskCurrent=[pscustomobject]@{PowerShell=$ps;Runspace=$rs;Async=$async;StartedAt=(Get-Date)}
     }catch{
@@ -11502,11 +12433,9 @@ function Start-AMROverviewActivityTelemetry {
     if(-not $state -or $state.ActivityCurrent){return}
     $rs=$null;$ps=$null
     try{
-        $rs=[System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace()
-        $rs.ApartmentState=[System.Threading.ApartmentState]::MTA
-        $rs.ThreadOptions=[System.Management.Automation.Runspaces.PSThreadOptions]::ReuseThread
-        $rs.Open();$ps=[PowerShell]::Create();$ps.Runspace=$rs
-        [void]$ps.AddScript($script:OverviewActivityTelemetryWorker)
+        $rs=Get-AMROverviewSensorRunspace -Key 'Activity'
+        $ps=[PowerShell]::Create();$ps.Runspace=$rs
+        [void]$ps.AddScript($script:OverviewActivityTelemetryWorker,$true)
         $async=$ps.BeginInvoke()
         $state.ActivityCurrent=[pscustomobject]@{PowerShell=$ps;Runspace=$rs;Async=$async;StartedAt=(Get-Date)}
     }catch{
@@ -11522,12 +12451,16 @@ function Start-AMROverviewTelemetry {
     if ($Force) { $state.LastInventoryRefresh = [DateTime]::MinValue }
     if (-not $state.HasInitialSnapshot) {
         try {
+            $perfFs = Get-AMRPerfNow
             $fastSnapshot = Get-AMROverviewFastSnapshot
+            Add-AMRPerfSince 'overview.getFastSnapshotSync' $perfFs
             if ($fastSnapshot) {
                 $state.DiskRows=@($fastSnapshot.DiskRows)
                 $state.Processes=$fastSnapshot.Processes
                 $state.ProcessThreads=$fastSnapshot.ProcessThreads
+                $perfFs = Get-AMRPerfNow
                 Apply-AMROverviewSnapshot -Snapshot $fastSnapshot
+                Add-AMRPerfSince 'overview.applyInitialSnapshot' $perfFs
                 $state.HasInitialSnapshot = $true
             }
         } catch {
@@ -11549,14 +12482,17 @@ function Start-AMROverviewTelemetry {
     $runspace = $state.FastRunspace; $powerShell = $null
     try {
         if(-not $runspace) {
+            $perfRsOpen = Get-AMRPerfNow
             $runspace = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace()
             $runspace.ApartmentState = [System.Threading.ApartmentState]::MTA
             $runspace.ThreadOptions = [System.Management.Automation.Runspaces.PSThreadOptions]::ReuseThread
             $runspace.Open()
             $state.FastRunspace = $runspace
             $state.FastRunspaceInitialized = $false
+            Add-AMRPerfSince 'overview.fastRunspaceOpen' $perfRsOpen
         }
         if(-not $state.FastRunspaceInitialized) {
+            $perfBoot = Get-AMRPerfNow
             $bootstrapPowerShell = [PowerShell]::Create(); $bootstrapPowerShell.Runspace = $runspace
             try {
                 [void]$bootstrapPowerShell.AddScript($script:OverviewNativeBridgeBootstrap)
@@ -11565,7 +12501,7 @@ function Start-AMROverviewTelemetry {
                 if($bootstrapResult.Count -eq 0 -or -not $bootstrapResult[$bootstrapResult.Count-1].NativeBridgeReady) { throw 'Native sensor bridge self-test returned no valid result' }
                 $state.FastRunspaceInitialized = $true
                 Write-AMRLog ('LIVE_SENSOR [Engine] native bridge ready; GetSystemTimes counters={0}; physical RAM={1:N0} bytes.' -f $bootstrapResult[$bootstrapResult.Count-1].CpuCounterCount,$bootstrapResult[$bootstrapResult.Count-1].TotalPhysicalBytes) INFO Overview
-            } finally { try { $bootstrapPowerShell.Dispose() } catch {} }
+            } finally { try { $bootstrapPowerShell.Dispose() } catch {}; Add-AMRPerfSince 'overview.nativeBridgeBootstrap' $perfBoot }
         }
         $powerShell = [PowerShell]::Create(); $powerShell.Runspace = $runspace
         $nowForProbe=Get-Date
@@ -11581,6 +12517,8 @@ function Start-AMROverviewTelemetry {
             $state.Timer = New-Object System.Windows.Threading.DispatcherTimer
             $state.Timer.Interval = [TimeSpan]::FromMilliseconds(750)
             $state.Timer.Add_Tick(({
+                $perfOvTick = Get-AMRPerfNow
+                try {
                 $activeState = $telemetryState
                 if ($null -eq $activeState) { return }
                 # Network polling is independent; adapter/provider delays never hold CPU/RAM values.
@@ -11594,42 +12532,42 @@ function Start-AMROverviewTelemetry {
                                 foreach($propertyName in @('NetworkConnected','NetworkStatus','NetworkSensorError','NetRxBytes','NetTxBytes','NetworkAdapter','IPv4','Gateway','DNS','LinkMbps','InternetReachable')){$activeState.$propertyName=$networkSnapshot.$propertyName};$activeState.LastInternetReachable=$networkSnapshot.InternetReachable
                             }
                         }catch{$activeState.NetworkStatus='Sensor unavailable';$activeState.NetworkSensorError=$_.Exception.Message;$activeState.NetRxBytes=$null;$activeState.NetTxBytes=$null;$activeState.PreviousNetworkSample=$null;Write-AMRLog ('LIVE_SENSOR [Network] worker failed: '+$_.Exception.Message) WARNING Overview}
-                        finally{try{$networkJob.PowerShell.Dispose()}catch{};try{$networkJob.Runspace.Close()}catch{};try{$networkJob.Runspace.Dispose()}catch{};$activeState.NetworkCurrent=$null;$activeState.NetworkLastSample=Get-Date}
+                        finally{try{$networkJob.PowerShell.Dispose()}catch{};$activeState.NetworkCurrent=$null;$activeState.NetworkLastSample=Get-Date}
                     }elseif(((Get-Date)-$networkJob.StartedAt).TotalSeconds -gt $activeState.NetworkTimeoutSeconds){
                         if('AMRRunspaceCleanupV1' -as [type]){[AMRRunspaceCleanupV1]::Queue($networkJob.PowerShell,$networkJob.Runspace)}else{try{$networkJob.PowerShell.Stop()}catch{};try{$networkJob.PowerShell.Dispose()}catch{};try{$networkJob.Runspace.Close()}catch{};try{$networkJob.Runspace.Dispose()}catch{}}
-                        $activeState.NetworkCurrent=$null;$activeState.NetworkLastSample=Get-Date;$activeState.NetworkStatus='Sensor unavailable';$activeState.NetworkSensorError='Network provider timed out; CPU/RAM/GPU continue independently';$activeState.NetRxBytes=$null;$activeState.NetTxBytes=$null;$activeState.PreviousNetworkSample=$null
+                        [void]$script:OverviewSensorRunspaces.Remove('Network');$activeState.NetworkCurrent=$null;$activeState.NetworkLastSample=Get-Date;$activeState.NetworkStatus='Sensor unavailable';$activeState.NetworkSensorError='Network provider timed out; CPU/RAM/GPU continue independently';$activeState.NetRxBytes=$null;$activeState.NetTxBytes=$null;$activeState.PreviousNetworkSample=$null
                         Write-AMRLog 'LIVE_SENSOR [Network] provider timed out; only network sampling was cancelled.' WARNING Overview
                     }
                 }
-                if(-not $activeState.NetworkCurrent -and ((Get-Date)-$activeState.NetworkLastSample).TotalSeconds -ge $activeState.NetworkIntervalSeconds){Start-AMROverviewNetworkTelemetry}
+                if(-not $activeState.NetworkCurrent -and ((Get-Date)-$activeState.NetworkLastSample).TotalSeconds -ge $activeState.NetworkIntervalSeconds){$perfSt=Get-AMRPerfNow;Start-AMROverviewNetworkTelemetry;Add-AMRPerfSince 'overview.startNetwork' $perfSt}
                 # Disk capacity is isolated from CPU/RAM; a slow removable or unhealthy drive cannot stall live CPU samples.
                 if($activeState.DiskCurrent){
                     $diskJob=$activeState.DiskCurrent
                     if($diskJob.Async.IsCompleted){
                         try{$diskResult=@($diskJob.PowerShell.EndInvoke($diskJob.Async));if($diskResult.Count -gt 0 -and $diskResult[$diskResult.Count-1]){$diskSnapshot=$diskResult[$diskResult.Count-1];$activeState.DiskRows=@($diskSnapshot.DiskRows);$activeState.DiskSensorError=[string]$diskSnapshot.DiskSensorError}}
                         catch{$activeState.DiskSensorError=$_.Exception.Message;Write-AMRLog ('LIVE_SENSOR [Disk] worker failed: '+$_.Exception.Message) WARNING Overview}
-                        finally{try{$diskJob.PowerShell.Dispose()}catch{};try{$diskJob.Runspace.Close()}catch{};try{$diskJob.Runspace.Dispose()}catch{};$activeState.DiskCurrent=$null;$activeState.DiskLastSample=Get-Date}
+                        finally{try{$diskJob.PowerShell.Dispose()}catch{};$activeState.DiskCurrent=$null;$activeState.DiskLastSample=Get-Date}
                     }elseif(((Get-Date)-$diskJob.StartedAt).TotalSeconds -gt $activeState.DiskTimeoutSeconds){
                         if('AMRRunspaceCleanupV1' -as [type]){[AMRRunspaceCleanupV1]::Queue($diskJob.PowerShell,$diskJob.Runspace)}else{try{$diskJob.PowerShell.Stop()}catch{};try{$diskJob.PowerShell.Dispose()}catch{};try{$diskJob.Runspace.Close()}catch{};try{$diskJob.Runspace.Dispose()}catch{}}
-                        $activeState.DiskCurrent=$null;$activeState.DiskLastSample=Get-Date;$activeState.DiskSensorError='Disk provider timed out; CPU/RAM/network/GPU continue independently'
+                        [void]$script:OverviewSensorRunspaces.Remove('Disk');$activeState.DiskCurrent=$null;$activeState.DiskLastSample=Get-Date;$activeState.DiskSensorError='Disk provider timed out; CPU/RAM/network/GPU continue independently'
                         Write-AMRLog 'LIVE_SENSOR [Disk] provider timed out; only disk sampling was cancelled.' WARNING Overview
                     }
                 }
-                if(-not $activeState.DiskCurrent -and ((Get-Date)-$activeState.DiskLastSample).TotalSeconds -ge $activeState.DiskIntervalSeconds){Start-AMROverviewDiskTelemetry}
+                if(-not $activeState.DiskCurrent -and ((Get-Date)-$activeState.DiskLastSample).TotalSeconds -ge $activeState.DiskIntervalSeconds){$perfSt=Get-AMRPerfNow;Start-AMROverviewDiskTelemetry;Add-AMRPerfSince 'overview.startDisk' $perfSt}
                 # Process/thread enumeration is isolated so access-denied processes cannot stop CPU/RAM polling.
                 if($activeState.ActivityCurrent){
                     $activityJob=$activeState.ActivityCurrent
                     if($activityJob.Async.IsCompleted){
                         try{$activityResult=@($activityJob.PowerShell.EndInvoke($activityJob.Async));if($activityResult.Count -gt 0 -and $activityResult[$activityResult.Count-1]){$activitySnapshot=$activityResult[$activityResult.Count-1];$activeState.Processes=$activitySnapshot.Processes;$activeState.ProcessThreads=$activitySnapshot.ProcessThreads;$activeState.ProcessSensorError=[string]$activitySnapshot.ProcessSensorError}}
                         catch{$activeState.ProcessSensorError=$_.Exception.Message;Write-AMRLog ('LIVE_SENSOR [Activity] worker failed: '+$_.Exception.Message) WARNING Overview}
-                        finally{try{$activityJob.PowerShell.Dispose()}catch{};try{$activityJob.Runspace.Close()}catch{};try{$activityJob.Runspace.Dispose()}catch{};$activeState.ActivityCurrent=$null;$activeState.ActivityLastSample=Get-Date}
+                        finally{try{$activityJob.PowerShell.Dispose()}catch{};$activeState.ActivityCurrent=$null;$activeState.ActivityLastSample=Get-Date}
                     }elseif(((Get-Date)-$activityJob.StartedAt).TotalSeconds -gt $activeState.ActivityTimeoutSeconds){
                         if('AMRRunspaceCleanupV1' -as [type]){[AMRRunspaceCleanupV1]::Queue($activityJob.PowerShell,$activityJob.Runspace)}else{try{$activityJob.PowerShell.Stop()}catch{};try{$activityJob.PowerShell.Dispose()}catch{};try{$activityJob.Runspace.Close()}catch{};try{$activityJob.Runspace.Dispose()}catch{}}
-                        $activeState.ActivityCurrent=$null;$activeState.ActivityLastSample=Get-Date;$activeState.ProcessSensorError='Process/thread provider timed out; other sensors continue independently'
+                        [void]$script:OverviewSensorRunspaces.Remove('Activity');$activeState.ActivityCurrent=$null;$activeState.ActivityLastSample=Get-Date;$activeState.ProcessSensorError='Process/thread provider timed out; other sensors continue independently'
                         Write-AMRLog 'LIVE_SENSOR [Activity] provider timed out; only activity sampling was cancelled.' WARNING Overview
                     }
                 }
-                if(-not $activeState.ActivityCurrent -and ((Get-Date)-$activeState.ActivityLastSample).TotalSeconds -ge $activeState.ActivityIntervalSeconds){Start-AMROverviewActivityTelemetry}
+                if(-not $activeState.ActivityCurrent -and ((Get-Date)-$activeState.ActivityLastSample).TotalSeconds -ge $activeState.ActivityIntervalSeconds){$perfSt=Get-AMRPerfNow;Start-AMROverviewActivityTelemetry;Add-AMRPerfSince 'overview.startActivity' $perfSt}
                 # Poll GPU independently; a timeout affects only the GPU sensor.
                 if($activeState.GpuCurrent){
                     $gpuJob=$activeState.GpuCurrent
@@ -11647,15 +12585,15 @@ function Start-AMROverviewTelemetry {
                                 Write-AMRLog ('LIVE_SENSOR [GPU] source='+$activeState.GPUSensorSource+' value='+$(if($null -ne $activeState.GPUPercent){$activeState.GPUPercent}else{'Unavailable'})+' status='+$(if($null -ne $activeState.GPUPercent){'success'}else{'unavailable'})+' error='+$activeState.GPUSensorError) $(if($null -ne $activeState.GPUPercent){'INFO'}else{'WARNING'}) Overview
                             }
                         }catch{$activeState.GPUPercent=$null;$activeState.GPUSensorError=$_.Exception.Message;Write-AMRLog ('LIVE_SENSOR [GPU] worker failed: '+$_.Exception.Message) WARNING Overview}
-                        finally{try{$gpuJob.PowerShell.Dispose()}catch{};try{$gpuJob.Runspace.Close()}catch{};try{$gpuJob.Runspace.Dispose()}catch{};$activeState.GpuCurrent=$null;$activeState.GpuLastSample=Get-Date}
+                        finally{try{$gpuJob.PowerShell.Dispose()}catch{};$activeState.GpuCurrent=$null;$activeState.GpuLastSample=Get-Date}
                     }elseif(((Get-Date)-$gpuJob.StartedAt).TotalSeconds -gt $activeState.GpuTimeoutSeconds){
                         if('AMRRunspaceCleanupV1' -as [type]){[AMRRunspaceCleanupV1]::Queue($gpuJob.PowerShell,$gpuJob.Runspace)}else{try{$gpuJob.PowerShell.Stop()}catch{};try{$gpuJob.PowerShell.Dispose()}catch{};try{$gpuJob.Runspace.Close()}catch{};try{$gpuJob.Runspace.Dispose()}catch{}}
-                        $activeState.GpuCurrent=$null;$activeState.GpuLastSample=Get-Date;$activeState.GPUPercent=$null;$activeState.GPUSensorError='GPU provider timed out; other sensors continue normally'
+                        [void]$script:OverviewSensorRunspaces.Remove('Gpu');$activeState.GpuCurrent=$null;$activeState.GpuLastSample=Get-Date;$activeState.GPUPercent=$null;$activeState.GPUSensorError='GPU provider timed out; other sensors continue normally'
                         $gpuDetail=C 'ovLiveGPUDetail';if($gpuDetail){$gpuDetail.Text='GPU provider timed out · CPU/RAM/network remain independent'}
                         Write-AMRLog 'LIVE_SENSOR [GPU] provider exceeded its 12-second timeout; only GPU sampling was cancelled.' WARNING Overview
                     }
                 }
-                if(-not $activeState.GpuCurrent -and ((Get-Date)-$activeState.GpuLastSample).TotalSeconds -ge $activeState.GpuIntervalSeconds){Start-AMROverviewGpuTelemetry}
+                if(-not $activeState.GpuCurrent -and ((Get-Date)-$activeState.GpuLastSample).TotalSeconds -ge $activeState.GpuIntervalSeconds){$perfSt=Get-AMRPerfNow;Start-AMROverviewGpuTelemetry;Add-AMRPerfSince 'overview.startGpu' $perfSt}
                 $pulseControl=C 'ovLiveRefreshStatus'
                 if($pulseControl){
                     $pulseTime=(Get-Date).ToString('HH:mm:ss')
@@ -11714,7 +12652,9 @@ function Start-AMROverviewTelemetry {
                             $liveSnapshot.Processes=$activeState.Processes
                             $liveSnapshot.ProcessThreads=$activeState.ProcessThreads
                             $liveSnapshot.ProcessSensorError=[string]$activeState.ProcessSensorError
+                            $perfApply = Get-AMRPerfNow
                             Apply-AMROverviewSnapshot -Snapshot $liveSnapshot -FastOnly
+                            Add-AMRPerfSince 'overview.applyLiveSnapshot' $perfApply
                             $activeState.LastSuccessfulSample=Get-Date
                         }
                         else {
@@ -11742,6 +12682,7 @@ function Start-AMROverviewTelemetry {
                     return
                 }
                 if (-not $activeState.Current -and (Get-Date) -ge $activeState.NextRefresh) { Start-AMROverviewTelemetry }
+                } finally { Add-AMRPerfSince 'overview.telemetryTick' $perfOvTick }
             }).GetNewClosure())
             $state.Timer.Start()
         }
@@ -11761,10 +12702,15 @@ function Start-AMROverviewTelemetry {
 function Update-AMROverviewData { Start-AMROverviewTelemetry -Force }
 
 function Refresh-AMROverview {
+    param([switch]$DeferRestorePoint)
     $wg = Get-Command winget.exe -ErrorAction SilentlyContinue
     if ($wg) { (C 'WingetHeader').Text = 'WINGET ENGINE READY' } else { (C 'WingetHeader').Text = 'WINGET NOT FOUND' }
     Start-AMROverviewTelemetry -Force
-    Update-AMRDriverRestorePointStatus
+    if ($DeferRestorePoint) {
+        Add-AMRDeferredStartupAction -Name 'DriverRestorePointStatus' -Action { Update-AMRDriverRestorePointStatus }
+    } else {
+        Update-AMRDriverRestorePointStatus
+    }
 }
 
 # Refresh-button visuals and click animation: intentionally limited to the three requested buttons.
@@ -11954,11 +12900,20 @@ function Get-AMRComputerRestorePoints {
 function ConvertFrom-AMRRestorePointTime {
     param([object]$Value)
     if ($null -eq $Value) { return $null }
+    if ($Value -is [datetime]) { return [datetime]$Value }
     $raw = [string]$Value
-    try {
-        if ($raw -match '^\d{14}\.\d{6}[+-]\d{3}$') { return [System.Management.ManagementDateTimeConverter]::ToDateTime($raw) }
-        return [datetime]$Value
-    } catch { return $null }
+    if ($raw -match '^(\d{14})\.(\d{6})([+-])(\d{3})$') {
+        # DMTF datetime. Parse by hand so the worker needs no extra assembly: the text is local
+        # time plus its UTC offset in minutes.
+        try {
+            $local = [datetime]::ParseExact($Matches[1],'yyyyMMddHHmmss',[System.Globalization.CultureInfo]::InvariantCulture)
+            $offsetMinutes = [int]$Matches[4]; if ($Matches[3] -eq '-') { $offsetMinutes = -$offsetMinutes }
+            $utc = [datetime]::SpecifyKind($local.AddMinutes(-$offsetMinutes),[System.DateTimeKind]::Utc)
+            return $utc.ToLocalTime()
+        } catch {}
+        try { return [System.Management.ManagementDateTimeConverter]::ToDateTime($raw) } catch { return $null }
+    }
+    try { return [datetime]$Value } catch { return $null }
 }
 
 function New-AMRDriverSafetyRestorePoint {
@@ -12196,7 +13151,7 @@ function Get-AMRRecordedDriverRestorePoint {
     return [pscustomobject]@{ State=$state; Point=$matches[0] }
 }
 
-function Update-AMRDriverRestorePointStatus {
+function Update-AMRDriverRestorePointStatusCore {
     try {
         $record = Get-AMRRecordedDriverRestorePoint
         $when = try { ([datetime]$record.State.CreationTime).ToString('dd MMM yyyy  ·  hh:mm tt') } catch { [string]$record.State.CreationTime }
@@ -12219,8 +13174,22 @@ function Update-AMRDriverRestorePointStatus {
     }
 }
 
+# A13c: measured wrapper. The status query reads the Windows restore-point inventory on the UI thread
+# (up to 5 s timeout), so its real duration is logged to find out whether it causes UI stalls.
+function Update-AMRDriverRestorePointStatus {
+    $watch = [System.Diagnostics.Stopwatch]::StartNew()
+    try { Update-AMRDriverRestorePointStatusCore }
+    finally {
+        $watch.Stop()
+        try {
+            $ms = [long]$watch.ElapsedMilliseconds
+            Write-AMRDriverDiagnostic -Severity $(if ($ms -ge 250) { 'WARNING' } else { 'TRACE' }) -Operation 'RestorePoint' -Stage 'StatusQueryTiming' -Message ('Restore-point status query ran on the UI thread for {0} ms.' -f $ms) -Source 'Update-AMRDriverRestorePointStatus' -DurationMs $ms
+        } catch {}
+    }
+}
+
 function Invoke-AMRDriverSmartRestore {
-    if($script:DriverManagedJob -or $script:DriverActionJob -or $script:DriverScanJob -or $script:DriverBatchActive -or $script:DriverSmartQueueActive -or $script:DriverOperationState.State -eq 'Running'){Show-AMRMessage 'System Restore cannot be started while another driver operation is active. Wait for it to finish first.' 'Driver Operation Busy' OK Warning | Out-Null;return}
+    if($script:DriverManagedJob -or $script:DriverActionJob -or $script:DriverScanJob -or $script:DriverBatchActive -or $script:DriverSmartQueueActive -or $script:DriverOperationState.State -eq 'Running'){Show-AMRMessageGlass 'System Restore cannot be started while another driver operation is active. Wait for it to finish first.' 'Driver Operation Busy' OK Warning | Out-Null;return}
     try {
         $record = Get-AMRRecordedDriverRestorePoint -InventoryTimeoutSec 12
         $sequence = [long]$record.Point.SequenceNumber
@@ -12233,21 +13202,21 @@ function Invoke-AMRDriverSmartRestore {
         }
         $created = try { ([datetime]$record.State.CreationTime).ToString('dd MMM yyyy  ·  hh:mm tt') } catch { [string]$record.State.CreationTime }
         $restoreOriginNote = if ([bool]$record.State.IsReusedExisting) { "Windows did not create a new point because a recent checkpoint already exists. AMR is reusing this existing Windows checkpoint; it was NOT created by AMR.`n`n" } else { "This is the new Windows checkpoint created and verified by AMR.`n`n" }; $message = "${restoreOriginNote}The exact Windows restore point was found and verified:`n`n$description`nSequence: $sequence`nCreated: $created`n`nWindows will start System Restore using this exact sequence number. This can close applications and restart Windows. Save your work before continuing. Other restore points will not be deleted.`n`nStart restoring now?"
-        if ((Show-AMRMessage $message 'Confirm Smart Restore' YesNo Warning) -ne 'Yes') { return }
+        if ((Show-AMRMessageGlass $message 'Confirm Smart Restore' YesNo Warning) -ne 'Yes') { return }
         $restoreCommand = Get-Command -Name Restore-Computer -ErrorAction SilentlyContinue
         if (-not $restoreCommand -or -not $restoreCommand.Parameters.ContainsKey('RestorePoint')) {
-            Show-AMRMessage 'This Windows PowerShell installation does not expose Restore-Computer with its exact RestorePoint parameter. The target point was verified, but AMR cannot safely invoke an exact-point restore. No restore point was changed.' 'Smart Restore Unavailable' OK Warning | Out-Null
+            Show-AMRMessageGlass 'This Windows PowerShell installation does not expose Restore-Computer with its exact RestorePoint parameter. The target point was verified, but AMR cannot safely invoke an exact-point restore. No restore point was changed.' 'Smart Restore Unavailable' OK Warning | Out-Null
             return
         }
-        Show-AMRMessage 'The exact restore-point sequence is being handed to Windows. Windows System Restore will restart the computer; the restore completes during startup. Do not power off the computer during the process.' 'Starting Smart Restore' OK Warning | Out-Null
+        Show-AMRMessageGlass 'The exact restore-point sequence is being handed to Windows. Windows System Restore will restart the computer; the restore completes during startup. Do not power off the computer during the process.' 'Starting Smart Restore' OK Warning | Out-Null
         Write-AMRLog (("Smart Restore requested for {0} Windows restore point #{1} ({2})." -f $(if ([bool]$record.State.IsReusedExisting) { 'reused existing' } else { 'AMR-created' }),$sequence,$description)) WARNING Overview
         Restore-Computer -RestorePoint ([int]$sequence) -Confirm:$false -ErrorAction Stop
     } catch {
         $detail = [string]$_.Exception.Message
         if ($detail -like 'No verified driver restore point*') {
-            Show-AMRMessage 'There is no verified Driver Safety Point yet. Create a restore point first; Smart Restore will then target that exact checkpoint.' 'Smart Restore Not Ready' OK Information | Out-Null
+            Show-AMRMessageGlass 'There is no verified Driver Safety Point yet. Create a restore point first; Smart Restore will then target that exact checkpoint.' 'Smart Restore Not Ready' OK Information | Out-Null
         } else {
-            Show-AMRMessage ('Smart Restore could not continue: ' + $detail + "`n`nNo alternative restore point will be selected automatically.") 'Smart Restore Error' OK Error | Out-Null
+            Show-AMRMessageGlass ('Smart Restore could not continue: ' + $detail + "`n`nNo alternative restore point will be selected automatically.") 'Smart Restore Error' OK Error | Out-Null
         }
         Write-AMRLog ('Smart Restore validation/invocation failed: ' + $detail) ERROR Overview
     }
@@ -12294,6 +13263,10 @@ function Complete-AMRDriverRestorePointWorker {
     # operation that may have started after this job's shared slot was cleared.
     $isCurrentJob = $false
     try { $isCurrentJob = [object]::ReferenceEquals($script:DriverManagedJob,$job) } catch {}
+    if (-not $isCurrentJob -and $script:DriverManagedJob -and $operationId) {
+        # A13e: same operation by id counts as the shared job, so the shared slot can never stay stuck after a restore point.
+        try { if ($script:DriverManagedJob.PSObject.Properties['AMROperationId'] -and [string]$script:DriverManagedJob.AMROperationId -eq $operationId) { $isCurrentJob = $true } } catch {}
+    }
     $ownsRestoreOperation = ($script:DriverOperationState -and [string]$script:DriverOperationState.Name -eq 'RestorePoint' -and $job.PSObject.Properties['AMRGeneration'] -and [int]$job.AMRGeneration -eq [int]$script:DriverOperationState.Generation)
     $isActiveRestoreJob = $false
     try { $isActiveRestoreJob = [object]::ReferenceEquals($script:DriverRestorePointActiveJob,$job) } catch {}
@@ -12307,7 +13280,7 @@ function Complete-AMRDriverRestorePointWorker {
         if ($isCurrentJob) { $script:DriverManagedProgressFile = $null; $script:DriverManagedWorkerId = $null; $script:DriverManagedWatchdog = $null }
         $script:DriverRestorePointActiveJob = $null
         if ($script:DriverOperationState -and [string]$script:DriverOperationState.Name -eq 'RestorePoint') {
-            $script:DriverOperationState = [pscustomobject]@{ Name='Idle'; State='Idle'; StartedAt=$null; Generation=[int]$script:DriverOperationState.Generation; CanCancel=$false; Status='Ready' }
+            $script:DriverOperationState = [pscustomobject]@{ Name='Idle'; State='Idle'; StartedAt=$null; Generation=[int]$script:DriverOperationState.Generation; CanCancel=$false; Status='Ready'; PartialShown=$false }
         }
         try { Release-AMRDriverOperationLock } catch {}
         try { (C 'DriverOperationProgress').IsIndeterminate=$false; (C 'DriverOperationProgress').Visibility='Collapsed' } catch {}
@@ -12324,9 +13297,9 @@ function Complete-AMRDriverRestorePointWorker {
 
 (C 'DriverCreateRestorePointBtn').Add_Click({
     $button = C 'DriverCreateRestorePointBtn'
-    if ($script:DriverManagedJob -or $script:DriverActionJob -or $script:DriverScanJob -or $script:DriverBatchActive -or $script:DriverSmartQueueActive -or $script:DriverOperationState.State -eq 'Running') { Show-AMRMessage 'Wait for the current driver operation to finish before creating a restore point.' 'Driver Operation Busy' OK Information | Out-Null; return }
-    if (-not (Test-AMRAdmin)) { Show-AMRMessage 'Creating and verifying a Windows restore point requires Administrator privileges. Close the utility and launch it again as Administrator.' 'Administrator Required' OK Warning | Out-Null; return }
-    if ((Show-AMRMessage 'Create a Windows System Restore point now? AMR will enable System Protection on the Windows drive if needed, request a checkpoint, and verify the exact Windows result. If Windows skips a new point due to its frequency rule, AMR may record a clearly labelled recent existing checkpoint instead. This does not install or change any driver. Windows does not expose a native percentage for this operation, so AMR displays activity rather than a fabricated percentage. You can stop AMR waiting, but Windows may still finish a request it has already accepted.' 'Create Driver Safety Point' YesNo Warning) -ne 'Yes') { return }
+    if ($script:DriverManagedJob -or $script:DriverActionJob -or $script:DriverScanJob -or $script:DriverBatchActive -or $script:DriverSmartQueueActive -or $script:DriverOperationState.State -eq 'Running') { Show-AMRMessageGlass 'Wait for the current driver operation to finish before creating a restore point.' 'Driver Operation Busy' OK Information | Out-Null; return }
+    if (-not (Test-AMRAdmin)) { Show-AMRMessageGlass 'Creating and verifying a Windows restore point requires Administrator privileges. Close the utility and launch it again as Administrator.' 'Administrator Required' OK Warning | Out-Null; return }
+    if ((-not $script:DriverRestorePromptApproved) -and ((Show-AMRMessageGlass 'Create a Windows System Restore point now? AMR will enable System Protection on the Windows drive if needed, request a checkpoint, and verify the exact Windows result. If Windows skips a new point due to its frequency rule, AMR may record a clearly labelled recent existing checkpoint instead. This does not install or change any driver. Windows does not expose a native percentage for this operation, so AMR displays activity rather than a fabricated percentage. You can stop AMR waiting, but Windows may still finish a request it has already accepted.' 'Create Driver Safety Point' YesNo Warning) -ne 'Yes')) { return }
     $progressPanel=C 'DriverRestoreProgressPanel';$progressBar=C 'DriverRestorePointProgressBar';$progressText=C 'DriverRestorePointProgressText';$elapsedText=C 'DriverRestorePointElapsed';$percentText=C 'DriverRestorePointPercent';$estimateText=C 'DriverRestorePointEstimate';$cancelButton=C 'DriverRestorePointCancelBtn'
     $script:DriverRestorePointStartedAt=Get-Date;$script:DriverRestorePointLastFailure=$null;$script:DriverRestorePointCancelled=$false
     if($progressPanel){$progressPanel.Visibility='Visible'}
@@ -12346,7 +13319,9 @@ function Complete-AMRDriverRestorePointWorker {
         }
         $poll=New-Object System.Windows.Threading.DispatcherTimer
         $poll.Interval=[TimeSpan]::FromMilliseconds(500)
+        $script:DriverRestorePointPollTimer=$poll
         $poll.Add_Tick(({
+            if ($script:DriverRestorePointCancelled) { try { $poll.Stop() } catch {}; return }
             # This closure-held job is the sole authority for this Restore Point UI.
             # A null shared slot is not a failure while the captured job still exists.
             $jobState = [string]$restoreJob.State
@@ -12379,13 +13354,18 @@ function Complete-AMRDriverRestorePointWorker {
                 if($progressText){$progressText.Text='Success — Windows created the restore point and the exact sequence number was verified.'}
                 if($estimateText){$estimateText.Text='Completed and verified'}
                 Write-AMRLog ("Created AMR driver restore point #{0}." -f $state.SequenceNumber) SUCCESS Overview
+                try {
+                    $whenText = try { ([datetime]$state.CreationTime).ToString('dd MMM yyyy  ·  hh:mm tt') } catch { [string]$state.CreationTime }
+                    $headline = if ([bool]$state.IsReusedExisting) { "Windows already had a recent restore point (it allows only one new point per 24 hours), so AMR is using that existing one as your recovery target." } else { "Windows created a new restore point and AMR verified it." }
+                    Show-AMRMessageGlass ("$headline`n`nNumber: #$($state.SequenceNumber)`nName: $($state.Description)`nTime: $whenText`n`nIf a driver causes a problem, use Smart Restore in Backups > Driver Backup to return to this exact point.") 'Restore Point Ready' OK Information | Out-Null
+                } catch {}
             } catch {
                 if($progressBar){$progressBar.IsIndeterminate=$false;$progressBar.Value=0}
                 if($percentText){$percentText.Text='Not verified'}
                 if($progressText){$progressText.Text=('Failed — '+[string]$_.Exception.Message)}
                 if($estimateText){$estimateText.Text='Operation ended · not verified'}
                 Update-AMRDriverRestorePointStatus
-                Show-AMRMessage ('Could not create and verify a Windows restore point: '+[string]$_.Exception.Message) 'Restore Point Failed' OK Error | Out-Null
+                Show-AMRMessageGlass ('Could not create and verify a Windows restore point: '+[string]$_.Exception.Message) 'Restore Point Failed' OK Error | Out-Null
                 Write-AMRLog ('AMR driver restore point creation failed: '+[string]$_.Exception.Message) ERROR Overview
             } finally {
                 $script:DriverRestorePointStartedAt=$null
@@ -12402,16 +13382,25 @@ function Complete-AMRDriverRestorePointWorker {
         if($estimateText){$estimateText.Text='Not started'}
         if($cancelButton){$cancelButton.Visibility='Collapsed';$cancelButton.IsEnabled=$false}
         $script:DriverRestorePointStartedAt=$null
-        Show-AMRMessage ('Could not start restore point creation: '+[string]$_.Exception.Message) 'Restore Point Failed' OK Error | Out-Null
+        Show-AMRMessageGlass ('Could not start restore point creation: '+[string]$_.Exception.Message) 'Restore Point Failed' OK Error | Out-Null
     }
 })
 
 (C 'DriverRestorePointCancelBtn').Add_Click({
     $restoreCancelJob=$script:DriverRestorePointActiveJob
     if(-not $restoreCancelJob -or [string]$script:DriverOperationState.Name -ne 'RestorePoint'){return}
-    if((Show-AMRMessage 'Stop the AMR background worker now? This ends AMR waiting and verification. If Windows has already accepted the native restore-point request, Windows may still complete it in the background; AMR will not mark it as verified unless it can confirm the exact checkpoint.' 'Cancel Restore Point Operation' YesNo Warning) -ne 'Yes'){return}
+    if((Show-AMRMessageGlass 'Stop the AMR background worker now? This ends AMR waiting and verification. If Windows has already accepted the native restore-point request, Windows may still complete it in the background; AMR will not mark it as verified unless it can confirm the exact checkpoint.' 'Cancel Restore Point Operation' YesNo Warning) -ne 'Yes'){return}
     $script:DriverRestorePointCancelled=$true
+    # A13c: stop this operation's own poll timer first, so a stopped job can never be reported as a failure after Cancel.
+    if ($script:DriverRestorePointPollTimer) { try { $script:DriverRestorePointPollTimer.Stop() } catch {}; $script:DriverRestorePointPollTimer=$null }
     try { if ([object]::ReferenceEquals($script:DriverManagedJob,$restoreCancelJob)) { Stop-AMRDriverManagedWorker -Force } else { Stop-Job -Job $restoreCancelJob -ErrorAction SilentlyContinue } } catch {}
+    try { Remove-Job -Job $restoreCancelJob -Force -ErrorAction SilentlyContinue } catch {}
+    $script:DriverRestorePointActiveJob=$null
+    if ($script:DriverOperationState -and [string]$script:DriverOperationState.Name -eq 'RestorePoint') {
+        $script:DriverOperationState = [pscustomobject]@{ Name='Idle'; State='Idle'; StartedAt=$null; Generation=[int]$script:DriverOperationState.Generation; CanCancel=$false; Status='Ready'; PartialShown=$false }
+        try { Release-AMRDriverOperationLock } catch {}
+        try { Update-AMRDriverActionButtons } catch {}
+    }
     $button=C 'DriverCreateRestorePointBtn';if($button){$button.Content='＋  Create Restore Point';$button.IsEnabled=$true}
     $progressBar=C 'DriverRestorePointProgressBar';if($progressBar){$progressBar.IsIndeterminate=$false;$progressBar.Value=0}
     $percentText=C 'DriverRestorePointPercent';if($percentText){$percentText.Text='Cancelled'}
@@ -14201,6 +15190,7 @@ function Invoke-AMRVendorPackageAcquisition {
     $file=Join-Path $folder ('VendorDriverPackage'+$extension)
     try{
         if(Get-Command Write-AMRDriverWorkerProgress -ErrorAction SilentlyContinue){Write-AMRDriverWorkerProgress -Path $script:DriverWorkerProgressPath -Stage ('Downloading official '+[string]$Candidate.Source+' package')}
+        if(Test-AMRDriverWorkerCancel){throw 'AMR_USER_CANCELLED'}
         $downloaded=$false;$lastError=''
         for($attempt=1;$attempt -le 3;$attempt++){
             $request=[System.Net.HttpWebRequest]::Create($uri);$request.Method='GET';$request.UserAgent='AMR-Windows-Utility-DriverCenter/6.8';$request.Timeout=180000;$request.ReadWriteTimeout=180000;$request.AllowAutoRedirect=$true;$request.MaximumAutomaticRedirections=5;$request.UseDefaultCredentials=$false
@@ -14212,9 +15202,9 @@ function Invoke-AMRVendorPackageAcquisition {
                 if([int64]$response.ContentLength -gt 4GB){throw 'Vendor package response exceeds the 4 GB safety limit.'}
                 $inputStream=$response.GetResponseStream();$outputStream=[IO.File]::Open($file,[IO.FileMode]::Create,[IO.FileAccess]::Write,[IO.FileShare]::None)
                 $buffer=New-Object byte[] 65536;$received=[int64]0;$lastProgress=[int64]0
-                while(($read=$inputStream.Read($buffer,0,$buffer.Length)) -gt 0){$outputStream.Write($buffer,0,$read);$received+=$read;if($received -gt 4GB){throw 'Vendor package exceeded the 4 GB safety limit while downloading.'};if($response.ContentLength -gt 0 -and ($received-$lastProgress -ge 1MB -or $received -eq [int64]$response.ContentLength)){ $pct=[int][math]::Floor(($received/[double]$response.ContentLength)*100);if(Get-Command Write-AMRDriverWorkerProgress -ErrorAction SilentlyContinue){Write-AMRDriverWorkerProgress -Path $script:DriverWorkerProgressPath -Stage ('Downloading OEM bundle: {0:N0} / {1:N0} bytes' -f $received,$response.ContentLength) -Percent $pct -BytesReceived $received -BytesTotal ([long]$response.ContentLength)};$lastProgress=$received }}
+                while(($read=$inputStream.Read($buffer,0,$buffer.Length)) -gt 0){$outputStream.Write($buffer,0,$read);$received+=$read;if(Test-AMRDriverWorkerCancel){throw 'AMR_USER_CANCELLED'};if($received -gt 4GB){throw 'Vendor package exceeded the 4 GB safety limit while downloading.'};if($response.ContentLength -gt 0 -and ($received-$lastProgress -ge 1MB -or $received -eq [int64]$response.ContentLength)){ $pct=[int][math]::Floor(($received/[double]$response.ContentLength)*100);if(Get-Command Write-AMRDriverWorkerProgress -ErrorAction SilentlyContinue){Write-AMRDriverWorkerProgress -Path $script:DriverWorkerProgressPath -Stage ('Downloading OEM bundle: {0:N0} / {1:N0} bytes' -f $received,$response.ContentLength) -Percent $pct -BytesReceived $received -BytesTotal ([long]$response.ContentLength)};$lastProgress=$received }}
                 $outputStream.Flush();if($received -le 0 -or ($response.ContentLength -gt 0 -and $received -ne [int64]$response.ContentLength)){throw 'Vendor package download was empty or content length did not match.'};$downloaded=$true;break
-            }catch{$lastError=[string]$_.Exception.Message;if(Test-Path -LiteralPath $file){Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue};if($attempt -lt 3){Start-Sleep -Seconds (2*$attempt)}}finally{if($outputStream){$outputStream.Dispose()};if($inputStream){$inputStream.Dispose()};if($response){$response.Dispose()}}
+            }catch{if([string]$_.Exception.Message -eq 'AMR_USER_CANCELLED'){throw};$lastError=[string]$_.Exception.Message;if(Test-Path -LiteralPath $file){Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue};if($attempt -lt 3){Start-Sleep -Seconds (2*$attempt)}}finally{if($outputStream){$outputStream.Dispose()};if($inputStream){$inputStream.Dispose()};if($response){$response.Dispose()}}
         }
         if(-not $downloaded){throw ('Vendor package download failed after 3 attempts: '+$lastError)}
         if(-not(Test-Path -LiteralPath $file -PathType Leaf)){throw 'Vendor package download did not create a file.'}
@@ -14266,17 +15256,48 @@ function Show-AMRVendorPackageResults {
             $poll=New-Object System.Windows.Threading.DispatcherTimer;$poll.Interval=[TimeSpan]::FromMilliseconds(400)
             $poll.Add_Tick(({
                 if(-not $script:DriverManagedJob){$poll.Stop();$download.IsEnabled=$true;$open.IsEnabled=$true;return}
-                if($script:DriverManagedJob.State -in @('Completed','Failed','Stopped')){$poll.Stop();try{$acq=Complete-AMRDriverManagedWorker;if(-not $acq -or -not $acq.Success){throw 'Vendor package acquisition did not return a verified result.'};$detail.Text=($acq.Message+' Package: '+$acq.PackagePath+' | Signer: '+$acq.Signer+' | SHA-256: '+$acq.SHA256);$download.Content='Downloaded & Verified';$selected.IsDownloaded=$true;$selected.PackagePath=$acq.PackagePath;$selected.ManifestPath=$acq.ManifestPath;$selected.CatalogSigner=$acq.Signer;$selected.VerificationState=$acq.Message;Write-AMRLog ('Downloaded and verified '+$selected.Source+' OEM bundle for '+$Device.DeviceName+'.') SUCCESS Overview}catch{$detail.Text=('Vendor package acquisition failed: '+[string]$_.Exception.Message);Show-AMRMessage ([string]$_.Exception.Message) 'Vendor Package Acquisition' OK Warning | Out-Null}finally{$download.IsEnabled=$true;$open.IsEnabled=$true}}
+                if($script:DriverManagedJob.State -in @('Completed','Failed','Stopped')){$poll.Stop();try{$acq=Complete-AMRDriverManagedWorker;if(-not $acq -or -not $acq.Success){throw 'Vendor package acquisition did not return a verified result.'};$detail.Text=($acq.Message+' Package: '+$acq.PackagePath+' | Signer: '+$acq.Signer+' | SHA-256: '+$acq.SHA256);$download.Content='Downloaded & Verified';$selected.IsDownloaded=$true;$selected.PackagePath=$acq.PackagePath;$selected.ManifestPath=$acq.ManifestPath;$selected.CatalogSigner=$acq.Signer;$selected.VerificationState=$acq.Message;Write-AMRLog ('Downloaded and verified '+$selected.Source+' OEM bundle for '+$Device.DeviceName+'.') SUCCESS Overview}catch{$detail.Text=('Vendor package acquisition failed: '+[string]$_.Exception.Message);Show-AMRMessageGlass ([string]$_.Exception.Message) 'Vendor Package Acquisition' OK Warning | Out-Null}finally{$download.IsEnabled=$true;$open.IsEnabled=$true}}
             }).GetNewClosure());$script:DriverManagedTimer=$poll;$poll.Start()
-        }catch{$download.IsEnabled=$true;$open.IsEnabled=$true;Show-AMRMessage ('Could not start vendor package acquisition: '+[string]$_.Exception.Message) 'Vendor Package Acquisition' OK Warning | Out-Null}
+        }catch{$download.IsEnabled=$true;$open.IsEnabled=$true;Show-AMRMessageGlass ('Could not start vendor package acquisition: '+[string]$_.Exception.Message) 'Vendor Package Acquisition' OK Warning | Out-Null}
     }).GetNewClosure())
     [void]$buttons.Children.Add($download);[void]$buttons.Children.Add($open);[void]$buttons.Children.Add($close);[void]$bottom.Children.Add($buttons);[void]$root.Children.Add($bottom)
     $grid.Add_SelectionChanged({if($grid.SelectedItem){$item=$grid.SelectedItem;$detail.Text=('Driver/package: {0} | Source: {1} | Model: {2} | Package URL: {3} | Expected hash: {4} {5} | Match: {6} | Status: {7}' -f $item.Title,$item.Source,$item.Model,$item.PackageUrl,$item.HashAlgorithm,$item.ExpectedHash,$item.MatchReason,$item.VerificationState);$download.IsEnabled=((-not [bool]$item.IsDownloaded) -and [bool]$item.IsDownloadable);$open.IsEnabled=(-not [string]::IsNullOrWhiteSpace([string]$item.PackageUrl))}})
     $dialog.Content=$root;if($Candidates.Count -gt 0){$grid.SelectedIndex=0};[void]$dialog.ShowDialog()
 }
 
+function Repair-AMRDriverStaleRestoreState {
+    # A13e: a finished or abandoned Restore Point operation must never keep Scan blocked.
+    try {
+        $opName = ''; try { $opName = [string]$script:DriverOperationState.Name } catch {}
+        if ($opName -ne 'RestorePoint') { return }
+        $pollRunning = $false
+        try { $pollRunning = [bool]($script:DriverRestorePointPollTimer -and $script:DriverRestorePointPollTimer.IsEnabled) } catch {}
+        if ($pollRunning) { return }
+        $managed = $script:DriverManagedJob
+        $active = $script:DriverRestorePointActiveJob
+        foreach ($stale in @($managed,$active)) { if ($stale) { try { Stop-Job -Job $stale -ErrorAction SilentlyContinue } catch {}; try { Remove-Job -Job $stale -Force -ErrorAction SilentlyContinue } catch {} } }
+        $script:DriverManagedJob = $null; $script:DriverRestorePointActiveJob = $null; $script:DriverRestorePointPollTimer = $null
+        if ($script:DriverManagedTimer) { try { $script:DriverManagedTimer.Stop() } catch {}; $script:DriverManagedTimer = $null }
+        if ($script:DriverManagedProgressTimer) { try { $script:DriverManagedProgressTimer.Stop() } catch {}; $script:DriverManagedProgressTimer = $null }
+        $script:DriverOperationState = [pscustomobject]@{ Name='Idle'; State='Idle'; StartedAt=$null; Generation=[int]$script:DriverOperationState.Generation; CanCancel=$false; Status='Ready'; PartialShown=$false }
+        try { Release-AMRDriverOperationLock } catch {}
+        Write-AMRDriverDiagnostic -Severity WARNING -Operation DeviceScan -Stage StaleRestoreStateRepaired -Message 'A finished Restore Point operation was still marked active; its state and lock were cleared so Scan can run.' -Source 'Repair-AMRDriverStaleRestoreState'
+    } catch {}
+}
+
+function Write-AMRDriverScanBlocked {
+    param([string]$Gate,[string]$Detail = '')
+    try { (C 'DriverScanStatus').Text = ('Scan is waiting: ' + $Detail) } catch {}
+    try { Write-AMRDriverDiagnostic -Severity WARNING -Operation DeviceScan -Stage ScanBlocked -Message ('Scan did not start. Gate: {0}. {1}' -f $Gate,$Detail) -Source 'Start-AMRDriverScan' } catch {}
+}
+
 function Start-AMRDriverScan {
-    if ($script:DriverManagedJob -or $script:DriverBatchActive -or $script:DriverSmartQueueActive) { return }
+    Repair-AMRDriverStaleRestoreState
+    if ($script:DriverManagedJob -or $script:DriverBatchActive -or $script:DriverSmartQueueActive) {
+        $gateText = 'managedJob={0}; batchActive={1}; smartQueueActive={2}; operation={3}' -f [bool]$script:DriverManagedJob,[bool]$script:DriverBatchActive,[bool]$script:DriverSmartQueueActive,$(try { [string]$script:DriverOperationState.Name } catch { '' })
+        Write-AMRDriverScanBlocked -Gate 'ManagedOperation' -Detail ('another driver operation is still marked active (' + $gateText + ').')
+        return
+    }
     $button = C 'ScanDriversBtn'
     if ($script:DriverActionJob -and $script:DriverActionJob.State -in @('Running','NotStarted')) {
         (C 'DriverScanStatus').Text = 'Wait for the current driver download or installation to finish before scanning again.'
@@ -14285,12 +15306,17 @@ function Start-AMRDriverScan {
     if ($script:DriverScanJob -and $script:DriverScanJob.State -in @('Running','NotStarted')) {
         return
     }
-    if($script:DriverOperationState.State -eq 'Running'){return}
-    if (-not (Acquire-AMRDriverOperationLock -Operation 'Scan')) { (C 'DriverScanStatus').Text='Another Driver Center operation is active. Wait for it to finish.'; return }
+    if($script:DriverOperationState.State -eq 'Running'){ Write-AMRDriverScanBlocked -Gate 'OperationRunning' -Detail ('operation ' + [string]$script:DriverOperationState.Name + ' is still running.'); return }
+    if (-not (Acquire-AMRDriverOperationLock -Operation 'Scan')) {
+        $heldBy = ''; try { $heldBy = [string]$script:AMRDriverOpLockState.Operation } catch {}
+        Write-AMRDriverScanBlocked -Gate 'OperationLock' -Detail ('the Driver Center operation lock is held by ' + $(if ($heldBy) { $heldBy } else { 'another operation' }) + '.')
+        return
+    }
     $script:DriverScanGeneration = [int]$script:DriverScanGeneration + 1
     $script:DriverCurrentScanId = [guid]::NewGuid().ToString('N')
     $script:DriverCurrentOperationId = $script:DriverCurrentScanId
     $script:DriverScanStartedAt = Get-Date
+    try { Clear-AMRDriverDiagView } catch {}
     Write-AMRDriverDiagnostic -Severity INFO -Operation DeviceScan -Stage Started -Message 'Driver Center device discovery started.' -ScanId $script:DriverCurrentScanId -OperationId $script:DriverCurrentScanId -Source 'Start-AMRDriverScan' -Context @{Generation=$script:DriverScanGeneration;Computer=$env:COMPUTERNAME}
 
     try {
@@ -14315,6 +15341,7 @@ function Start-AMRDriverScan {
             $driverWorkerFunctionDefinitions += [pscustomobject]@{Name=$functionName;Definition=[string]$functionInfo.Definition}
         }
         $driverWorkerPayload = [pscustomobject]@{DriverPackageRoot=$driverPackageRoot;FunctionDefinitions=@($driverWorkerFunctionDefinitions)}
+        if (-not $script:DriverOperationState.PSObject.Properties['PartialShown']) { $script:DriverOperationState | Add-Member -NotePropertyName PartialShown -NotePropertyValue $false -Force }
         $script:DriverOperationState.PartialShown = $false
         $script:DriverScanJob = Start-Job -ArgumentList $driverWorkerPayload -ScriptBlock {
             param($WorkerPayload)
@@ -14889,7 +15916,7 @@ function Start-AMRDriverScan {
                     $script:DriverScanTimer.Stop()
                     Release-AMRDriverOperationLock
                     try {
-                        if ($script:DriverOperationState.Name -eq 'DeviceScan') { $script:DriverOperationState = [pscustomobject]@{Name='Idle';State='Idle';StartedAt=$null;Generation=[int]$script:DriverOperationState.Generation;CanCancel=$false;Status='Ready'} }
+                        if ($script:DriverOperationState.Name -eq 'DeviceScan') { $script:DriverOperationState = [pscustomobject]@{Name='Idle';State='Idle';StartedAt=$null;Generation=[int]$script:DriverOperationState.Generation;CanCancel=$false;Status='Ready'; PartialShown=$false } }
                         $scanButton = C 'ScanDriversBtn'
                         if ($scanButton) { $scanButton.IsEnabled = $true; $scanButton.Content = '⌕  Scan Device' }
                         (C 'DriverScanStatus').Text = 'Scan stopped because its background job reference was lost. Start a new scan; review Diagnostics if this repeats.'
@@ -14912,11 +15939,12 @@ function Start-AMRDriverScan {
                     }
                     try {
                         $availableStages = @()
-                        if (-not [bool]$script:DriverOperationState.PartialShown) {
+                        if (-not [bool](Get-AMRDiagProp $script:DriverOperationState 'PartialShown' $false)) {
                             $availableStages = @(Receive-Job -Job $job -Keep -ErrorAction SilentlyContinue)
                         }
                         $hardwareStage = @($availableStages | Where-Object { $_ -and $_.ScanStage -eq 'HardwareReady' } | Select-Object -Last 1)
-                        if ($hardwareStage.Count -gt 0 -and -not $script:DriverOperationState.PartialShown) {
+                        if ($hardwareStage.Count -gt 0 -and -not [bool](Get-AMRDiagProp $script:DriverOperationState 'PartialShown' $false)) {
+                            if (-not $script:DriverOperationState.PSObject.Properties['PartialShown']) { $script:DriverOperationState | Add-Member -NotePropertyName PartialShown -NotePropertyValue $false -Force }
                             $script:DriverOperationState.PartialShown = $true
                             $stage = $hardwareStage[0]
                             $stageDevices = @($stage.Devices)
@@ -14925,6 +15953,21 @@ function Start-AMRDriverScan {
                             foreach ($driverSearchRow in @($script:DriverAllDeviceRows)) {
                                 if ($driverSearchRow -and -not $driverSearchRow.PSObject.Properties['DriverSearchDisplay']) {
                                     $driverSearchRow | Add-Member -NotePropertyName DriverSearchDisplay -NotePropertyValue ([string]$driverSearchRow.AvailableUpdate) -Force
+                                }
+                                # A8 driver fix: the early HardwareReady rows have no update metadata yet; the progressive
+                                # display read ProfessionalDiscoveredCandidates and failed under StrictMode.
+                                if ($driverSearchRow) {
+                                    foreach ($field in @(
+                                        @{Name='ErrorCode';Value=0},@{Name='UpdateId';Value=''},@{Name='UpdateReady';Value=$false},
+                                        @{Name='LocalPackageReady';Value=$false},@{Name='CandidateOptions';Value=@()},
+                                        @{Name='ProfessionalDiscoveredCandidates';Value=@()},@{Name='VendorPackageCandidates';Value=@()},@{Name='ProfessionalSelectedCandidate';Value=$null},
+                                        @{Name='AvailableUpdate';Value=''},@{Name='AvailableVersion';Value=''},
+                                        @{Name='HardwareIds';Value=@()},@{Name='CompatibleIds';Value=@()}
+                                    )) {
+                                        if (-not $driverSearchRow.PSObject.Properties[$field.Name]) {
+                                            $driverSearchRow | Add-Member -NotePropertyName $field.Name -NotePropertyValue $field.Value -Force
+                                        }
+                                    }
                                 }
                             }
                             (C 'DriverComputerModel').Text = $(if([string]::IsNullOrWhiteSpace([string]$stage.ComputerModel)){'Model unavailable'}else{[string]$stage.ComputerModel})
@@ -15026,7 +16069,9 @@ function Start-AMRDriverScan {
                     $unresolvedVendorCount=@($devices | Where-Object { -not $_.HardwareVendorName }).Count
                     $sourceLeadCount=@($devices | ForEach-Object { @($_.VendorSourceCandidates).Count } | Measure-Object -Sum).Sum
                     $biometricSummary = [string]$scanResult.BiometricSummary
-                    (C 'DriverScanStatus').Text = ('Scan completed {0}. {1} devices; {2} device issue(s); {3} installed driver records; {4} vendor identities resolved ({5} from direct hardware identifiers); {6} devices with unresolved vendor identity; {7} official source leads prepared. {8} {9} {10} Use Smart Select to review the available driver choices, then Smart Install to prepare only your approved selections.' -f $scanResult.ScanTime, $devices.Count, $issueCount, $scanResult.InstalledDriverCount, $identifiedVendorCount, $directIdVendorCount, $unresolvedVendorCount, $sourceLeadCount, $wuSummary, $biometricSummary, 'Exact Hardware ID matches remain primary; OEM/model context is supporting evidence and unverified source leads cannot install.')
+                    $driverScanSummaryText = ('Scan completed {0}. {1} devices; {2} device issue(s); {3} installed driver records; {4} vendor identities resolved ({5} from direct hardware identifiers); {6} devices with unresolved vendor identity; {7} official source leads prepared. {8} {9} {10} Use Smart Select to review the available driver choices, then Smart Install to prepare only your approved selections.' -f $scanResult.ScanTime, $devices.Count, $issueCount, $scanResult.InstalledDriverCount, $identifiedVendorCount, $directIdVendorCount, $unresolvedVendorCount, $sourceLeadCount, $wuSummary, $biometricSummary, 'Exact Hardware ID matches remain primary; OEM/model context is supporting evidence and unverified source leads cannot install.')
+                    try { (C 'DriverScanStatus').Text = '' } catch {}
+                    try { Write-AMRDriverDiagnostic -Severity INFO -Operation DeviceScan -Stage ScanSummary -Message $driverScanSummaryText -ScanId $script:DriverCurrentScanId -OperationId $script:DriverCurrentScanId -Source 'DriverCenterScanSummary' } catch {}
 
                     $support = Get-AMRDriverSupportSource -ComputerManufacturer ([string]$scanResult.ComputerManufacturer) -BoardManufacturer ([string]$scanResult.BoardManufacturer)
                     $script:DriverSupportUrl = $support.Url
@@ -15036,6 +16081,7 @@ function Start-AMRDriverScan {
                     $supportButton.Content = 'Open ' + $support.Name + ' ↗'
                     Write-AMRLog ("Driver Center scan completed. Computer='{0} {1}', SystemClass='{2}', Platform='{3}', IdentityConfidence='{4}', SKU='{5}', Board='{6}', Boards={7}, CPUs={8}, GPUs={9}, Devices={10}, Issues={11}, WU candidates={12}, WU device matches={13}, multi-candidate devices={14}, WU status={15}, Support='{16}', Hardware={17}s, WU={18}s, Enrichment={19}s, Total={20}s." -f $scanResult.ComputerManufacturer, $scanResult.ComputerModel, $scanResult.SystemClass, $scanResult.PlatformType, $scanResult.IdentityConfidence, $scanResult.ComputerSystemSKU, $scanResult.BoardProduct, @($scanResult.BoardInventory).Count, @($scanResult.ProcessorNames).Count, @($scanResult.VideoControllerNames).Count, $devices.Count, $issueCount, $scanResult.WUDriverCandidateCount, $scanResult.WUMatchedDeviceCount, $scanResult.WUMultipleCandidateDeviceCount, $scanResult.WUScanStatus, $support.Name, $scanResult.HardwareScanSeconds, $scanResult.WUScanSeconds, $scanResult.EnrichmentSeconds, $scanResult.TotalWorkerSeconds) SUCCESS Overview
                     Write-AMRDriverDiagnostic -Severity SUCCESS -Operation DeviceScan -Stage Completed -Message 'Device discovery and driver inventory scan completed.' -ScanId $script:DriverCurrentScanId -OperationId $script:DriverCurrentScanId -Source 'CIM/WMI + Windows Update' -DurationMs ([long]((Get-Date)-$script:DriverScanStartedAt).TotalMilliseconds) -Result 'Completed' -Context @{DeviceCount=$devices.Count;IssueCount=$issueCount;InstalledDriverCount=$scanResult.InstalledDriverCount;WUCandidateCount=$scanResult.WUDriverCandidateCount;WUMatchedDeviceCount=$scanResult.WUMatchedDeviceCount;WUStatus=$scanResult.WUScanStatus;BiometricDeviceCount=$scanResult.BiometricDeviceCount;BiometricIssueCount=$scanResult.BiometricIssueCount;Generation=$script:DriverScanGeneration}
+                    try { $script:Window.Dispatcher.BeginInvoke([System.Windows.Threading.DispatcherPriority]::ApplicationIdle,[Action]{ Start-AMRDriverAutoDiagnosis }) | Out-Null } catch {}
                 } catch {
                     $scanFailure = $_
                     $failureMessage = [string]$scanFailure.Exception.Message
@@ -15046,12 +16092,21 @@ function Start-AMRDriverScan {
                 } finally {
                     try { Remove-Job -Job $job -Force -ErrorAction SilentlyContinue } catch {}
                     $script:DriverScanJob = $null
+                    if (-not $script:DriverOperationState.PSObject.Properties['PartialShown']) { $script:DriverOperationState | Add-Member -NotePropertyName PartialShown -NotePropertyValue $false -Force }
                     $script:DriverOperationState.PartialShown = $false
-                    if($script:DriverOperationState.Name -eq 'DeviceScan'){$script:DriverOperationState=[pscustomobject]@{Name='Idle';State='Idle';StartedAt=$null;Generation=[int]$script:DriverOperationState.Generation;CanCancel=$false;Status='Ready'}}
+                    if($script:DriverOperationState.Name -eq 'DeviceScan'){$script:DriverOperationState=[pscustomobject]@{Name='Idle';State='Idle';StartedAt=$null;Generation=[int]$script:DriverOperationState.Generation;CanCancel=$false;Status='Ready'; PartialShown=$false }}
                     $scanButton = C 'ScanDriversBtn'
                     $scanButton.IsEnabled = $true
                     $scanButton.Content = '⌕  Scan Device'
-                    Update-AMRDriverActionButtons
+                    # A13c (b): a failure while refreshing the buttons must be logged with its real message and
+                    # must never leave the Scan button disabled or the operation lock held.
+                    try { Release-AMRDriverOperationLock } catch {}
+                    try { Update-AMRDriverActionButtons } catch {
+                        $buttonRefreshError = $_
+                        try { Write-AMRDriverDiagnostic -Severity ERROR -Operation DeviceScan -Stage ButtonRefreshFailed -Message ('Refreshing the Driver Center buttons after the scan failed: ' + $buttonRefreshError.Exception.Message) -ScanId $script:DriverCurrentScanId -Source 'Start-AMRDriverScan' -ErrorRecord $buttonRefreshError } catch {}
+                        try { Write-AMRDiagnostic -Severity 'ERROR' -Area 'DriverCenter' -Operation 'ScanButtonRefresh' -Message ([string]$buttonRefreshError.Exception.Message) -ErrorRecord $buttonRefreshError } catch {}
+                        try { $scanButton.IsEnabled = $true } catch {}
+                    }
                 }
             })
         }
@@ -15270,9 +16325,9 @@ function Set-AMRDriverExperienceMode {
             for ($i = 0; $i -lt $widths.Count; $i++) { $deviceList.View.Columns[$i].Width = $widths[$i] }
         }
         if ($deviceList) {
-            $deviceList.MaxHeight = 560
-            $deviceList.MinHeight = 300
-            $deviceList.Height = 520
+            $deviceList.MaxHeight = 100000
+            $deviceList.MinHeight = 0
+            $deviceList.Height = [double]::NaN
             $smartRows = @($script:DriverAllDeviceRows | Where-Object {
                 ([int]$_.ErrorCode -ne 0) -or
                 (-not [string]::IsNullOrWhiteSpace([string]$_.UpdateId)) -or
@@ -15326,8 +16381,8 @@ function Set-AMRDriverExperienceMode {
         }
         if ($deviceList) {
             $deviceList.MaxHeight = 100000
-            $deviceList.MinHeight = 560
-            $deviceList.Height = 560
+            $deviceList.MinHeight = 0
+            $deviceList.Height = [double]::NaN
             if ($script:DriverAllDeviceRows -and $script:DriverAllDeviceRows.Count -gt 0) {
                 Update-AMRDriverSearchView -Query ([string]$script:DriverSearchQuery)
                 $deviceList.SelectedItems.Clear()
@@ -15359,42 +16414,84 @@ function Set-AMRDriverExperienceMode {
     Update-AMRDriverActionButtons
 }
 
+# A3: plain-language reasons shown as tooltips (also on disabled buttons) and in the selection line. Display only; no enable logic changes.
+function Get-AMRDriverButtonReasons {
+    param([bool]$Busy,[int]$FoundCount,[int]$ReadyAvailableCount,[int]$SelectedCount,[int]$ReadySelectedCount,[bool]$HasCandidate,[bool]$IsReady,[bool]$HasSelected)
+    $busyText = 'Another Driver Center operation is running. Wait for it to finish.'
+    $noMatchText = 'The last scan found no driver update that matches a device in this computer, so nothing can be downloaded or become ready.'
+    $notDownloadedText = ('{0} update(s) were found, but none is downloaded yet. Select a device that has an update and press Download & Save Package first.' -f $FoundCount)
+    $noData = $(if ($FoundCount -eq 0) { $noMatchText } else { $notDownloadedText })
+    $noReady = $(if ($Busy) { $busyText } elseif ($ReadyAvailableCount -eq 0) { $noData } else { 'Select one or more rows that are ready to install (Select All Ready selects them all).' })
+    $download = $(if ($Busy) { $busyText } elseif (-not $HasSelected) { 'Select a device row first.' } elseif (-not $HasCandidate) { 'The selected device has no matched driver update in the last scan, so there is nothing to download.' } elseif ($IsReady) { 'This update is already downloaded. Use Install Ready Update.' } else { '' })
+    $install = $(if ($Busy) { $busyText } elseif (-not $HasSelected) { 'Select a device row first.' } elseif (-not $HasCandidate) { 'The selected device has no matched driver update in the last scan, so there is nothing to install.' } elseif (-not $IsReady) { 'Download this update first (Download & Save Package).' } else { '' })
+    $selectAll = $(if ($Busy) { $busyText } else { $noData })
+    $summaryTail = ''
+    if ($SelectedCount -gt 0 -and $ReadySelectedCount -eq 0) { $summaryTail = $(if ($FoundCount -eq 0) { ' • no matched update in the last scan' } else { ' • selected rows have no downloaded update' }) }
+    return @{ Download=$download; Install=$install; SelectAll=$selectAll; Batch=$noReady; Plan=$noReady; SummaryTail=$summaryTail }
+}
+
+function Set-AMRDriverButtonHint {
+    param([string]$Name,[bool]$Enabled,[string]$EnabledTip,[string]$DisabledTip)
+    try {
+        $hintButton = C $Name
+        if (-not $hintButton) { return }
+        [System.Windows.Controls.ToolTipService]::SetShowOnDisabled($hintButton,$true)
+        $hintButton.ToolTip = $(if ($Enabled) { $EnabledTip } else { $DisabledTip })
+    } catch {}
+}
+
 function Update-AMRDriverActionButtons {
     $list = C 'DriverDeviceList'
+    # A10: the read-only diagnosis button is available after a scan, while no other Driver Center operation runs.
+    $diagnosisButton = C 'DriverDiagnosisBtn'
+    if ($diagnosisButton) {
+        $diagnosisButton.IsEnabled = (@($script:DriverAllDeviceRows).Count -gt 0 -and -not $script:DriverScanJob -and -not $script:DriverActionJob -and -not $script:DriverManagedJob -and -not $script:DriverDiagJob -and -not $script:DriverRepairJob)
+        if (-not $script:DriverDiagJob) { $diagnosisButton.Content = $(if ($script:DriverDiagLast) { 'Re-diagnose' } else { 'Diagnose Devices' }) }
+    }
+    try { Update-AMRDriverRepairButtons } catch {}
     # WPF can retain rows produced by older/alternate result paths. Normalize before
     # reading optional update properties while Set-StrictMode is active.
     $rowsToNormalize = @($script:DriverAllDeviceRows)
     if($list) { $rowsToNormalize += @($list.ItemsSource) }
     foreach($row in $rowsToNormalize) {
-        if($row -and -not $row.PSObject.Properties['UpdateReady']){$row | Add-Member -NotePropertyName UpdateReady -NotePropertyValue $false -Force}
-        if($row -and -not $row.PSObject.Properties['UpdateId']){$row | Add-Member -NotePropertyName UpdateId -NotePropertyValue '' -Force}
-        if($row -and -not $row.PSObject.Properties['UpdateRevision']){$row | Add-Member -NotePropertyName UpdateRevision -NotePropertyValue 0 -Force}
-        if($row -and -not $row.PSObject.Properties['HardwareIds']){$row | Add-Member -NotePropertyName HardwareIds -NotePropertyValue @() -Force}
+        try {
+            if($row -and -not $row.PSObject.Properties['UpdateReady']){
+                # A13c (c): record the real type of any row that lacked the property (first 3 only).
+                if([int]$script:AMRRowDiagLogged -lt 3){ $script:AMRRowDiagLogged = [int]$script:AMRRowDiagLogged + 1; try { Write-AMRDriverDiagnostic -Severity WARNING -Operation DeviceScan -Stage RowMissingUpdateReady -Message ('A device row of type {0} had no UpdateReady property and was normalized.' -f $row.GetType().FullName) -Source 'Update-AMRDriverActionButtons' } catch {} }
+                $row | Add-Member -NotePropertyName UpdateReady -NotePropertyValue $false -Force
+            }
+            if($row -and -not $row.PSObject.Properties['UpdateId']){$row | Add-Member -NotePropertyName UpdateId -NotePropertyValue '' -Force}
+            if($row -and -not $row.PSObject.Properties['UpdateRevision']){$row | Add-Member -NotePropertyName UpdateRevision -NotePropertyValue 0 -Force}
+            if($row -and -not $row.PSObject.Properties['HardwareIds']){$row | Add-Member -NotePropertyName HardwareIds -NotePropertyValue @() -Force}
+        } catch {
+            try { Write-AMRDriverDiagnostic -Severity WARNING -Operation DeviceScan -Stage RowNormalizeFailed -Message ('A device row could not be normalized: ' + $_.Exception.Message) -Source 'Update-AMRDriverActionButtons' } catch {}
+        }
     }
     $selected = $list.SelectedItem
     $hasCandidate = $false
     $isReady = $false
     $hasHardwareId = $false
     if ($selected) {
-        $hasCandidate = -not [string]::IsNullOrWhiteSpace([string]$selected.UpdateId)
-        $isReady = ($hasCandidate -and [bool]$selected.UpdateReady)
-        $hasHardwareId = (@($selected.HardwareIds | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }).Count -gt 0)
+        $hasCandidate = -not [string]::IsNullOrWhiteSpace([string](Get-AMRDiagProp $selected 'UpdateId' ''))
+        $isReady = ($hasCandidate -and [bool](Get-AMRDiagProp $selected 'UpdateReady' $false))
+        $hasHardwareId = (@(@(Get-AMRDiagProp $selected 'HardwareIds' @()) | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }).Count -gt 0)
     }
+    # A13c (a): every optional property below is read through the safe getter, so no row shape can throw under StrictMode.
     $selectedRows = @($list.SelectedItems)
-    $readySelectedRows = @($selectedRows | Where-Object { $_.UpdateReady -and -not [string]::IsNullOrWhiteSpace([string]$_.UpdateId) })
+    $readySelectedRows = @($selectedRows | Where-Object { $_ -and [bool](Get-AMRDiagProp $_ 'UpdateReady' $false) -and -not [string]::IsNullOrWhiteSpace([string](Get-AMRDiagProp $_ 'UpdateId' '')) })
     $readySelectedCount = $readySelectedRows.Count
     $allRows = @($list.ItemsSource)
-    $readyAvailableRows = @($allRows | Where-Object { $_.UpdateReady -and -not [string]::IsNullOrWhiteSpace([string]$_.UpdateId) })
+    $readyAvailableRows = @($allRows | Where-Object { $_ -and [bool](Get-AMRDiagProp $_ 'UpdateReady' $false) -and -not [string]::IsNullOrWhiteSpace([string](Get-AMRDiagProp $_ 'UpdateId' '')) })
     $readyAvailableCount = $readyAvailableRows.Count
     $availableUpdateKeys = @{}
     foreach ($row in $allRows) {
-        if ([string]::IsNullOrWhiteSpace([string]$row.UpdateId)) { continue }
-        $key = ('{0}|{1}' -f [string]$row.UpdateId,[int]$row.UpdateRevision)
+        if ([string]::IsNullOrWhiteSpace([string](Get-AMRDiagProp $row 'UpdateId' ''))) { continue }
+        $key = ('{0}|{1}' -f [string](Get-AMRDiagProp $row 'UpdateId' ''),[int](Get-AMRDiagProp $row 'UpdateRevision' 0))
         $availableUpdateKeys[$key] = $true
     }
     $selectedUpdateKeys = @{}
     foreach ($row in $readySelectedRows) {
-        $key = ('{0}|{1}' -f [string]$row.UpdateId,[int]$row.UpdateRevision)
+        $key = ('{0}|{1}' -f [string](Get-AMRDiagProp $row 'UpdateId' ''),[int](Get-AMRDiagProp $row 'UpdateRevision' 0))
         $selectedUpdateKeys[$key] = $true
     }
     $summary = C 'DriverSelectionSummary'
@@ -15412,6 +16509,24 @@ function Update-AMRDriverActionButtons {
     (C 'DriverInstallBatchBtn').Content = ('Install Selected Ready ({0})' -f $selectedUpdateKeys.Count)
     (C 'DriverInstallBatchBtn').IsEnabled = ($selectedUpdateKeys.Count -gt 0 -and -not $driverOperationBusy -and -not $script:DriverBatchActive)
     try { (C 'DriverInstallPlanBtn').IsEnabled = ($selectedUpdateKeys.Count -gt 0 -and -not $driverOperationBusy -and -not $script:DriverBatchActive) } catch {}
+    # A5: diagnostic only. One line each time the combination below changes, so the log shows why the buttons are enabled or not.
+    try {
+        $buttonStateKey = ('busy={0};scan={1};action={2};managed={3};op={4};batch={5};selected={6};readySel={7};readyAvail={8};cand={9};ready={10};dl={11};inst={12};selReady={13};batchBtn={14}' -f [bool]$driverOperationBusy,[bool]$script:DriverScanJob,[bool]$script:DriverActionJob,[bool]$script:DriverManagedJob,[string]$script:DriverOperationState.State,[bool]$script:DriverBatchActive,$selectedRows.Count,$readySelectedCount,$readyAvailableCount,$hasCandidate,$isReady,[bool](C 'DriverDownloadSelectedBtn').IsEnabled,[bool](C 'DriverInstallSelectedBtn').IsEnabled,[bool](C 'DriverSelectReadyBtn').IsEnabled,[bool](C 'DriverInstallBatchBtn').IsEnabled)
+        if ($buttonStateKey -ne [string]$script:AMRButtonStateLast) {
+            $script:AMRButtonStateLast = $buttonStateKey
+            Write-AMRDriverDiagnostic -Severity DEBUG -Operation DriverButtons -Stage StateChanged -Message $buttonStateKey -Source 'Update-AMRDriverActionButtons'
+        }
+    } catch {}
+    # A3: explain why a button is disabled (tooltip works on disabled buttons) and why 0 rows are ready.
+    try {
+        $hintReasons = Get-AMRDriverButtonReasons -Busy ([bool]($driverOperationBusy -or $script:DriverBatchActive)) -FoundCount $availableUpdateKeys.Count -ReadyAvailableCount $readyAvailableCount -SelectedCount $selectedRows.Count -ReadySelectedCount $readySelectedCount -HasCandidate $hasCandidate -IsReady $isReady -HasSelected ($null -ne $selected)
+        Set-AMRDriverButtonHint -Name 'DriverDownloadSelectedBtn' -Enabled ([bool](C 'DriverDownloadSelectedBtn').IsEnabled) -EnabledTip 'Download the selected driver update and save the package. Nothing is installed.' -DisabledTip $hintReasons.Download
+        Set-AMRDriverButtonHint -Name 'DriverInstallSelectedBtn' -Enabled ([bool](C 'DriverInstallSelectedBtn').IsEnabled) -EnabledTip 'Install the selected downloaded update after you confirm.' -DisabledTip $hintReasons.Install
+        Set-AMRDriverButtonHint -Name 'DriverSelectReadyBtn' -Enabled ([bool](C 'DriverSelectReadyBtn').IsEnabled) -EnabledTip 'Select every downloaded update that is ready to install.' -DisabledTip $hintReasons.SelectAll
+        Set-AMRDriverButtonHint -Name 'DriverInstallBatchBtn' -Enabled ([bool](C 'DriverInstallBatchBtn').IsEnabled) -EnabledTip 'Install the selected ready updates one at a time after you confirm.' -DisabledTip $hintReasons.Batch
+        Set-AMRDriverButtonHint -Name 'DriverInstallPlanBtn' -Enabled ([bool](C 'DriverInstallPlanBtn').IsEnabled) -EnabledTip 'Review the proposed installation order for the selected ready updates.' -DisabledTip $hintReasons.Plan
+        if ($summary -and $hintReasons.SummaryTail) { $summary.Text = [string]$summary.Text + $hintReasons.SummaryTail }
+    } catch {}
     $smartCandidateCount = @($script:DriverAllDeviceRows | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_.UpdateId) }).Count
     $smartSelectedCount = @((C 'DriverDeviceList').SelectedItems | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_.UpdateId) }).Count
     $smartBusy = [bool]$script:DriverActionJob -or [bool]$script:DriverScanJob -or [bool]$script:DriverManagedJob -or ($script:DriverOperationState.State -eq 'Running') -or [bool]$script:DriverBatchActive -or [bool]$script:DriverSmartQueueActive
@@ -15481,19 +16596,1535 @@ function Add-AMRDriverHistoryEntry {
     }
 }
 
+# ---- A10: Smart Driver Center phases 1-2 ----
+# ======================================================================================================================
+# Smart Driver Center, phases 1-2 (READ-ONLY): whole-system device diagnosis.
+# Nothing in this block changes the device, a driver, the registry, a service or any setting. It reads Plug and Play
+# state, parent/child links, audio endpoints and recent System events, then explains what Windows reports.
+# Evidence and confidence: every finding lists what supports it, what argues against it and what is unknown.
+# ======================================================================================================================
+
+# StrictMode-safe property read: returns $Default when the property is missing or null (rows may be older/partial objects).
+function Get-AMRDiagProp {
+    param($Object, [string]$Name, $Default = $null)
+    try {
+        if ($null -eq $Object) { return $Default }
+        $property = $Object.PSObject.Properties[$Name]
+        if ($property -and $null -ne $property.Value) { return $property.Value }
+    } catch {}
+    return $Default
+}
+
+# Problem code knowledge. Code NAMES follow Microsoft Learn "Device Manager Error Messages" (CM_PROB_*). The meaning, cause and
+# suggested-fix wording is AMR's own and is guidance only; in these phases nothing is executed.
+# Specificity: 'Direct' = the code alone states the situation; 'Ambiguous' = the code does not separate driver, firmware,
+# resource or hardware causes, so the cause is reported with lower confidence.
+function Get-AMRDriverProblemCodeInfo {
+    param([int]$Code)
+    $table = @{
+        1  = @('CM_PROB_NOT_CONFIGURED','Windows reports the device is not configured correctly.','Driver setup did not finish, or no matching driver was configured.','Reinstall an exact-hardware-ID driver package from a trusted source.','Ambiguous','High')
+        10 = @('CM_PROB_FAILED_START','Windows reports the device cannot start.','A faulty or incompatible driver, missing resources, firmware or the hardware itself. The code does not say which.','Check the driver version and recent driver changes; reinstall the exact-hardware-ID package; check firmware or the device if that fails.','Ambiguous','High')
+        12 = @('CM_PROB_NORMAL_CONFLICT','Windows reports the device could not find enough free resources.','A resource conflict, or a firmware (BIOS/UEFI) resource assignment problem.','Review resource assignment and BIOS/UEFI settings. This is not a driver-package problem in most cases.','Ambiguous','Medium')
+        14 = @('CM_PROB_NEED_RESTART','Windows reports the device cannot work until the computer restarts.','A driver or setting change is pending a restart.','Restart Windows when convenient, then diagnose again.','Direct','Low')
+        16 = @('CM_PROB_PARTIAL_LOG_CONF','Windows reports it could not identify all the resources the device uses.','Incomplete resource configuration.','Review the device resources and driver package.','Ambiguous','Medium')
+        18 = @('CM_PROB_REINSTALL','Windows reports the drivers for the device must be reinstalled.','The driver registration is damaged or incomplete.','Reinstall an exact-hardware-ID driver package from a trusted source.','Direct','High')
+        19 = @('CM_PROB_REGISTRY','Windows reports the device configuration in the registry is incomplete or damaged.','Damaged driver configuration or a filter driver problem. The exact value is not named by the code.','Reinstall the driver package. Do not edit the registry by hand.','Ambiguous','High')
+        21 = @('CM_PROB_WILL_BE_REMOVED','Windows reports the device is being removed.','The device is in the middle of being uninstalled.','Wait and diagnose again, or restart Windows.','Direct','Low')
+        22 = @('CM_PROB_DISABLED','Windows reports the device is disabled.','A user, an app (for example an OEM utility), a script or an administrator disabled it. Who did it cannot be read from this code.','Enable the device if its function is needed, then verify the function works.','Direct','High')
+        24 = @('CM_PROB_DEVICE_NOT_THERE','Windows reports the device is not present, not working properly, or lacks all its drivers.','The device is unplugged, powered off, failing, or its driver is missing.','Check the connection and power; then check that a driver is installed.','Ambiguous','Medium')
+        28 = @('CM_PROB_FAILED_INSTALL','Windows reports no driver is installed for the device.','The driver was never installed, was removed (for example by an app) or its installation failed.','Find an exact-hardware-ID package from a trusted source and install it after review.','Direct','High')
+        29 = @('CM_PROB_HARDWARE_DISABLED','Windows reports the device is disabled because its firmware did not give it the resources it needs.','The device is turned off in firmware (BIOS/UEFI) or by the platform.','Check the BIOS/UEFI setting. This cannot be fixed from Windows; firmware changes are never automatic.','Direct','High')
+        31 = @('CM_PROB_FAILED_ADD','Windows reports the device is not working properly because it cannot load the driver.','Damaged, incompatible or blocked driver, or a missing dependency.','Check driver load events and dependencies; reinstall the exact-hardware-ID package.','Ambiguous','High')
+        32 = @('CM_PROB_DISABLED_SERVICE','Windows reports the driver (service) for the device is disabled.','The driver service start type was set to disabled, by an app, a tool or an administrator.','Check whether the service was disabled on purpose; re-enable only if the device function is needed.','Direct','High')
+        33 = @('CM_PROB_TRANSLATION_FAILED','Windows documents this as a resource translation failure.','Firmware or resource configuration.','See Microsoft documentation for this code.','Ambiguous','Medium')
+        34 = @('CM_PROB_NO_SOFTCONFIG','Windows documents this as a device that needs manual configuration.','Device configuration is not automatic.','See Microsoft documentation for this code.','Ambiguous','Medium')
+        35 = @('CM_PROB_BIOS_TABLE','Windows documents this as a firmware table problem.','The computer firmware does not provide a required table.','A BIOS/UEFI update may be needed. Firmware changes are never automatic.','Ambiguous','Medium')
+        36 = @('CM_PROB_IRQ_TRANSLATION_FAILED','Windows documents this as an interrupt request translation failure.','Firmware or resource configuration.','See Microsoft documentation for this code.','Ambiguous','Medium')
+        37 = @('CM_PROB_FAILED_DRIVER_ENTRY','Windows reports the driver failed to initialize.','Incompatible, damaged or recently changed driver.','Compare recent driver changes; reinstall the exact-hardware-ID package or roll back.','Ambiguous','High')
+        38 = @('CM_PROB_DRIVER_FAILED_PRIOR_UNLOAD','Windows documents this as a previous driver instance that is still in memory.','The earlier driver did not unload.','Restart Windows, then diagnose again.','Ambiguous','Medium')
+        39 = @('CM_PROB_DRIVER_FAILED_LOAD','Windows reports it cannot load the driver; it may be missing or damaged.','Missing or corrupted driver file, or a blocked driver.','Reinstall the exact-hardware-ID package.','Ambiguous','High')
+        40 = @('CM_PROB_DRIVER_SERVICE_KEY_INVALID','Windows reports the driver service information is missing or incorrect.','Damaged driver service registration.','Reinstall the driver package. Do not edit the registry by hand.','Ambiguous','High')
+        41 = @('CM_PROB_LEGACY_SERVICE_NO_DEVICES','Windows documents this as a legacy service that created no devices.','Legacy driver without a device.','See Microsoft documentation for this code.','Ambiguous','Low')
+        42 = @('CM_PROB_DUPLICATE_DEVICE','Windows documents this as a duplicate device.','Two devices report the same identity.','See Microsoft documentation for this code.','Ambiguous','Medium')
+        43 = @('CM_PROB_FAILED_POST_START','Windows reports it stopped the device because the device reported problems.','A driver, firmware or hardware fault. The code does not say which.','Check the driver version and firmware; reinstall the exact-hardware-ID package; suspect hardware if it keeps happening.','Ambiguous','High')
+        44 = @('CM_PROB_HALTED','Windows documents this as a device stopped by an application or service.','An app or service halted the device.','Close the app or service that controls it, or restart Windows.','Ambiguous','Medium')
+        45 = @('CM_PROB_PHANTOM','Windows reports the device is currently not connected.','A remembered device that is not plugged in or powered.','Reconnect the device. This is normal for a device that is not attached.','Direct','Low')
+        46 = @('CM_PROB_SYSTEM_SHUTDOWN','Windows documents this as unavailable because the system is shutting down.','Transient state during shutdown.','No action; diagnose again later.','Direct','Low')
+        47 = @('CM_PROB_HELD_FOR_EJECT','Windows documents this as a device prepared for safe removal.','The device was prepared for removal.','Reconnect the device if it should be used.','Direct','Low')
+        48 = @('CM_PROB_DRIVER_BLOCKED','Windows reports the software for the device was blocked because of known problems.','Windows blocks this driver version for compatibility or security reasons.','Use a newer driver from the hardware maker. Do not bypass the block.','Direct','High')
+        49 = @('CM_PROB_REGISTRY_TOO_LARGE','Windows documents this as the registry hive size limit being exceeded.','Too many device registrations.','See Microsoft documentation for this code.','Ambiguous','Medium')
+        50 = @('CM_PROB_SETPROPERTIES_FAILED','Windows documents this as a failure to apply the device properties.','Driver or registry configuration.','See Microsoft documentation for this code.','Ambiguous','Medium')
+        51 = @('CM_PROB_WAITING_ON_DEPENDENCY','Windows documents this as a device waiting on another device.','A parent or dependency device is not ready.','Check the dependency or parent device first.','Direct','Medium')
+        52 = @('CM_PROB_UNSIGNED_DRIVER','Windows reports it cannot verify the digital signature of the driver.','Unsigned, modified or corrupt driver package.','Use a correctly signed package from the hardware maker. Do not disable signature enforcement.','Direct','High')
+        53 = @('CM_PROB_USED_BY_DEBUGGER','Windows documents this as a device reserved for use by a debugger.','Kernel debugging configuration.','See Microsoft documentation for this code.','Direct','Low')
+        54 = @('CM_PROB_DEVICE_RESET','Windows documents this as a device that is failing and being reset.','Hardware or driver instability.','See Microsoft documentation for this code.','Ambiguous','Medium')
+        55 = @('CM_PROB_CONSOLE_LOCKED','Windows documents this as a device that cannot start while the console is locked.','Transient state.','No action; diagnose again later.','Direct','Low')
+        56 = @('CM_PROB_NEED_CLASS_CONFIG','Windows documents this as a device needing class configuration.','Class setup is pending.','Restart Windows, then diagnose again.','Ambiguous','Medium')
+        57 = @('CM_PROB_GUEST_ASSIGNMENT_FAILED','Windows documents this as a virtual machine device assignment failure.','Virtualization configuration.','See Microsoft documentation for this code.','Ambiguous','Low')
+    }
+    if ($Code -ne 0 -and $table.ContainsKey($Code)) {
+        $e = $table[$Code]
+        return [pscustomobject]@{ Known=$true; Code=$Code; Name=[string]$e[0]; Meaning=[string]$e[1]; Causes=[string]$e[2]; Fix=[string]$e[3]; Specificity=[string]$e[4]; Severity=[string]$e[5] }
+    }
+    if ($Code -ne 0) {
+        return [pscustomobject]@{ Known=$false; Code=$Code; Name=('Unmapped problem code {0}' -f $Code); Meaning=('Windows reports Plug and Play problem code {0}. AMR has no built-in description for it.' -f $Code); Causes='Unknown from this code alone.'; Fix='Look up the code in Microsoft documentation and review the device events. Nothing was changed.'; Specificity='Ambiguous'; Severity='Medium' }
+    }
+    return [pscustomobject]@{ Known=$true; Code=0; Name='No problem'; Meaning='Windows reports no Plug and Play problem for this device.'; Causes=''; Fix=''; Specificity='Direct'; Severity='None' }
+}
+
+# Device family from the PnP class and name. Class is the stronger signal; the name is used only to refine it.
+function Get-AMRDeviceFamily {
+    param([string]$Class = '', [string]$Name = '', [string]$Category = '')
+    $text = ('{0} {1} {2}' -f $Class,$Name,$Category)
+    if ($Class -match '^(?i)AudioEndpoint$') { return 'Audio' }
+    if ($Class -match '^(?i)(Biometric|SmartCardReader)$' -or $text -match '(?i)fingerprint|biometric|windows hello|\bface (recognition|authentication)|iris') { return 'Biometric' }
+    if ($Class -match '^(?i)(Camera|Image)$') { if ($Name -match '(?i)\bIR\b|infrared|hello') { return 'Biometric' }; return 'Camera' }
+    if ($Class -match '^(?i)MEDIA$') { return 'Audio' }
+    if ($Class -match '^(?i)(System|Other|SoftwareComponent|Extension)$' -and $Name -match '(?i)audio|sound|\bSST\b|\bDSP\b|codec|high definition audio|smart sound') { return 'Audio' }
+    if ($Class -match '^(?i)Bluetooth$') { return 'Bluetooth' }
+    if ($Class -match '^(?i)Net$') { return 'Network' }
+    if ($Class -match '^(?i)(Display|Monitor)$') { return 'Display' }
+    if ($Class -match '^(?i)(HIDClass|Keyboard|Mouse)$') { return 'Input' }
+    if ($Class -match '^(?i)USB$') { return 'USB' }
+    if ($Class -match '^(?i)(DiskDrive|SCSIAdapter|HDC|StorageVolume|CDROM)$') { return 'Storage' }
+    if ($Class -match '^(?i)Sensor$') { return 'Sensor' }
+    if ($Class -match '^(?i)(Battery|Processor|Firmware)$') { return 'Power / platform' }
+    if ($Class -match '^(?i)System$') { return 'System' }
+    return 'Other'
+}
+
+function Get-AMRDeviceFamilyWeight {
+    param([string]$Family)
+    switch ($Family) {
+        'Network' { return 95 } 'Storage' { return 90 } 'Audio' { return 90 } 'Display' { return 85 } 'Input' { return 85 }
+        'Biometric' { return 80 } 'Camera' { return 75 } 'Bluetooth' { return 70 } 'System' { return 70 } 'USB' { return 60 }
+        'Power / platform' { return 60 } 'Sensor' { return 40 } default { return 30 }
+    }
+}
+
+# Runs in a background job (never on the UI thread). Read-only: Get-PnpDevice, Get-PnpDeviceProperty, Get-WinEvent.
+# Healthy devices are read cheaply (state only). Devices with a problem, or in a relevant family, also get parent/child links.
+function Get-AMRDriverSystemReadPass {
+    param([int]$BudgetSeconds = 45, [int]$EventDays = 7)
+    $watch = [System.Diagnostics.Stopwatch]::StartNew()
+    $problems = New-Object System.Collections.ArrayList
+    $pnp = @()
+    try { $pnp = @(Get-PnpDevice -PresentOnly -ErrorAction Stop) } catch { [void]$problems.Add('Get-PnpDevice failed: ' + $_.Exception.Message) }
+    $relevantClasses = @('MEDIA','AudioEndpoint','Biometric','SmartCardReader','Camera','Image','Bluetooth')
+    $devices = New-Object System.Collections.ArrayList
+    $detailTargets = New-Object System.Collections.ArrayList
+    $priorityTargets = New-Object System.Collections.ArrayList
+    foreach ($d in $pnp) {
+        if ($null -eq $d) { continue }
+        $code = 0
+        $codeKnown = $false
+        $p = $d.PSObject.Properties['ConfigManagerErrorCode']
+        if ($p -and $null -ne $p.Value) { try { $code = [int]$p.Value; $codeKnown = $true } catch {} }
+        $id = ''; $p = $d.PSObject.Properties['InstanceId']; if ($p -and $null -ne $p.Value) { $id = [string]$p.Value }
+        $name = ''; $p = $d.PSObject.Properties['FriendlyName']; if ($p -and $null -ne $p.Value) { $name = [string]$p.Value }
+        if ([string]::IsNullOrWhiteSpace($name)) { $p = $d.PSObject.Properties['Name']; if ($p -and $null -ne $p.Value) { $name = [string]$p.Value } }
+        $class = ''; $p = $d.PSObject.Properties['Class']; if ($p -and $null -ne $p.Value) { $class = [string]$p.Value }
+        $status = ''; $p = $d.PSObject.Properties['Status']; if ($p -and $null -ne $p.Value) { $status = [string]$p.Value }
+        if ([string]::IsNullOrWhiteSpace($id)) { continue }
+        $record = [pscustomobject]@{
+            InstanceId=$id; Name=$name; Class=$class; Status=$status; ProblemCode=$code; CodeKnown=$codeKnown
+            ProblemStatus=''; Parent=''; Children=@(); DetailRead=$false
+        }
+        [void]$devices.Add($record)
+        if ($code -ne 0 -or $status -eq 'Error' -or $status -eq 'Degraded') { [void]$priorityTargets.Add($record) }
+        elseif (($status -and $status -ne 'OK') -or ($relevantClasses -contains $class)) { [void]$detailTargets.Add($record) }
+    }
+    $orderedTargets = New-Object System.Collections.ArrayList
+    foreach ($target in $priorityTargets) { [void]$orderedTargets.Add($target) }
+    foreach ($target in $detailTargets) { [void]$orderedTargets.Add($target) }
+    $detailTargets = $orderedTargets
+    $detailTotal = $detailTargets.Count
+    $detailDone = 0
+    $budgetExceeded = $false
+    foreach ($record in @($detailTargets)) {
+        if ($watch.Elapsed.TotalSeconds -gt $BudgetSeconds) { $budgetExceeded = $true; break }
+        if ($detailDone -ge 120) { $budgetExceeded = $true; break }
+        try {
+            $props = @(Get-PnpDeviceProperty -InstanceId $record.InstanceId -KeyName 'DEVPKEY_Device_Parent','DEVPKEY_Device_Children','DEVPKEY_Device_ProblemCode','DEVPKEY_Device_ProblemStatus' -ErrorAction Stop)
+            foreach ($prop in $props) {
+                $key = ''; $kp = $prop.PSObject.Properties['KeyName']; if ($kp -and $null -ne $kp.Value) { $key = [string]$kp.Value }
+                $data = $null; $dp = $prop.PSObject.Properties['Data']; if ($dp) { $data = $dp.Value }
+                if ($null -eq $data) { continue }
+                if ($key -eq 'DEVPKEY_Device_Parent') { $record.Parent = [string]$data }
+                elseif ($key -eq 'DEVPKEY_Device_Children') { $record.Children = @($data | ForEach-Object { [string]$_ }) }
+                elseif ($key -eq 'DEVPKEY_Device_ProblemCode' -and -not $record.CodeKnown) { try { $record.ProblemCode = [int]$data; $record.CodeKnown = $true } catch {} }
+                elseif ($key -eq 'DEVPKEY_Device_ProblemStatus') { try { $record.ProblemStatus = ('0x{0:X8}' -f [int]$data) } catch { $record.ProblemStatus = [string]$data } }
+            }
+            $record.DetailRead = $true
+        } catch {
+            if ($problems.Count -lt 10) { [void]$problems.Add(('Property read failed for {0}: {1}' -f $record.InstanceId,$_.Exception.Message)) }
+        }
+        $detailDone++
+    }
+    # A12: Driver Store evidence (read-only pnputil /enum-devices /drivers) for up to 5 problem devices other than Code 22.
+    $storeWatch = [System.Diagnostics.Stopwatch]::StartNew()
+    foreach ($record in @($devices | Where-Object { $_.ProblemCode -ne 0 -and $_.ProblemCode -ne 22 } | Select-Object -First 5)) {
+        if ($storeWatch.Elapsed.TotalSeconds -gt 12 -or $watch.Elapsed.TotalSeconds -gt ($BudgetSeconds + 10)) { break }
+        try {
+            $storeText = (& pnputil.exe /enum-devices /instanceid $record.InstanceId /drivers 2>&1 | Out-String)
+            $infs = @([regex]::Matches($storeText,'(?i)oem\d+\.inf') | ForEach-Object { $_.Value.ToLowerInvariant() } | Select-Object -Unique)
+            $summary = $(if ($infs.Count -gt 0) { 'Driver Store lists: ' + ($infs -join ', ') + ' for this device.' } else { 'Driver Store lists no driver package for this device.' })
+            $record | Add-Member -NotePropertyName DriverStore -NotePropertyValue $summary -Force
+        } catch { $record | Add-Member -NotePropertyName DriverStore -NotePropertyValue '' -Force }
+    }
+    $events = New-Object System.Collections.ArrayList
+    try {
+        $filter = @{ LogName='System'; ProviderName=@('Microsoft-Windows-Kernel-PnP','Microsoft-Windows-UserPnp','Microsoft-Windows-DriverFrameworks-UserMode','Service Control Manager'); StartTime=(Get-Date).AddDays(-$EventDays); Level=@(1,2,3) }
+        foreach ($evt in @(Get-WinEvent -FilterHashtable $filter -MaxEvents 300 -ErrorAction Stop)) {
+            $message = ''
+            try { $message = ([string]$evt.Message -replace '\s+',' ').Trim() } catch {}
+            if ($message.Length -gt 400) { $message = $message.Substring(0,400) }
+            [void]$events.Add([pscustomobject]@{ TimeCreated=[string]$evt.TimeCreated; Provider=[string]$evt.ProviderName; Id=[int]$evt.Id; Level=[int]$evt.Level; Message=$message })
+        }
+    } catch {
+        if ($_.Exception.Message -notmatch 'No events were found') { [void]$problems.Add('Event read failed: ' + $_.Exception.Message) }
+    }
+    return [pscustomobject]@{
+        Devices=@($devices); Events=@($events); ElapsedMs=[long]$watch.ElapsedMilliseconds
+        DetailReads=$detailDone; DetailTotal=$detailTotal; BudgetExceeded=$budgetExceeded; Problems=@($problems); EventDays=$EventDays
+    }
+}
+
+# Turns the read-only snapshot (plus the Driver Center scan rows, for update information) into ordered findings.
+# Order: devices with a problem first (essential families first), then update-only, then light checks. Healthy devices are only counted.
+function New-AMRDriverSystemDiagnosis {
+    param([Parameter(Mandatory=$true)]$Snapshot, $Rows = @())
+    $devices = @(Get-AMRDiagProp $Snapshot 'Devices' @())
+    $events = @(Get-AMRDiagProp $Snapshot 'Events' @())
+    $byId = @{}
+    foreach ($device in $devices) {
+        $key = ([string](Get-AMRDiagProp $device 'InstanceId' '')).ToUpperInvariant()
+        if ($key) { $byId[$key] = $device }
+    }
+    $rowById = @{}
+    foreach ($row in @($Rows)) {
+        $key = ([string](Get-AMRDiagProp $row 'DeviceId' '')).ToUpperInvariant()
+        if ($key) { $rowById[$key] = $row }
+    }
+    $items = New-Object System.Collections.ArrayList
+    $healthy = 0
+    foreach ($device in $devices) {
+        $id = [string](Get-AMRDiagProp $device 'InstanceId' '')
+        $key = $id.ToUpperInvariant()
+        $name = [string](Get-AMRDiagProp $device 'Name' '')
+        $class = [string](Get-AMRDiagProp $device 'Class' '')
+        $status = [string](Get-AMRDiagProp $device 'Status' '')
+        $code = 0
+        try { $code = [int](Get-AMRDiagProp $device 'ProblemCode' 0) } catch {}
+        $row = $null
+        if ($rowById.ContainsKey($key)) { $row = $rowById[$key] }
+        $category = ''
+        if ($row) { $category = [string](Get-AMRDiagProp $row 'ComponentCategory' '') }
+        $family = Get-AMRDeviceFamily -Class $class -Name $name -Category $category
+        $tier = 0
+        $tierLabel = ''
+        $assessment = ''
+        $fix = ''
+        $codeInfo = Get-AMRDriverProblemCodeInfo -Code $code
+        $score = 0
+        $evidence = New-Object System.Collections.ArrayList
+        $against = New-Object System.Collections.ArrayList
+        $unknown = New-Object System.Collections.ArrayList
+        if ($code -ne 0) {
+            $tier = 1; $tierLabel = 'Problem'
+            $assessment = $codeInfo.Meaning
+            $fix = $codeInfo.Fix
+            [void]$evidence.Add(('Windows reports problem code {0} ({1}).' -f $code,$codeInfo.Name))
+            if ($codeInfo.Specificity -eq 'Direct') { $score += 3 } else { $score += 1; [void]$unknown.Add('The code alone does not separate driver, firmware, resource and hardware causes.') }
+            if (-not $codeInfo.Known) { $score -= 1; [void]$unknown.Add('This code is not in the built-in description table.') }
+            if ($codeInfo.Causes) { [void]$evidence.Add('Typical causes: ' + $codeInfo.Causes) }
+            $problemStatus = [string](Get-AMRDiagProp $device 'ProblemStatus' '')
+            if ($problemStatus) { [void]$evidence.Add('Problem status: ' + $problemStatus + '.') }
+            [void]$unknown.Add('Who or what changed the device (an app, a tool, an administrator) cannot be read from this data.')
+            $storeNote = [string](Get-AMRDiagProp $device 'DriverStore' '')
+            if ($storeNote) { [void]$evidence.Add($storeNote + ' (read-only check)') }
+        } elseif ($status -eq 'Error' -or $status -eq 'Degraded') {
+            $tier = 1; $tierLabel = 'Problem'
+            $assessment = ('Windows reports the device status as {0}, but its problem code was not read, so the cause is not known.' -f $status)
+            $fix = 'Run the diagnosis again; if it repeats, check the device in Device Manager. Nothing was changed.'
+            [void]$evidence.Add(('Device status: {0}.' -f $status))
+            [void]$unknown.Add('The problem code was not available for this device.')
+        } elseif ($row) {
+            $updateId = [string](Get-AMRDiagProp $row 'UpdateId' '')
+            $updateReady = $false; try { $updateReady = [bool](Get-AMRDiagProp $row 'UpdateReady' $false) } catch {}
+            $driverInf = [string](Get-AMRDiagProp $row 'DriverInf' '')
+            $signed = $true; try { $signed = [bool](Get-AMRDiagProp $row 'DriverIsSigned' $true) } catch {}
+            $hardwareIds = @(Get-AMRDiagProp $row 'HardwareIds' @())
+            if ($updateId -or $updateReady) {
+                $tier = 2; $tierLabel = 'Update available'
+                $assessment = 'Windows Update offered a hardware-ID-matched driver. An available update is not evidence that the installed driver is faulty.'
+                $fix = 'Review the candidate against the installed version before installing.'
+                [void]$evidence.Add('A matched driver update was found by the Driver Center scan.')
+                $score = 2
+            } elseif ($driverInf -and -not $signed) {
+                $tier = 3; $tierLabel = 'Light check'
+                $assessment = 'The installed driver is not confirmed as signed by the inventory. This needs verification; it is not proof of a bad driver.'
+                $fix = 'Verify the package signature. Do not disable signature enforcement.'
+                [void]$evidence.Add('Inventory reports an INF but no confirmed signed state.')
+                $score = 1
+            } elseif (-not $driverInf -and $hardwareIds.Count -gt 0 -and $class -notmatch '(?i)^(SoftwareComponent|System|Extension|AudioEndpoint|Volume|VolumeSnapshot|Printer|WPD|Monitor|HIDClass|Keyboard|Mouse)$') {
+                $tier = 3; $tierLabel = 'Light check'
+                $assessment = 'A hardware device is present, but the signed-driver inventory shows no INF for it. It may use an inbox driver, or the inventory may be incomplete.'
+                $fix = 'Refresh the inventory and check the device before concluding a driver is missing.'
+                [void]$evidence.Add('No INF record in the signed-driver inventory.')
+                $score = 1
+            }
+        }
+        if ($tier -eq 0) { $healthy++; continue }
+
+        $parentId = [string](Get-AMRDiagProp $device 'Parent' '')
+        $parentText = ''
+        $parentCode = 0
+        if ($parentId) {
+            $parentKey = $parentId.ToUpperInvariant()
+            if ($byId.ContainsKey($parentKey)) {
+                $parentDevice = $byId[$parentKey]
+                try { $parentCode = [int](Get-AMRDiagProp $parentDevice 'ProblemCode' 0) } catch {}
+                $parentText = ('{0} ({1})' -f [string](Get-AMRDiagProp $parentDevice 'Name' $parentId),$(if ($parentCode -ne 0) { 'problem code ' + $parentCode } else { 'no problem reported' }))
+            } else { $parentText = $parentId + ' (not in the present-device list)' }
+            if ($tier -eq 1) {
+                if ($parentCode -ne 0) { $score += 1; [void]$evidence.Add('The parent device also reports a problem: ' + $parentText + '. The parent is the likelier starting point.') }
+                else { [void]$evidence.Add('Parent device: ' + $parentText + '.') }
+            }
+        } elseif ($tier -eq 1) { [void]$unknown.Add('Parent device not read (no relation data for this device).') }
+        $childrenText = ''
+        $childIds = @(Get-AMRDiagProp $device 'Children' @())
+        if ($childIds.Count -gt 0) {
+            $childNames = @()
+            foreach ($childId in ($childIds | Select-Object -First 5)) {
+                $childKey = ([string]$childId).ToUpperInvariant()
+                if ($byId.ContainsKey($childKey)) {
+                    $childDevice = $byId[$childKey]
+                    $childCode = 0; try { $childCode = [int](Get-AMRDiagProp $childDevice 'ProblemCode' 0) } catch {}
+                    $childNames += ('{0}{1}' -f [string](Get-AMRDiagProp $childDevice 'Name' $childId),$(if ($childCode -ne 0) { ' [code ' + $childCode + ']' } else { '' }))
+                }
+            }
+            if ($childNames.Count -gt 0) { $childrenText = $childNames -join '; '; if ($tier -eq 1) { [void]$evidence.Add('Child devices: ' + $childrenText + '.') } }
+        }
+
+        $matchedEvents = New-Object System.Collections.ArrayList
+        $weakEvents = 0
+        if ($tier -eq 1) {
+            foreach ($evt in $events) {
+                $message = [string](Get-AMRDiagProp $evt 'Message' '')
+                if (-not $message) { continue }
+                if ($id -and $message.IndexOf($id,[System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                    if ($matchedEvents.Count -lt 3) { [void]$matchedEvents.Add($evt) }
+                } elseif ($name -and $name.Length -ge 5 -and $message.IndexOf($name,[System.StringComparison]::OrdinalIgnoreCase) -ge 0) { $weakEvents++ }
+            }
+            if ($matchedEvents.Count -gt 0) { $score += 2; [void]$evidence.Add(('{0} recent System event(s) name this exact device instance.' -f $matchedEvents.Count)) }
+            else { [void]$unknown.Add('No recent System event names this exact device instance.') }
+            if ($weakEvents -gt 0) { [void]$evidence.Add(('{0} recent event(s) mention the device name only; weak evidence, not used for confidence.' -f $weakEvents)) }
+        }
+        $confidence = 'Low'
+        if ($score -ge 3) { $confidence = 'High' } elseif ($score -eq 2) { $confidence = 'Medium' }
+        $severityRank = 0
+        switch ($codeInfo.Severity) { 'High' { $severityRank = 3 } 'Medium' { $severityRank = 2 } 'Low' { $severityRank = 1 } default { $severityRank = 0 } }
+        [void]$items.Add([pscustomobject]@{
+            DeviceName=$name; DeviceId=$id; Class=$class; Family=$family; Status=$status; ProblemCode=$code; CodeName=$codeInfo.Name
+            Tier=$tier; TierLabel=$tierLabel; Assessment=$assessment; SuggestedAction=$fix; Confidence=$confidence
+            Evidence=@($evidence); Against=@($against); Unknown=@($unknown); Parent=$parentText; Children=$childrenText
+            EventEvidence=@($matchedEvents); SortWeight=(Get-AMRDeviceFamilyWeight -Family $family); SeverityRank=$severityRank
+        })
+    }
+    $ordered = @($items | Sort-Object @{Expression={$_.Tier};Ascending=$true}, @{Expression={$_.SeverityRank};Ascending=$false}, @{Expression={$_.SortWeight};Ascending=$false}, @{Expression={$_.DeviceName};Ascending=$true})
+
+    # Family hypotheses (evidence, counter-evidence, unknowns, bounded confidence).
+    $hypotheses = New-Object System.Collections.ArrayList
+    $endpoints = @($devices | Where-Object { [string](Get-AMRDiagProp $_ 'Class' '') -match '^(?i)AudioEndpoint$' })
+    $endpointsOk = @($endpoints | Where-Object { [string](Get-AMRDiagProp $_ 'Status' '') -eq 'OK' })
+    $problemFamilies = @($ordered | Where-Object { $_.Tier -eq 1 } | Group-Object -Property Family)
+    foreach ($group in $problemFamilies) {
+        $family = [string]$group.Name
+        $members = @($group.Group | Where-Object { $_.Class -notmatch '^(?i)AudioEndpoint$' })
+        if ($members.Count -eq 0) { $members = @($group.Group) }
+        $hEvidence = New-Object System.Collections.ArrayList
+        $hAgainst = New-Object System.Collections.ArrayList
+        $hUnknown = New-Object System.Collections.ArrayList
+        foreach ($m in $members) { [void]$hEvidence.Add(('{0}: code {1} ({2}).' -f $m.DeviceName,$m.ProblemCode,$m.CodeName)) }
+        $hScore = 1
+        if (@($members | Where-Object { $_.Confidence -eq 'High' }).Count -gt 0) { $hScore = 2 }
+        $title = ''
+        $suggest = ''
+        if ($family -eq 'Audio') {
+            if ($endpointsOk.Count -eq 0) {
+                $title = 'Audio may be unavailable: a sound component reports a problem and no working audio endpoint is present.'
+                [void]$hEvidence.Add(('Audio endpoints present and working: 0 of {0}.' -f $endpoints.Count))
+                $hScore += 1
+                $suggest = 'Resolve the reported component first (see its suggested action), then check that endpoints appear.'
+            } else {
+                $title = 'Audio may be partly affected: a sound component reports a problem, but working audio endpoints exist.'
+                [void]$hAgainst.Add(('{0} working audio endpoint(s) are present.' -f $endpointsOk.Count))
+                $suggest = 'Check whether the missing function is one you use; the working endpoints suggest basic audio is available.'
+            }
+            [void]$hUnknown.Add('The link between a sound component and endpoint appearance is an engineering model, not a Microsoft-documented chain.')
+        } else {
+            $title = ('{0} function may be affected: {1} device(s) report a problem.' -f $family,$members.Count)
+            $peers = @($devices | Where-Object { (Get-AMRDeviceFamily -Class ([string](Get-AMRDiagProp $_ 'Class' '')) -Name ([string](Get-AMRDiagProp $_ 'Name' ''))) -eq $family -and [int](Get-AMRDiagProp $_ 'ProblemCode' 0) -eq 0 -and [string](Get-AMRDiagProp $_ 'Status' '') -eq 'OK' })
+            if ($peers.Count -gt 0) { [void]$hAgainst.Add(('{0} other {1} device(s) are working.' -f $peers.Count,$family)) }
+            $suggest = 'See the suggested action on each device.'
+            [void]$hUnknown.Add('This family rule is an engineering model; it has not been checked against a real fault on this computer.')
+        }
+        # Engineered rules never exceed Medium until they are confirmed on real logs.
+        $hConfidence = 'Low'
+        if ($hScore -ge 2) { $hConfidence = 'Medium' }
+        [void]$hypotheses.Add([pscustomobject]@{ Family=$family; Title=$title; Confidence=$hConfidence; Evidence=@($hEvidence); Against=@($hAgainst); Unknown=@($hUnknown); Suggestion=$suggest })
+    }
+    # Healthy audio component but no endpoint at all: reported as a low-confidence observation only.
+    $audioControllers = @($devices | Where-Object { (Get-AMRDeviceFamily -Class ([string](Get-AMRDiagProp $_ 'Class' '')) -Name ([string](Get-AMRDiagProp $_ 'Name' ''))) -eq 'Audio' -and [string](Get-AMRDiagProp $_ 'Class' '') -notmatch '^(?i)AudioEndpoint$' })
+    $audioProblem = @($problemFamilies | Where-Object { $_.Name -eq 'Audio' })
+    if ($audioProblem.Count -eq 0 -and $audioControllers.Count -gt 0 -and $endpointsOk.Count -eq 0) {
+        [void]$hypotheses.Add([pscustomobject]@{
+            Family='Audio'; Title='No working audio endpoint is present although sound components report no problem.'; Confidence='Low'
+            Evidence=@(('Sound components present: {0}; working endpoints: 0.' -f $audioControllers.Count)); Against=@()
+            Unknown=@('Endpoints can be absent when no output device is attached or an endpoint is disabled in Sound settings. Cause not determined.'); Suggestion='Check Sound settings; no driver problem is reported.'
+        })
+    }
+    $counts = [pscustomobject]@{
+        TotalDevices=$devices.Count; Healthy=$healthy
+        Problem=@($ordered | Where-Object { $_.Tier -eq 1 }).Count
+        UpdateOnly=@($ordered | Where-Object { $_.Tier -eq 2 }).Count
+        LightCheck=@($ordered | Where-Object { $_.Tier -eq 3 }).Count
+        AudioEndpointsWorking=$endpointsOk.Count; AudioEndpointsTotal=$endpoints.Count
+    }
+    $coverage = New-Object System.Collections.ArrayList
+    [void]$coverage.Add(('Devices read: {0}. Relation reads (parent/child): {1} of {2}{3}.' -f $devices.Count,[int](Get-AMRDiagProp $Snapshot 'DetailReads' 0),[int](Get-AMRDiagProp $Snapshot 'DetailTotal' 0),$(if ([bool](Get-AMRDiagProp $Snapshot 'BudgetExceeded' $false)) { ' (time budget reached; the rest were skipped)' } else { '' })))
+    [void]$coverage.Add(('System events read: {0} (last {1} days, warnings and above, up to 300).' -f $events.Count,[int](Get-AMRDiagProp $Snapshot 'EventDays' 7)))
+    foreach ($problem in @(Get-AMRDiagProp $Snapshot 'Problems' @() | Select-Object -First 5)) { [void]$coverage.Add('Read problem: ' + [string]$problem) }
+    return [pscustomobject]@{ Items=@($ordered); Hypotheses=@($hypotheses); Counts=$counts; Coverage=@($coverage); ElapsedMs=[long](Get-AMRDiagProp $Snapshot 'ElapsedMs' 0) }
+}
+
+function Format-AMRDriverSystemDiagnosisText {
+    param([Parameter(Mandatory=$true)]$Diagnosis, [int]$MaxItems = 8)
+    $c = $Diagnosis.Counts
+    $lines = New-Object System.Collections.ArrayList
+    [void]$lines.Add(('Read-only diagnosis of {0} device(s). Problems: {1}. Update only: {2}. Light check: {3}. Healthy: {4}.' -f $c.TotalDevices,$c.Problem,$c.UpdateOnly,$c.LightCheck,$c.Healthy))
+    [void]$lines.Add('Nothing was changed on this computer.')
+    $problemItems = @($Diagnosis.Items | Where-Object { $_.Tier -eq 1 })
+    if ($problemItems.Count -gt 0) {
+        [void]$lines.Add('')
+        [void]$lines.Add('PROBLEMS (essential first)')
+        foreach ($item in ($problemItems | Select-Object -First $MaxItems)) {
+            [void]$lines.Add(('- {0} [{1}] code {2} {3}' -f $item.DeviceName,$item.Family,$item.ProblemCode,$item.CodeName))
+            [void]$lines.Add(('  Meaning: {0}' -f $item.Assessment))
+            [void]$lines.Add(('  Suggested: {0}  (confidence: {1})' -f $item.SuggestedAction,$item.Confidence))
+            if ($item.Parent) { [void]$lines.Add('  Parent: ' + $item.Parent) }
+        }
+        if ($problemItems.Count -gt $MaxItems) { [void]$lines.Add(('  ... and {0} more problem device(s); all are in the Driver diagnostics log and the CSV export.' -f ($problemItems.Count - $MaxItems))) }
+    }
+    if (@($Diagnosis.Hypotheses).Count -gt 0) {
+        [void]$lines.Add('')
+        [void]$lines.Add('WHAT THIS MAY MEAN')
+        foreach ($h in @($Diagnosis.Hypotheses | Select-Object -First 5)) {
+            [void]$lines.Add(('- {0} (confidence: {1})' -f $h.Title,$h.Confidence))
+            foreach ($u in @($h.Against | Select-Object -First 2)) { [void]$lines.Add('  Against: ' + $u) }
+            foreach ($u in @($h.Unknown | Select-Object -First 1)) { [void]$lines.Add('  Not known: ' + $u) }
+        }
+    }
+    if ($c.UpdateOnly -gt 0 -or $c.LightCheck -gt 0) {
+        [void]$lines.Add('')
+        [void]$lines.Add(('Lower priority: {0} device(s) have an available update and {1} need a light check. They are in the CSV export.' -f $c.UpdateOnly,$c.LightCheck))
+    }
+    [void]$lines.Add('')
+    foreach ($note in @($Diagnosis.Coverage)) { [void]$lines.Add($note) }
+    return ($lines -join "`n")
+}
+
+function Show-AMRDriverSystemDiagnosis {
+    param([switch]$Auto)
+    if ($script:DriverDiagJob) { return }
+    if ($script:DriverScanJob -or $script:DriverActionJob -or $script:DriverManagedJob -or $script:DriverBatchActive -or $script:DriverSmartQueueActive) {
+        if ($Auto) { return }
+        Show-AMRMessageGlass 'Wait for the active Driver Center operation to finish before running a diagnosis.' 'Driver Operation Busy' OK Information | Out-Null
+        return
+    }
+    if (@($script:DriverAllDeviceRows).Count -eq 0) {
+        if ($Auto) { return }
+        Show-AMRMessageGlass 'Run Scan Device first. The diagnosis uses the scan results and changes nothing.' 'Driver Diagnosis' OK Information | Out-Null
+        return
+    }
+    $button = C 'DriverDiagnosisBtn'
+    try {
+        if ($button) { $button.IsEnabled = $false; $button.Content = 'Diagnosing...' }
+        $statusText = C 'DriverActionStatus'
+        # A1: this progress note is written to the driver log instead of the Driver Center page.
+        try { Write-AMRDriverDiagnostic -Severity INFO -Operation SystemDiagnosis -Stage Progress -Message 'Reading all devices, device relations and recent events in the background. Nothing will be changed.' -Source 'AMRDriverSystemDiagnosis' } catch {}
+        $script:DriverDiagStartedAt = Get-Date
+        $script:DriverDiagAutoMode = [bool]$Auto
+        try { Set-AMRDriverDiagBadge -Text $(if ($Auto) { 'Automatic diagnosis running in the background...' } else { 'Diagnosing...' }) -Color '#E9D8B5' } catch {}
+        $definition = [string](Get-Command -Name Get-AMRDriverSystemReadPass -CommandType Function -ErrorAction Stop).Definition
+        $script:DriverDiagJob = Start-Job -ArgumentList $definition -ScriptBlock {
+            param($ReadPassDefinition)
+            Set-Item -Path 'Function:\Get-AMRDriverSystemReadPass' -Value ([scriptblock]::Create([string]$ReadPassDefinition)) -Force
+            Get-AMRDriverSystemReadPass
+        }
+        Write-AMRDriverDiagnostic -Severity INFO -Operation SystemDiagnosis -Stage Started -Message 'Read-only whole-system driver diagnosis started.' -Source 'AMRDriverSystemDiagnosis'
+        if (-not $script:DriverDiagTimer) {
+            $script:DriverDiagTimer = New-Object System.Windows.Threading.DispatcherTimer
+            $script:DriverDiagTimer.Interval = [TimeSpan]::FromMilliseconds(500)
+            $script:DriverDiagTimer.Add_Tick({
+                try {
+                    $job = $script:DriverDiagJob
+                    $finish = $false
+                    $snapshot = $null
+                    $failure = ''
+                    if (-not $job) { $finish = $true; $failure = 'The diagnosis job reference was lost.' }
+                    elseif ($job.State -eq 'Running' -or $job.State -eq 'NotStarted') {
+                        if (((Get-Date) - [datetime]$script:DriverDiagStartedAt).TotalSeconds -gt 150) {
+                            try { Stop-Job -Job $job -ErrorAction SilentlyContinue } catch {}
+                            $finish = $true; $failure = 'The diagnosis exceeded its 150-second limit and was stopped.'
+                        }
+                    } else {
+                        $finish = $true
+                        if ($job.State -eq 'Completed') {
+                            $received = @(Receive-Job -Job $job -ErrorAction SilentlyContinue)
+                            $withDevices = @($received | Where-Object { $_ -and $_.PSObject.Properties['Devices'] } | Select-Object -Last 1)
+                            if ($withDevices.Count -gt 0) { $snapshot = $withDevices[0] } else { $failure = 'The diagnosis job returned no data.' }
+                        } else { $failure = ('The diagnosis job ended as {0}.' -f [string]$job.State) }
+                    }
+                    if (-not $finish) { return }
+                    $script:DriverDiagTimer.Stop()
+                    if ($job) { try { Remove-Job -Job $job -Force -ErrorAction SilentlyContinue } catch {} }
+                    $script:DriverDiagJob = $null
+                    Complete-AMRDriverSystemDiagnosis -Snapshot $snapshot -Failure $failure
+                } catch {
+                    try { $script:DriverDiagTimer.Stop() } catch {}
+                    $script:DriverDiagJob = $null
+                    Write-AMRDriverDiagnostic -Severity ERROR -Operation SystemDiagnosis -Stage Failed -Message 'The diagnosis polling step failed.' -Source 'AMRDriverSystemDiagnosis' -ErrorRecord $_
+                    try { Update-AMRDriverActionButtons } catch {}
+                }
+            })
+        }
+        $script:DriverDiagTimer.Start()
+    } catch {
+        $script:DriverDiagJob = $null
+        Write-AMRDriverDiagnostic -Severity ERROR -Operation SystemDiagnosis -Stage Failed -Message 'The diagnosis could not be started.' -Source 'AMRDriverSystemDiagnosis' -ErrorRecord $_
+        if (-not $Auto) { Show-AMRGlassDialog -Message ('The diagnosis could not be started: ' + $_.Exception.Message) -Title 'AMR | Driver Diagnosis' -Icon Warning | Out-Null }
+        try { Set-AMRDriverDiagBadge -Text 'Diagnosis could not start' -Color '#FCA5A5' } catch {}
+        try { Update-AMRDriverActionButtons } catch {}
+    }
+}
+
+function Complete-AMRDriverSystemDiagnosis {
+    param($Snapshot, [string]$Failure = '')
+    $button = C 'DriverDiagnosisBtn'
+    try {
+        if ($Failure -or $null -eq $Snapshot) {
+            Write-AMRDriverDiagnostic -Severity WARNING -Operation SystemDiagnosis -Stage Failed -Message ('Diagnosis did not complete: ' + $Failure) -Source 'AMRDriverSystemDiagnosis' -Result 'Failed'
+            $statusText = C 'DriverActionStatus'
+            if ($statusText) { $statusText.Text = 'Diagnosis did not complete. Nothing was changed.' }
+            try { Set-AMRDriverDiagBadge -Text 'Diagnosis did not complete' -Color '#FCA5A5' -Summary 'Nothing was changed. Press Re-diagnose to try again.' } catch {}
+            if (-not $script:DriverDiagAutoMode) { Show-AMRGlassDialog -Message ('Diagnosis did not complete: ' + $Failure + "`n`nNothing was changed.") -Title 'AMR | Driver Diagnosis' -Icon Warning | Out-Null }
+            return
+        }
+        $rows = @($script:DriverAllDeviceRows)
+        $diagnosis = New-AMRDriverSystemDiagnosis -Snapshot $Snapshot -Rows $rows
+        $script:DriverDiagLast = $diagnosis
+        $script:DriverDiagSnapshot = $Snapshot
+        # Attach the result to matching scan rows so the existing CSV export carries it (Add-Member keeps the row shape).
+        foreach ($item in @($diagnosis.Items)) {
+            $itemKey = ([string]$item.DeviceId).ToUpperInvariant()
+            foreach ($row in $rows) {
+                if (-not $row) { continue }
+                if (([string](Get-AMRDiagProp $row 'DeviceId' '')).ToUpperInvariant() -ne $itemKey) { continue }
+                $fields = [ordered]@{
+                    DiagnosisTier=[string]$item.TierLabel; DiagnosisCategory=[string]$item.CodeName
+                    DiagnosisConfidence=[string]$item.Confidence; DiagnosisAssessment=[string]$item.Assessment
+                    DiagnosisRecommendedAction=[string]$item.SuggestedAction
+                }
+                foreach ($fieldName in $fields.Keys) { $row | Add-Member -NotePropertyName $fieldName -NotePropertyValue $fields[$fieldName] -Force }
+                break
+            }
+        }
+        foreach ($item in @($diagnosis.Items | Where-Object { $_.Tier -eq 1 })) {
+            Write-AMRDriverDiagnostic -Severity WARNING -Operation SystemDiagnosis -Stage DeviceFinding -Message ('{0}: {1}' -f $item.CodeName,$item.Assessment) -DeviceId ([string]$item.DeviceId) -Source 'AMRDriverSystemDiagnosis' -Result ([string]$item.Confidence) -Context @{Family=$item.Family;ProblemCode=$item.ProblemCode;Parent=$item.Parent;Children=$item.Children;Evidence=(@($item.Evidence) -join ' | ');Unknown=(@($item.Unknown) -join ' | ')}
+        }
+        foreach ($h in @($diagnosis.Hypotheses)) {
+            Write-AMRDriverDiagnostic -Severity INFO -Operation SystemDiagnosis -Stage Hypothesis -Message ([string]$h.Title) -Source 'AMRDriverSystemDiagnosis' -Result ([string]$h.Confidence) -Context @{Family=$h.Family;Evidence=(@($h.Evidence) -join ' | ');Against=(@($h.Against) -join ' | ');Unknown=(@($h.Unknown) -join ' | ')}
+        }
+        $counts = $diagnosis.Counts
+        Write-AMRDriverDiagnostic -Severity INFO -Operation SystemDiagnosis -Stage Completed -Message ('Read-only diagnosis completed: {0} device(s), {1} problem(s), {2} update-only, {3} light check, {4} healthy; read pass {5} ms.' -f $counts.TotalDevices,$counts.Problem,$counts.UpdateOnly,$counts.LightCheck,$counts.Healthy,$diagnosis.ElapsedMs) -Source 'AMRDriverSystemDiagnosis' -DurationMs ([long]$diagnosis.ElapsedMs) -Result 'Completed' -Context @{Coverage=(@($diagnosis.Coverage) -join ' | ')}
+        $statusText = C 'DriverActionStatus'
+        if ($statusText) { $statusText.Text = ('Diagnosis completed: {0} device(s), {1} problem(s). Nothing was changed.' -f $counts.TotalDevices,$counts.Problem) }
+        $script:DriverRepairCandidates = @(Get-AMRDriverRepairCandidates -Diagnosis $diagnosis -Snapshot $Snapshot)
+        foreach ($cand in $script:DriverRepairCandidates) { Write-AMRDriverDiagnostic -Severity INFO -Operation SystemDiagnosis -Stage RepairEligible -Message ('Essential Code 22 device eligible for repair: ' + [string]$cand.DeviceName) -DeviceId ([string]$cand.DeviceId) -Source 'AMRDriverSystemDiagnosis' }
+        try { Show-AMRDriverDiagResult -Diagnosis $diagnosis } catch {
+            Write-AMRDriverDiagnostic -Severity WARNING -Operation SystemDiagnosis -Stage CardsFailed -Message ('Result cards failed, showing text: ' + $_.Exception.Message) -Source 'AMRDriverSystemDiagnosis'
+            if (-not $script:DriverDiagAutoMode) { Show-AMRGlassDialog -Message (Format-AMRDriverSystemDiagnosisText -Diagnosis $diagnosis -MaxItems 8) -Title 'AMR | Driver Diagnosis (read-only)' | Out-Null }
+        }
+    } catch {
+        Write-AMRDriverDiagnostic -Severity ERROR -Operation SystemDiagnosis -Stage Failed -Message 'Diagnosis result processing failed.' -Source 'AMRDriverSystemDiagnosis' -ErrorRecord $_
+        try { Set-AMRDriverDiagBadge -Text 'Diagnosis could not be shown' -Color '#FCA5A5' } catch {}
+        if (-not $script:DriverDiagAutoMode) { Show-AMRGlassDialog -Message ('Diagnosis could not be shown: ' + $_.Exception.Message + "`n`nNothing was changed.") -Title 'AMR | Driver Diagnosis' -Icon Warning | Out-Null }
+    } finally {
+        try { Update-AMRDriverActionButtons } catch {}
+    }
+}
+
+# ===== A12: glass dialog, in-panel diagnosis cards, automatic diagnosis, Code 22 repair, restore-point prompt =====
+# Shared glass dialog (style A: transparent layered glass; style B: solid rounded for weaker graphics; last resort: MessageBox).
+# Returns the same literal strings a MessageBox would ('OK', 'Yes', 'No'). Used for Driver results only in A12.
+function New-AMRGlassBrush {
+    param([string]$Color)
+    $converter = New-Object System.Windows.Media.BrushConverter
+    return [System.Windows.Media.Brush]$converter.ConvertFromString($Color)
+}
+
+function New-AMRGlassButtonStyle {
+    param([string]$Role = 'Blue',[switch]$Animated)
+    $c = @{ Top='#F23A6FE0'; Bottom='#F21B3FA0'; Edge='#CC3F6FE0'; HoverTop='#FF2F63DB'; HoverBottom='#FF16379A'; PressTop='#FF1F4FB8'; PressBottom='#FF122C78'; HoverEdge='#FF5B8CF5'; Sheen='#26FFFFFF' }
+    if ($Role -eq 'Red') { $c = @{ Top='#D9E5646B'; Bottom='#D9A52030'; Edge='#99FFC2C6'; HoverTop='#F2F2808A'; HoverBottom='#F2C22A3C'; PressTop='#FFB8303F'; PressBottom='#FF7F1624'; HoverEdge='#FFFFFFFF'; Sheen='#55FFFFFF' } }
+    # A4: -Animated adds a 220 ms hover (glow fades in, tiny lift). Used only by the Candidate and Source manager windows.
+    $rootOpen = '<Grid>'
+    $overlayXaml = ''
+    # A5: the plain (A3) hover block is the default; -Animated replaces it with the 220 ms animated block below.
+    $hoverTriggerXaml = @"
+          <Trigger Property="IsMouseOver" Value="True">
+            <Setter TargetName="GlassButtonBorder" Property="Background">
+              <Setter.Value><LinearGradientBrush StartPoint="0,0" EndPoint="0,1"><GradientStop Color="$($c.HoverTop)" Offset="0"/><GradientStop Color="$($c.HoverBottom)" Offset="1"/></LinearGradientBrush></Setter.Value>
+            </Setter>
+            <Setter TargetName="GlassButtonBorder" Property="BorderBrush" Value="$($c.HoverEdge)"/>
+          </Trigger>
+"@
+    $pressTarget = 'GlassButtonBorder'
+    if ($Animated) {
+        $rootOpen = '<Grid x:Name="GlassButtonRoot" RenderTransformOrigin="0.5,0.5"><Grid.RenderTransform><TransformGroup><ScaleTransform ScaleX="1" ScaleY="1"/><TranslateTransform Y="0"/></TransformGroup></Grid.RenderTransform>'
+        $overlayXaml = @"
+          <Border x:Name="GlassButtonHover" BorderBrush="$($c.HoverEdge)" BorderThickness="1" CornerRadius="9" Opacity="0" IsHitTestVisible="False" SnapsToDevicePixels="True">
+            <Border.Background>
+              <LinearGradientBrush StartPoint="0,0" EndPoint="0,1"><GradientStop Color="$($c.HoverTop)" Offset="0"/><GradientStop Color="$($c.HoverBottom)" Offset="1"/></LinearGradientBrush>
+            </Border.Background>
+          </Border>
+"@
+        $pressTarget = 'GlassButtonHover'
+        $hoverTriggerXaml = @"
+          <MultiTrigger>
+            <MultiTrigger.Conditions>
+              <Condition Property="IsMouseOver" Value="True"/>
+              <Condition Property="IsEnabled" Value="True"/>
+            </MultiTrigger.Conditions>
+            <MultiTrigger.EnterActions>
+              <BeginStoryboard>
+                <Storyboard>
+                  <DoubleAnimation Storyboard.TargetName="GlassButtonHover" Storyboard.TargetProperty="Opacity" To="1" Duration="0:0:0.22"/>
+                  <DoubleAnimation Storyboard.TargetName="GlassButtonRoot" Storyboard.TargetProperty="(UIElement.RenderTransform).(TransformGroup.Children)[0].(ScaleTransform.ScaleX)" To="1.03" Duration="0:0:0.22"/>
+                  <DoubleAnimation Storyboard.TargetName="GlassButtonRoot" Storyboard.TargetProperty="(UIElement.RenderTransform).(TransformGroup.Children)[0].(ScaleTransform.ScaleY)" To="1.03" Duration="0:0:0.22"/>
+                  <DoubleAnimation Storyboard.TargetName="GlassButtonRoot" Storyboard.TargetProperty="(UIElement.RenderTransform).(TransformGroup.Children)[1].(TranslateTransform.Y)" To="-1" Duration="0:0:0.22"/>
+                </Storyboard>
+              </BeginStoryboard>
+            </MultiTrigger.EnterActions>
+            <MultiTrigger.ExitActions>
+              <BeginStoryboard>
+                <Storyboard>
+                  <DoubleAnimation Storyboard.TargetName="GlassButtonHover" Storyboard.TargetProperty="Opacity" To="0" Duration="0:0:0.22"/>
+                  <DoubleAnimation Storyboard.TargetName="GlassButtonRoot" Storyboard.TargetProperty="(UIElement.RenderTransform).(TransformGroup.Children)[0].(ScaleTransform.ScaleX)" To="1" Duration="0:0:0.22"/>
+                  <DoubleAnimation Storyboard.TargetName="GlassButtonRoot" Storyboard.TargetProperty="(UIElement.RenderTransform).(TransformGroup.Children)[0].(ScaleTransform.ScaleY)" To="1" Duration="0:0:0.22"/>
+                  <DoubleAnimation Storyboard.TargetName="GlassButtonRoot" Storyboard.TargetProperty="(UIElement.RenderTransform).(TransformGroup.Children)[1].(TranslateTransform.Y)" To="0" Duration="0:0:0.22"/>
+                </Storyboard>
+              </BeginStoryboard>
+            </MultiTrigger.ExitActions>
+          </MultiTrigger>
+          <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="GlassButtonBorder" Property="BorderBrush" Value="$($c.HoverEdge)"/></Trigger>
+"@
+    }
+    $styleXaml = @"
+<Style xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" TargetType="{x:Type Button}">
+  <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+  <Setter Property="Foreground" Value="#FFFFFFFF"/>
+  <Setter Property="FontWeight" Value="SemiBold"/>
+  <Setter Property="Template">
+    <Setter.Value>
+      <ControlTemplate TargetType="{x:Type Button}">
+        $rootOpen
+          <Border x:Name="GlassButtonBorder" BorderBrush="$($c.Edge)" BorderThickness="1" CornerRadius="9" SnapsToDevicePixels="True">
+            <Border.Background>
+              <LinearGradientBrush StartPoint="0,0" EndPoint="0,1"><GradientStop Color="$($c.Top)" Offset="0"/><GradientStop Color="$($c.Bottom)" Offset="1"/></LinearGradientBrush>
+            </Border.Background>
+          </Border>
+$overlayXaml
+          <Border x:Name="GlassButtonSheen" CornerRadius="9,9,0,0" Margin="1,1,1,0" VerticalAlignment="Top" Height="14" IsHitTestVisible="False">
+            <Border.Background>
+              <LinearGradientBrush StartPoint="0,0" EndPoint="0,1"><GradientStop Color="$($c.Sheen)" Offset="0"/><GradientStop Color="#00FFFFFF" Offset="1"/></LinearGradientBrush>
+            </Border.Background>
+          </Border>
+          <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" Margin="14,3" RecognizesAccessKey="True"/>
+        </Grid>
+        <ControlTemplate.Triggers>
+$hoverTriggerXaml
+          <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="GlassButtonBorder" Property="BorderBrush" Value="$($c.HoverEdge)"/></Trigger>
+          <Trigger Property="IsPressed" Value="True">
+            <Setter TargetName="$pressTarget" Property="Background">
+              <Setter.Value><LinearGradientBrush StartPoint="0,0" EndPoint="0,1"><GradientStop Color="$($c.PressTop)" Offset="0"/><GradientStop Color="$($c.PressBottom)" Offset="1"/></LinearGradientBrush></Setter.Value>
+            </Setter>
+          </Trigger>
+        </ControlTemplate.Triggers>
+      </ControlTemplate>
+    </Setter.Value>
+  </Setter>
+</Style>
+"@
+    return [Windows.Markup.XamlReader]::Parse($styleXaml)
+}
+
+function Invoke-AMRGlassDialogTier {
+    param([string]$Tier,[string]$Message,[string]$Title,[string]$Buttons,[string]$Icon)
+    $state = @{ Result = $(if ($Buttons -eq 'YesNo') { 'No' } else { 'OK' }) }
+    $window = New-Object System.Windows.Window
+    $window.WindowStyle = 'None'
+    $window.ResizeMode = 'NoResize'
+    $window.ShowInTaskbar = $false
+    $window.SizeToContent = 'Height'
+    $window.Width = 580
+    $workHeight = 700
+    try { $workHeight = [double][System.Windows.SystemParameters]::WorkArea.Height } catch {}
+    $window.MaxHeight = [math]::Max(300, [math]::Floor($workHeight * 0.85))
+    $window.WindowStartupLocation = 'CenterScreen'
+    try { if ($script:Window -and $script:Window.IsVisible) { $window.Owner = $script:Window; $window.WindowStartupLocation = 'CenterOwner' } } catch {}
+    $root = New-Object System.Windows.Controls.Border
+    $root.CornerRadius = New-Object System.Windows.CornerRadius(14)
+    $root.BorderThickness = New-Object System.Windows.Thickness(1)
+    if ($Tier -eq 'A') {
+        $window.AllowsTransparency = $true
+        $window.Background = [System.Windows.Media.Brushes]::Transparent
+        $gradient = New-Object System.Windows.Media.LinearGradientBrush
+        $gradient.StartPoint = New-Object System.Windows.Point(0,0); $gradient.EndPoint = New-Object System.Windows.Point(1,1)
+        $gradient.GradientStops.Add((New-Object System.Windows.Media.GradientStop((New-AMRGlassBrush '#F0202B3A').Color, 0.0))) | Out-Null
+        $gradient.GradientStops.Add((New-Object System.Windows.Media.GradientStop((New-AMRGlassBrush '#F0111823').Color, 1.0))) | Out-Null
+        $root.Background = $gradient
+        $root.BorderBrush = New-AMRGlassBrush '#66E9D8B5'
+        $root.Margin = New-Object System.Windows.Thickness(6)
+    } else {
+        $window.Background = New-AMRGlassBrush '#FF141B27'
+        $root.Background = New-AMRGlassBrush '#FF18212E'
+        $root.BorderBrush = New-AMRGlassBrush '#88E9D8B5'
+    }
+    $grid = New-Object System.Windows.Controls.Grid
+    foreach ($h in @('Auto','*','Auto')) { $rd = New-Object System.Windows.Controls.RowDefinition; $rd.Height = [System.Windows.GridLength]::Auto; if ($h -eq '*') { $rd.Height = New-Object System.Windows.GridLength(1,[System.Windows.GridUnitType]::Star) }; $grid.RowDefinitions.Add($rd) }
+    # Title row (drag handle + close).
+    $titleGrid = New-Object System.Windows.Controls.Grid
+    $c1 = New-Object System.Windows.Controls.ColumnDefinition; $c1.Width = New-Object System.Windows.GridLength(1,[System.Windows.GridUnitType]::Star)
+    $c2 = New-Object System.Windows.Controls.ColumnDefinition; $c2.Width = [System.Windows.GridLength]::Auto
+    $titleGrid.ColumnDefinitions.Add($c1); $titleGrid.ColumnDefinitions.Add($c2)
+    $titleGrid.Margin = New-Object System.Windows.Thickness(18,12,10,6)
+    $titleText = New-Object System.Windows.Controls.TextBlock
+    $glyph = ''; switch ($Icon) { 'Warning' { $glyph = ([string][char]0x26A0) + '  ' } 'Error' { $glyph = ([string][char]0x2716) + '  ' } 'Information' { $glyph = ([string][char]0x2139) + '  ' } 'Question' { $glyph = '?  ' } }
+    $titleText.Text = ($glyph + $Title); $titleText.FontSize = 14; $titleText.FontWeight = 'Bold'; $titleText.Foreground = New-AMRGlassBrush '#E9D8B5'; $titleText.VerticalAlignment = 'Center'; $titleText.TextTrimming = 'CharacterEllipsis'
+    [System.Windows.Controls.Grid]::SetColumn($titleText,0)
+    $closeButton = New-Object System.Windows.Controls.Button
+    $closeButton.Content = [string][char]0x2715; $closeButton.Width = 30; $closeButton.Height = 26; $closeButton.Background = [System.Windows.Media.Brushes]::Transparent
+    $closeButton.Foreground = New-AMRGlassBrush '#CBD5E1'; $closeButton.BorderThickness = New-Object System.Windows.Thickness(0); $closeButton.Cursor = [System.Windows.Input.Cursors]::Hand
+    # A13d: soft round close button. Hover is a translucent red glow (no pale default square), visual only.
+    try {
+        $closeButton.Width = 28; $closeButton.Height = 28; $closeButton.FocusVisualStyle = $null
+        $closeTemplateXaml = @"
+<ControlTemplate xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" TargetType="{x:Type Button}">
+  <Grid>
+    <Border x:Name="CloseFace" CornerRadius="14" Background="#00000000" BorderBrush="#00000000" BorderThickness="1">
+      <ContentPresenter x:Name="CloseGlyph" HorizontalAlignment="Center" VerticalAlignment="Center" TextElement.Foreground="#FFCBD5E1"/>
+    </Border>
+  </Grid>
+  <ControlTemplate.Triggers>
+    <Trigger Property="IsMouseOver" Value="True">
+      <Setter TargetName="CloseFace" Property="Background" Value="#55E5646B"/>
+      <Setter TargetName="CloseFace" Property="BorderBrush" Value="#99E5646B"/>
+      <Setter TargetName="CloseGlyph" Property="TextElement.Foreground" Value="#FFFFD9DC"/>
+    </Trigger>
+    <Trigger Property="IsPressed" Value="True">
+      <Setter TargetName="CloseFace" Property="Background" Value="#88B52A38"/>
+    </Trigger>
+  </ControlTemplate.Triggers>
+</ControlTemplate>
+"@
+        $closeButton.Template = [Windows.Markup.XamlReader]::Parse($closeTemplateXaml)
+    } catch {
+        try { Write-AMRDriverDiagnostic -Severity WARNING -Operation GlassDialog -Stage CloseStyleFallback -Message ('Close button used the default template: ' + $_.Exception.Message) -Source 'AMRGlassDialog' } catch {}
+    }
+    [System.Windows.Controls.Grid]::SetColumn($closeButton,1)
+    $titleGrid.Children.Add($titleText) | Out-Null; $titleGrid.Children.Add($closeButton) | Out-Null
+    [System.Windows.Controls.Grid]::SetRow($titleGrid,0)
+    $titleGrid.Add_MouseLeftButtonDown({ param($s,$e) try { $w = [System.Windows.Window]::GetWindow($s); if ($w) { $w.DragMove() } } catch {} })
+    # Body.
+    $scroll = New-Object System.Windows.Controls.ScrollViewer
+    $scroll.VerticalScrollBarVisibility = 'Auto'; $scroll.Margin = New-Object System.Windows.Thickness(18,4,18,8)
+    $body = New-Object System.Windows.Controls.TextBlock
+    $body.Text = $Message; $body.TextWrapping = 'Wrap'; $body.FontSize = 12; $body.Foreground = New-AMRGlassBrush '#E2E8F0'; $body.LineHeight = 18
+    $scroll.Content = $body
+    [System.Windows.Controls.Grid]::SetRow($scroll,1)
+    # Buttons.
+    $buttonPanel = New-Object System.Windows.Controls.StackPanel
+    $buttonPanel.Orientation = 'Horizontal'; $buttonPanel.HorizontalAlignment = 'Right'; $buttonPanel.Margin = New-Object System.Windows.Thickness(18,6,18,16)
+    [System.Windows.Controls.Grid]::SetRow($buttonPanel,2)
+    $makeButton = {
+        param([string]$Text,[string]$Value,[bool]$IsDefault)
+        $b = New-Object System.Windows.Controls.Button
+        $b.Content = $Text; $b.MinWidth = 96; $b.Height = 32; $b.Margin = New-Object System.Windows.Thickness(8,0,0,0)
+        $b.Foreground = New-AMRGlassBrush '#F4F7FA'; $b.Background = New-AMRGlassBrush $(if ($IsDefault) { '#FF2F5E85' } else { '#FF303846' })
+        $b.BorderBrush = New-AMRGlassBrush '#FF526176'; $b.Cursor = [System.Windows.Input.Cursors]::Hand; $b.Tag = $Value
+        $b.IsDefault = $false
+        try { $b.Style = New-AMRGlassButtonStyle -Role $(if ($Value -eq 'No') { 'Red' } else { 'Blue' }) -Animated } catch { try { Write-AMRDriverDiagnostic -Severity WARNING -Operation GlassDialog -Stage ButtonFallback -Message ('Dialog button kept the default look: ' + $_.Exception.Message) -Source 'AMRGlassDialog' } catch {} }
+        return $b
+    }
+    $buttonList = @()
+    if ($Buttons -eq 'YesNo') { $buttonList += (& $makeButton 'Yes' 'Yes' $false); $buttonList += (& $makeButton 'No' 'No' $true) } else { $buttonList += (& $makeButton 'OK' 'OK' $true) }
+    foreach ($b in $buttonList) {
+        $b.Add_Click({ param($s,$e) $state['Result'] = [string]$s.Tag; [System.Windows.Window]::GetWindow($s).Close() }.GetNewClosure())
+        $buttonPanel.Children.Add($b) | Out-Null
+    }
+    $closeButton.Add_Click({ param($s,$e) [System.Windows.Window]::GetWindow($s).Close() })
+    $window.Add_PreviewKeyDown({ param($s,$e) if ($e.Key -eq [System.Windows.Input.Key]::Escape) { $e.Handled = $true; $s.Close() } })
+    $grid.Children.Add($titleGrid) | Out-Null; $grid.Children.Add($scroll) | Out-Null; $grid.Children.Add($buttonPanel) | Out-Null
+    $root.Child = $grid
+    $window.Content = $root
+    $defaultButton = $buttonList[$buttonList.Count - 1]
+    $window.Add_ContentRendered({ try { $defaultButton.Focus() | Out-Null } catch {} }.GetNewClosure())
+    [void]$window.ShowDialog()
+    return [string]$state['Result']
+}
+
+function Show-AMRGlassDialog {
+    param([string]$Message,[string]$Title='AMR | Driver Center',[ValidateSet('OK','YesNo')][string]$Buttons='OK',[string]$Icon='Information')
+    $tiers = @('A','B')
+    try { if (([int]([System.Windows.Media.RenderCapability]::Tier -shr 16)) -lt 2) { $tiers = @('B') } } catch {}
+    foreach ($tier in $tiers) {
+        try {
+            $result = Invoke-AMRGlassDialogTier -Tier $tier -Message $Message -Title $Title -Buttons $Buttons -Icon $Icon
+            if ($result) { return [string](@($result)[-1]) }
+        } catch {
+            try { Write-AMRDriverDiagnostic -Severity WARNING -Operation GlassDialog -Stage Fallback -Message ('Glass dialog style {0} failed: {1}' -f $tier,$_.Exception.Message) -Source 'AMRGlassDialog' } catch {}
+        }
+    }
+    $mbButtons = [System.Windows.MessageBoxButton]::OK; if ($Buttons -eq 'YesNo') { $mbButtons = [System.Windows.MessageBoxButton]::YesNo }
+    $mbIcon = [System.Windows.MessageBoxImage]::Information; if ($Icon -eq 'Warning') { $mbIcon = [System.Windows.MessageBoxImage]::Warning }
+    return [string](Show-AMRMessage $Message $Title $mbButtons $mbIcon)
+}
+
+# Drop-in replacement for Show-AMRMessage on selected result and consent windows (same text, buttons, return values).
+# Returns a real [System.Windows.MessageBoxResult]. Any other button set, or any failure, uses the original MessageBox.
+function Show-AMRMessageGlass {
+    param(
+        [string]$Message,
+        [string]$Title='Amr | windows_utility',
+        [System.Windows.MessageBoxButton]$Buttons=[System.Windows.MessageBoxButton]::OK,
+        [System.Windows.MessageBoxImage]$Icon=[System.Windows.MessageBoxImage]::Information
+    )
+    try {
+        if ($Buttons -eq [System.Windows.MessageBoxButton]::OK -or $Buttons -eq [System.Windows.MessageBoxButton]::YesNo) {
+            $iconName = 'Information'
+            if ($Icon -eq [System.Windows.MessageBoxImage]::Warning) { $iconName = 'Warning' } elseif ($Icon -eq [System.Windows.MessageBoxImage]::Error) { $iconName = 'Error' } elseif ($Icon -eq [System.Windows.MessageBoxImage]::Question) { $iconName = 'Question' }
+            $answer = Show-AMRGlassDialog -Message $Message -Title $Title -Buttons $(if ($Buttons -eq [System.Windows.MessageBoxButton]::YesNo) { 'YesNo' } else { 'OK' }) -Icon $iconName
+            if ($answer -eq 'Yes') { return [System.Windows.MessageBoxResult]::Yes }
+            if ($answer -eq 'No') { return [System.Windows.MessageBoxResult]::No }
+            return [System.Windows.MessageBoxResult]::OK
+        }
+    } catch {
+        try { Write-AMRDriverDiagnostic -Severity WARNING -Operation GlassDialog -Stage Fallback -Message ('Glass message failed, using MessageBox: ' + $_.Exception.Message) -Source 'AMRGlassDialog' } catch {}
+    }
+    return (Show-AMRMessage $Message $Title $Buttons $Icon)
+}
+
+# A2: "Open in Driver Update" button on each problem card. Selection and navigation only; nothing is installed or changed.
+function Find-AMRDriverRowByDevice {
+    param($Rows,[string]$DeviceId,[string]$DeviceName)
+    $byName = New-Object System.Collections.ArrayList
+    foreach ($candidateRow in @($Rows)) {
+        if ($null -eq $candidateRow) { continue }
+        $rowId = [string](Get-AMRDiagProp $candidateRow 'DeviceId' '')
+        if (-not [string]::IsNullOrWhiteSpace($DeviceId) -and -not [string]::IsNullOrWhiteSpace($rowId) -and [string]::Equals($rowId,$DeviceId,[System.StringComparison]::OrdinalIgnoreCase)) { return $candidateRow }
+        $rowName = [string](Get-AMRDiagProp $candidateRow 'DeviceName' '')
+        if (-not [string]::IsNullOrWhiteSpace($DeviceName) -and [string]::Equals($rowName,$DeviceName,[System.StringComparison]::OrdinalIgnoreCase)) { [void]$byName.Add($candidateRow) }
+    }
+    # Name is only a fallback and only when it is unambiguous.
+    if ($byName.Count -eq 1) { return $byName[0] }
+    return $null
+}
+
+function Invoke-AMRDriverProblemGoto {
+    param($Info)
+    $deviceId = [string](Get-AMRDiagProp $Info 'DeviceId' '')
+    $deviceName = [string](Get-AMRDiagProp $Info 'DeviceName' '')
+    $label = $(if ([string]::IsNullOrWhiteSpace($deviceName)) { 'this device' } else { $deviceName })
+    $list = C 'DriverDeviceList'
+    if (-not $list) { return }
+    if ($script:DriverScanJob -or $script:DriverActionJob -or $script:DriverManagedJob -or $script:DriverRepairJob -or $script:DriverBatchActive -or $script:DriverSmartQueueActive) {
+        Show-AMRGlassDialog -Message 'Wait for the active Driver Center operation to finish first.' -Title 'AMR | Driver Center' | Out-Null
+        return
+    }
+    $row = Find-AMRDriverRowByDevice -Rows @($list.ItemsSource) -DeviceId $deviceId -DeviceName $deviceName
+    if (-not $row) {
+        # The row may be hidden by the search box or by the Smart filter. Clear the search text and look again.
+        $inventoryRow = Find-AMRDriverRowByDevice -Rows @($script:DriverAllDeviceRows) -DeviceId $deviceId -DeviceName $deviceName
+        if ($inventoryRow) {
+            try { if ($script:SmartSearchBox -and -not [string]::IsNullOrWhiteSpace([string]$script:SmartSearchBox.Text)) { $script:SmartSearchBox.Text = '' } } catch {}
+            Update-AMRDriverSearchView -Query ''
+            $row = Find-AMRDriverRowByDevice -Rows @($list.ItemsSource) -DeviceId $deviceId -DeviceName $deviceName
+        }
+    }
+    if (-not $row) {
+        Write-AMRDriverDiagnostic -Severity INFO -Operation ProblemGoto -Stage RowNotFound -Message ('No Driver Update row matched the problem device "{0}".' -f $label) -DeviceId $deviceId -Source 'Invoke-AMRDriverProblemGoto'
+        Show-AMRGlassDialog -Message ("The device list has no row for $label in the current scan.`n`nRun Scan Device again, then Diagnose. Nothing was changed.") -Title 'AMR | Driver Center' -Icon Information | Out-Null
+        return
+    }
+    Set-AMRDriverTab -Tab 'Update'
+    $list.SelectedItems.Clear()
+    $list.SelectedItem = $row
+    $script:DriverGotoRow = $row
+    try {
+        $script:Window.Dispatcher.BeginInvoke([System.Windows.Threading.DispatcherPriority]::Loaded,[Action]{
+            try {
+                $gotoList = C 'DriverDeviceList'; $gotoRow = $script:DriverGotoRow
+                if ($gotoList -and $gotoRow) { $gotoList.UpdateLayout(); $gotoList.ScrollIntoView($gotoRow) }
+                $gotoPane = C 'DriverUpdatePane'; if ($gotoPane) { $gotoPane.BringIntoView() }
+            } catch {}
+        }) | Out-Null
+    } catch {}
+    $hasUpdate = -not [string]::IsNullOrWhiteSpace([string](Get-AMRDiagProp $row 'UpdateId' ''))
+    $isReady = ($hasUpdate -and [bool](Get-AMRDiagProp $row 'UpdateReady' $false))
+    $smartMode = ($script:DriverExperienceMode -eq 'Smart')
+    $outcome = 'NoUpdate'
+    $statusText = C 'DriverActionStatus'
+    if ($isReady) {
+        $outcome = 'UpdateReady'
+        if ($statusText) { $statusText.Text = $(if ($smartMode) { ('Selected "{0}". A ready update exists. Use Start Smart Install when you want to install it.' -f $label) } else { ('Selected "{0}". A ready update exists. Use Install Ready Update when you want to install it.' -f $label) }) }
+    } elseif ($hasUpdate) {
+        $outcome = 'UpdateNotReady'
+        if ($statusText) { $statusText.Text = $(if ($smartMode) { ('Selected "{0}". An update was found but is not prepared yet. Use Smart Select, then Start Smart Install.' -f $label) } else { ('Selected "{0}". An update was found but is not downloaded yet. Use Download & Save Package first.' -f $label) }) }
+    } else {
+        $tail = $(if ($smartMode) { 'Switch to Professional mode to compare candidates or check other sources for it.' } else { 'You can use Source Manager or Check Rollback on it.' })
+        Show-AMRGlassDialog -Message ("No ready driver update exists for $label in the current scan, so there is nothing to install for it from here.`n`nThe device is selected in Driver Update. $tail`nNothing was changed.") -Title 'AMR | Driver Center' -Icon Information | Out-Null
+    }
+    Write-AMRDriverDiagnostic -Severity INFO -Operation ProblemGoto -Stage Selected -Message ('Selected "{0}" in Driver Update from its problem card (outcome {1}). Nothing was installed or changed.' -f $label,$outcome) -DeviceId $deviceId -Source 'Invoke-AMRDriverProblemGoto'
+}
+
+function Start-AMRProblemGotoHover {
+    param($Button,[bool]$On)
+    $glyph = $Button.Content
+    if (-not $glyph -or -not ($glyph.RenderTransform -is [System.Windows.Media.TransformGroup])) { return }
+    $ease = New-Object System.Windows.Media.Animation.CubicEase; $ease.EasingMode = 'EaseOut'
+    $scaleTo = $(if ($On) { 1.14 } else { 1.0 }); $angleTo = $(if ($On) { -8.0 } else { 0.0 })
+    $scaleX = New-Object System.Windows.Media.Animation.DoubleAnimation; $scaleX.To = $scaleTo; $scaleX.Duration = [TimeSpan]::FromMilliseconds(220); $scaleX.EasingFunction = $ease
+    $scaleY = New-Object System.Windows.Media.Animation.DoubleAnimation; $scaleY.To = $scaleTo; $scaleY.Duration = [TimeSpan]::FromMilliseconds(220); $scaleY.EasingFunction = $ease
+    $turn = New-Object System.Windows.Media.Animation.DoubleAnimation; $turn.To = $angleTo; $turn.Duration = [TimeSpan]::FromMilliseconds(220); $turn.EasingFunction = $ease
+    $glyph.RenderTransform.Children[0].BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleXProperty,$scaleX)
+    $glyph.RenderTransform.Children[0].BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleYProperty,$scaleY)
+    $glyph.RenderTransform.Children[1].BeginAnimation([System.Windows.Media.RotateTransform]::AngleProperty,$turn)
+}
+
+function New-AMRProblemGotoButton {
+    param([string]$DeviceId,[string]$DeviceName)
+    $button = New-Object System.Windows.Controls.Button
+    $button.Width = 44; $button.Height = 44; $button.Padding = New-Object System.Windows.Thickness(0)
+    $button.Margin = New-Object System.Windows.Thickness(12,0,0,0)
+    $button.HorizontalAlignment = 'Right'; $button.VerticalAlignment = 'Top'
+    $button.Background = New-AMRGlassBrush '#33D8B56D'; $button.BorderBrush = New-AMRGlassBrush '#99D8B56D'
+    $button.BorderThickness = New-Object System.Windows.Thickness(1)
+    $button.ToolTip = 'Open this device in Driver Update. It is selected for you; nothing is installed or changed.'
+    $button.Tag = [pscustomobject]@{ DeviceId = $DeviceId; DeviceName = $DeviceName }
+    # Chip icon (vector, no font dependency): hardware with pins.
+    $icon = New-Object System.Windows.Shapes.Path
+    $icon.Data = [System.Windows.Media.Geometry]::Parse('M7,7 H17 V17 H7 Z M10,10 H14 V14 H10 Z M9.5,2.5 V5 M14.5,2.5 V5 M9.5,19 V21.5 M14.5,19 V21.5 M2.5,9.5 H5 M2.5,14.5 H5 M19,9.5 H21.5 M19,14.5 H21.5')
+    $icon.Width = 24; $icon.Height = 24; $icon.Stretch = [System.Windows.Media.Stretch]::None
+    $icon.Stroke = New-AMRGlassBrush '#FFE9D8B5'; $icon.StrokeThickness = 1.7
+    $icon.StrokeStartLineCap = [System.Windows.Media.PenLineCap]::Round; $icon.StrokeEndLineCap = [System.Windows.Media.PenLineCap]::Round; $icon.StrokeLineJoin = [System.Windows.Media.PenLineJoin]::Round
+    $icon.HorizontalAlignment = 'Center'; $icon.VerticalAlignment = 'Center'
+    $icon.RenderTransformOrigin = New-Object System.Windows.Point(0.5,0.5)
+    $group = New-Object System.Windows.Media.TransformGroup
+    [void]$group.Children.Add((New-Object System.Windows.Media.ScaleTransform(1.0,1.0)))
+    [void]$group.Children.Add((New-Object System.Windows.Media.RotateTransform(0.0)))
+    $icon.RenderTransform = $group
+    $button.Content = $icon
+    $button.Add_MouseEnter({ try { Start-AMRProblemGotoHover -Button $this -On $true } catch {} })
+    $button.Add_MouseLeave({ try { Start-AMRProblemGotoHover -Button $this -On $false } catch {} })
+    $button.Add_Click({ try { Invoke-AMRDriverProblemGoto -Info $this.Tag } catch { try { Write-AMRDriverDiagnostic -Severity WARNING -Operation ProblemGoto -Stage Failed -Message ('The problem card button failed: ' + $_.Exception.Message) -Source 'Invoke-AMRDriverProblemGoto' } catch {} } })
+    return $button
+}
+
+# ----- In-panel result cards (problems first). Read-only view of $script:DriverDiagLast. -----
+function Add-AMRDriverDiagCard {
+    param($Item,$Panel)
+    # A13c: large premium card. Same data as before (device, family, code, assessment, suggestion,
+    # confidence, evidence/against/unknown/parent). No shadow effects, so many cards stay light on any hardware.
+    $deep = [string][char]0x26A0
+    $confidence = [string](Get-AMRDiagProp $Item 'Confidence' '')
+    $accent = '#FF64748B'; if ($confidence -eq 'High') { $accent = '#FFD8B56D' } elseif ($confidence -eq 'Medium') { $accent = '#FF8FA9C9' }
+    $baseFill = $null; $baseEdge = $null
+    try { $baseFill = $script:Window.TryFindResource('ActivationInnerGlassBrush'); $baseEdge = $script:Window.TryFindResource('ActivationGlassEdgeBrush') } catch {}
+    if (-not $baseFill) { $baseFill = New-AMRGlassBrush '#40202C3A' }
+    if (-not $baseEdge) { $baseEdge = New-AMRGlassBrush '#FF526176' }
+    $accentBrush = New-AMRGlassBrush $accent
+
+    $card = New-Object System.Windows.Controls.Border
+    $card.Margin = New-Object System.Windows.Thickness(0,0,0,14)
+    $card.CornerRadius = New-Object System.Windows.CornerRadius(14); $card.BorderThickness = New-Object System.Windows.Thickness(1)
+    $card.Background = $baseFill
+    $card.BorderBrush = $baseEdge
+
+    $grid = New-Object System.Windows.Controls.Grid
+    $c0 = New-Object System.Windows.Controls.ColumnDefinition; $c0.Width = New-Object System.Windows.GridLength(6)
+    $c1 = New-Object System.Windows.Controls.ColumnDefinition; $c1.Width = New-Object System.Windows.GridLength(1,[System.Windows.GridUnitType]::Star)
+    $grid.ColumnDefinitions.Add($c0); $grid.ColumnDefinitions.Add($c1)
+    $bar = New-Object System.Windows.Controls.Border
+    $bar.CornerRadius = New-Object System.Windows.CornerRadius(14,0,0,14); $bar.Background = New-AMRGlassBrush $accent
+    [System.Windows.Controls.Grid]::SetColumn($bar,0)
+    $grid.Children.Add($bar) | Out-Null
+
+    $stack = New-Object System.Windows.Controls.StackPanel
+    $stack.Margin = New-Object System.Windows.Thickness(18,16,18,16)
+    [System.Windows.Controls.Grid]::SetColumn($stack,1)
+
+    # Header: icon + device name + chips
+    $head = New-Object System.Windows.Controls.StackPanel; $head.Orientation = 'Horizontal'
+    $icon = New-Object System.Windows.Controls.Border
+    $icon.Width = 40; $icon.Height = 40; $icon.CornerRadius = New-Object System.Windows.CornerRadius(20); $icon.Margin = New-Object System.Windows.Thickness(0,0,14,0)
+    $icon.Background = New-AMRGlassBrush '#26FFFFFF'; $icon.BorderThickness = New-Object System.Windows.Thickness(1); $icon.BorderBrush = New-AMRGlassBrush $accent
+    $glyph = New-Object System.Windows.Controls.TextBlock; $glyph.Text = $deep; $glyph.FontSize = 19; $glyph.Foreground = New-AMRGlassBrush $accent
+    $glyph.HorizontalAlignment = 'Center'; $glyph.VerticalAlignment = 'Center'
+    $icon.Child = $glyph
+    $titleBox = New-Object System.Windows.Controls.StackPanel; $titleBox.VerticalAlignment = 'Center'
+    $title = New-Object System.Windows.Controls.TextBlock
+    $title.TextWrapping = 'Wrap'; $title.FontSize = 16; $title.FontWeight = 'Bold'; $title.Foreground = New-AMRGlassBrush '#FFF1F5F9'
+    $title.Text = [string](Get-AMRDiagProp $Item 'DeviceName' 'Unknown device')
+    $titleBox.Children.Add($title) | Out-Null
+    $chips = New-Object System.Windows.Controls.WrapPanel; $chips.Margin = New-Object System.Windows.Thickness(0,6,0,0)
+    $chipTexts = New-Object System.Collections.ArrayList
+    $family = [string](Get-AMRDiagProp $Item 'Family' ''); if ($family) { [void]$chipTexts.Add($family) }
+    $codeValue = 0; try { $codeValue = [int](Get-AMRDiagProp $Item 'ProblemCode' 0) } catch {}
+    if ($codeValue -ne 0) { [void]$chipTexts.Add(('Code {0}  ·  {1}' -f $codeValue,[string](Get-AMRDiagProp $Item 'CodeName' ''))) }
+    if ($confidence) { [void]$chipTexts.Add(('Confidence: ' + $confidence)) }
+    foreach ($chipText in $chipTexts) {
+        $chip = New-Object System.Windows.Controls.Border
+        $chip.CornerRadius = New-Object System.Windows.CornerRadius(9); $chip.Padding = New-Object System.Windows.Thickness(10,3,10,3); $chip.Margin = New-Object System.Windows.Thickness(0,0,8,4)
+        $chip.Background = New-AMRGlassBrush '#1FFFFFFF'; $chip.BorderThickness = New-Object System.Windows.Thickness(1); $chip.BorderBrush = New-AMRGlassBrush '#33FFFFFF'
+        $chipLabel = New-Object System.Windows.Controls.TextBlock; $chipLabel.Text = $chipText; $chipLabel.FontSize = 11; $chipLabel.FontWeight = 'SemiBold'; $chipLabel.Foreground = New-AMRGlassBrush '#FFE2E8F0'
+        $chip.Child = $chipLabel
+        $chips.Children.Add($chip) | Out-Null
+    }
+    $titleBox.Children.Add($chips) | Out-Null
+    $head.Children.Add($icon) | Out-Null; $head.Children.Add($titleBox) | Out-Null
+    # A2: header row = original header (col 0) + gold "open in Driver Update" button (col 1). Falls back to the original header on any failure.
+    $headHost = $head
+    try {
+        $gotoDeviceId = [string](Get-AMRDiagProp $Item 'DeviceId' ''); $gotoDeviceName = [string](Get-AMRDiagProp $Item 'DeviceName' '')
+        if (-not [string]::IsNullOrWhiteSpace($gotoDeviceId) -or -not [string]::IsNullOrWhiteSpace($gotoDeviceName)) {
+            $gotoButton = New-AMRProblemGotoButton -DeviceId $gotoDeviceId -DeviceName $gotoDeviceName
+            $gotoGrid = New-Object System.Windows.Controls.Grid
+            $gotoCol0 = New-Object System.Windows.Controls.ColumnDefinition; $gotoCol0.Width = New-Object System.Windows.GridLength(1,[System.Windows.GridUnitType]::Star)
+            $gotoCol1 = New-Object System.Windows.Controls.ColumnDefinition; $gotoCol1.Width = [System.Windows.GridLength]::Auto
+            $gotoGrid.ColumnDefinitions.Add($gotoCol0); $gotoGrid.ColumnDefinitions.Add($gotoCol1)
+            [System.Windows.Controls.Grid]::SetColumn($head,0); [System.Windows.Controls.Grid]::SetColumn($gotoButton,1)
+            $gotoGrid.Children.Add($head) | Out-Null; $gotoGrid.Children.Add($gotoButton) | Out-Null
+            $headHost = $gotoGrid
+        }
+    } catch {
+        $headHost = $head
+        try { if ($head.Parent) { $head.Parent.Children.Remove($head) } } catch {}
+        try { Write-AMRDriverDiagnostic -Severity WARNING -Operation ProblemGoto -Stage ButtonFallback -Message ('Problem card button could not be built: ' + $_.Exception.Message) -Source 'Add-AMRDriverDiagCard' } catch {}
+    }
+    $stack.Children.Add($headHost) | Out-Null
+
+    # What Windows reports
+    $assessLabel = New-Object System.Windows.Controls.TextBlock; $assessLabel.Text = 'WHAT WE FOUND'; $assessLabel.FontSize = 10; $assessLabel.FontWeight = 'Bold'
+    $assessLabel.Foreground = New-AMRGlassBrush '#FFD8B56D'; $assessLabel.Margin = New-Object System.Windows.Thickness(0,14,0,4)
+    $assess = New-Object System.Windows.Controls.TextBlock
+    $assess.TextWrapping = 'Wrap'; $assess.FontSize = 13; $assess.LineHeight = 19; $assess.Foreground = New-AMRGlassBrush '#FFCBD5E1'; $assess.Text = [string](Get-AMRDiagProp $Item 'Assessment' '')
+    $stack.Children.Add($assessLabel) | Out-Null; $stack.Children.Add($assess) | Out-Null
+
+    # Suggested action block
+    $sugBox = New-Object System.Windows.Controls.Border
+    $sugBox.CornerRadius = New-Object System.Windows.CornerRadius(10); $sugBox.Padding = New-Object System.Windows.Thickness(14,11,14,11); $sugBox.Margin = New-Object System.Windows.Thickness(0,14,0,0)
+    $sugBox.Background = New-AMRGlassBrush '#40000000'; $sugBox.BorderThickness = New-Object System.Windows.Thickness(1); $sugBox.BorderBrush = New-AMRGlassBrush '#55D8B56D'
+    $sugStack = New-Object System.Windows.Controls.StackPanel
+    $sugLabel = New-Object System.Windows.Controls.TextBlock; $sugLabel.Text = 'SUGGESTED FIX'; $sugLabel.FontSize = 10; $sugLabel.FontWeight = 'Bold'; $sugLabel.Foreground = New-AMRGlassBrush '#FFD8B56D'
+    $suggest = New-Object System.Windows.Controls.TextBlock
+    $suggest.TextWrapping = 'Wrap'; $suggest.FontSize = 13; $suggest.LineHeight = 19; $suggest.Foreground = New-AMRGlassBrush '#FFF1F5F9'; $suggest.Margin = New-Object System.Windows.Thickness(0,4,0,0)
+    $suggest.Text = [string](Get-AMRDiagProp $Item 'SuggestedAction' '')
+    $sugStack.Children.Add($sugLabel) | Out-Null; $sugStack.Children.Add($suggest) | Out-Null
+    $sugBox.Child = $sugStack
+    $stack.Children.Add($sugBox) | Out-Null
+
+    # Details (evidence, against, unknown, parent): unchanged content
+    $detailLines = New-Object System.Collections.ArrayList
+    foreach ($line in @(Get-AMRDiagProp $Item 'Evidence' @())) { [void]$detailLines.Add('Evidence: ' + [string]$line) }
+    foreach ($line in @(Get-AMRDiagProp $Item 'Against' @())) { [void]$detailLines.Add('Against: ' + [string]$line) }
+    foreach ($line in @(Get-AMRDiagProp $Item 'Unknown' @())) { [void]$detailLines.Add('Not known: ' + [string]$line) }
+    $parentText = [string](Get-AMRDiagProp $Item 'Parent' ''); if ($parentText) { [void]$detailLines.Add('Parent: ' + $parentText) }
+    if ($detailLines.Count -gt 0) {
+        $expander = New-Object System.Windows.Controls.Expander
+        $expander.Header = 'Details'; $expander.Foreground = New-AMRGlassBrush '#FF94A3B8'; $expander.FontSize = 12; $expander.FontWeight = 'SemiBold'; $expander.Margin = New-Object System.Windows.Thickness(0,12,0,0)
+        $detailText = New-Object System.Windows.Controls.TextBlock
+        $detailText.TextWrapping = 'Wrap'; $detailText.FontSize = 11; $detailText.LineHeight = 17; $detailText.Foreground = New-AMRGlassBrush '#FF94A3B8'; $detailText.Margin = New-Object System.Windows.Thickness(16,6,0,0)
+        $detailText.Text = ($detailLines -join "`n")
+        $expander.Content = $detailText
+        $stack.Children.Add($expander) | Out-Null
+    }
+    $grid.Children.Add($stack) | Out-Null
+    $card.Child = $grid
+
+    # Light hover: edge brush swap only (no animation, no effects). Cards appear with the Problems pane fade.
+    $card.Add_MouseEnter({ try { $this.BorderBrush = $accentBrush } catch {} }.GetNewClosure())
+    $card.Add_MouseLeave({ try { $this.BorderBrush = $baseEdge } catch {} }.GetNewClosure())
+    $Panel.Children.Add($card) | Out-Null
+}
+
+function Add-AMRDriverDiagCardBatch {
+    $panel = C 'DriverDiagCards'
+    $more = C 'DriverDiagShowMoreBtn'
+    if (-not $panel -or -not $script:DriverDiagLast) { return }
+    $problems = @($script:DriverDiagLast.Items | Where-Object { $_.Tier -eq 1 })
+    $start = [int]$script:DriverDiagCardsShown
+    $end = [math]::Min($problems.Count, $start + 10)
+    for ($i = $start; $i -lt $end; $i++) { Add-AMRDriverDiagCard -Item $problems[$i] -Panel $panel }
+    $script:DriverDiagCardsShown = $end
+    if ($more) {
+        if ($end -lt $problems.Count) { $more.Visibility = 'Visible'; $more.Content = ('Show 10 more ({0} remaining)' -f ($problems.Count - $end)) } else { $more.Visibility = 'Collapsed' }
+    }
+}
+
+# ----- A13e: two glass tabs above the driver list: "Driver Update" and "Problems". Pure visual switch. -----
+# Switch cost rules: no card or list rebuild, no opacity animation over the device list (its template has shadow
+# effects, so animating it forces a re-render every frame). Only the small tab pill slides, and the Problems pane
+# (flat cards, no effects) fades in.
+$script:DriverTabCurrent = 'Update'
+function Set-AMRDriverTabStyle {
+    param([string]$Tab,[bool]$Animate = $true)
+    $upd = C 'DriverTabUpdateBtn'; $prob = C 'DriverTabProblemsBtn'; $pill = C 'DriverTabPill'
+    if ($upd) { $upd.Tag = $(if ($Tab -eq 'Update') { 'Active' } else { '' }) }
+    if ($prob) { $prob.Tag = $(if ($Tab -eq 'Problems') { 'Active' } else { '' }) }
+    if ($pill -and $pill.RenderTransform -is [System.Windows.Media.TranslateTransform]) {
+        $target = $(if ($Tab -eq 'Problems') { 168.0 } else { 0.0 })
+        if ($Animate) {
+            $ease = New-Object System.Windows.Media.Animation.CubicEase; $ease.EasingMode = 'EaseOut'
+            $slide = New-Object System.Windows.Media.Animation.DoubleAnimation
+            $slide.To = $target; $slide.Duration = [TimeSpan]::FromMilliseconds(220); $slide.EasingFunction = $ease
+            $pill.RenderTransform.BeginAnimation([System.Windows.Media.TranslateTransform]::XProperty,$slide)
+        } else {
+            $pill.RenderTransform.BeginAnimation([System.Windows.Media.TranslateTransform]::XProperty,$null)
+            $pill.RenderTransform.X = $target
+        }
+    }
+}
+
+function Set-AMRDriverTab {
+    param([ValidateSet('Update','Problems')][string]$Tab)
+    $updatePane = C 'DriverUpdatePane'; $problemsPane = C 'DriverProblemsPane'
+    $watch = [System.Diagnostics.Stopwatch]::StartNew()
+    try {
+        if (-not $updatePane -or -not $problemsPane) { return }
+        if ($script:DriverTabCurrent -eq $Tab) { return }
+        $script:DriverTabCurrent = $Tab
+        if ($Tab -eq 'Update') {
+            $problemsPane.Visibility = 'Collapsed'
+            $updatePane.Visibility = 'Visible'
+        } else {
+            $updatePane.Visibility = 'Collapsed'
+            $problemsPane.Visibility = 'Visible'
+            try {
+                $ease = New-Object System.Windows.Media.Animation.CubicEase; $ease.EasingMode = 'EaseOut'
+                $fade = New-Object System.Windows.Media.Animation.DoubleAnimation
+                $fade.From = 0.0; $fade.To = 1.0; $fade.Duration = [TimeSpan]::FromMilliseconds(190); $fade.EasingFunction = $ease
+                $problemsPane.BeginAnimation([System.Windows.UIElement]::OpacityProperty,$fade)
+            } catch { try { $problemsPane.Opacity = 1.0 } catch {} }
+        }
+        try { Set-AMRDriverTabStyle -Tab $Tab } catch { try { Set-AMRDriverTabStyle -Tab $Tab -Animate $false } catch {} }
+        # Real cost of the switch: time until WPF finished layout and the next render pass.
+        $switchWatch = $watch
+        try { $script:Window.Dispatcher.BeginInvoke([System.Windows.Threading.DispatcherPriority]::Render,[Action]{
+            try { $switchWatch.Stop(); Write-AMRDriverDiagnostic -Severity $(if ($switchWatch.ElapsedMilliseconds -ge 120) { 'WARNING' } else { 'TRACE' }) -Operation DriverTabs -Stage SwitchTiming -Message ('Driver tab switch to {0} reached render in {1} ms.' -f $Tab,$switchWatch.ElapsedMilliseconds) -Source 'Set-AMRDriverTab' -DurationMs ([long]$switchWatch.ElapsedMilliseconds) } catch {}
+        }.GetNewClosure()) | Out-Null } catch {}
+    } catch {
+        try {
+            if ($updatePane) { $updatePane.Visibility = $(if ($Tab -eq 'Update') { 'Visible' } else { 'Collapsed' }) }
+            if ($problemsPane) { $problemsPane.Visibility = $(if ($Tab -eq 'Problems') { 'Visible' } else { 'Collapsed' }); $problemsPane.Opacity = 1.0 }
+            Set-AMRDriverTabStyle -Tab $Tab -Animate $false
+        } catch {}
+        try { Write-AMRDriverDiagnostic -Severity WARNING -Operation DriverTabs -Stage SwitchFallback -Message ('Driver tab switch used the plain fallback: ' + $_.Exception.Message) -Source 'Set-AMRDriverTab' } catch {}
+    }
+}
+
+function Set-AMRDriverProblemsTabLabel {
+    param([int]$Count = -1)
+    try {
+        $btn = C 'DriverTabProblemsBtn'; if (-not $btn) { return }
+        $btn.Content = $(if ($Count -gt 0) { ('Problems  ·  {0}' -f $Count) } else { 'Problems' })
+    } catch {}
+}
+
+function Clear-AMRDriverDiagView {
+    try {
+        $script:DriverDiagLast = $null; $script:DriverDiagSnapshot = $null; $script:DriverDiagCardsShown = 0; $script:DriverRepairCandidates = @()
+        $panel = C 'DriverDiagPanel'; $cards = C 'DriverDiagCards'
+        if ($cards) { $cards.Children.Clear() }
+        if ($panel) { $panel.Visibility = 'Collapsed' }
+        $repair = C 'DriverRepairBtn'; if ($repair) { $repair.Visibility = 'Collapsed' }
+        $empty = C 'DriverProblemsEmpty'; if ($empty) { $empty.Visibility = 'Visible' }
+        Set-AMRDriverProblemsTabLabel -Count 0
+    } catch {}
+}
+
+function Set-AMRDriverDiagBadge {
+    param([string]$Text,[string]$Color = '#7DD3FC',[string]$Summary = '')
+    $panel = C 'DriverDiagPanel'; $badge = C 'DriverDiagBadge'; $summaryText = C 'DriverDiagSummary'
+    if ($panel) { $panel.Visibility = 'Visible' }
+    try { $empty = C 'DriverProblemsEmpty'; if ($empty) { $empty.Visibility = 'Collapsed' } } catch {}
+    if ($badge) { $badge.Text = $Text; $badge.Foreground = New-AMRGlassBrush $Color }
+    if ($summaryText) { $summaryText.Text = $Summary; $summaryText.Visibility = $(if ($Summary) { 'Visible' } else { 'Collapsed' }) }
+}
+
+function Show-AMRDriverDiagResult {
+    param($Diagnosis)
+    $counts = $Diagnosis.Counts
+    $cards = C 'DriverDiagCards'
+    if ($cards) { $cards.Children.Clear() }
+    $script:DriverDiagCardsShown = 0
+    $summary = ('{0} device(s) read. Problems: {1}. Update only: {2}. Light check: {3}. Healthy: {4}. Nothing was changed.' -f $counts.TotalDevices,$counts.Problem,$counts.UpdateOnly,$counts.LightCheck,$counts.Healthy)
+    if ([int]$counts.Problem -gt 0) { Set-AMRDriverDiagBadge -Text ([string][char]0x26A0 + (' {0} problem device(s) found' -f $counts.Problem)) -Color '#FBBF24' -Summary $summary }
+    else { Set-AMRDriverDiagBadge -Text ([string][char]0x2713 + ' No device problems found') -Color '#86EFAC' -Summary $summary }
+    Add-AMRDriverDiagCardBatch
+    try { Set-AMRDriverProblemsTabLabel -Count ([int]$counts.Problem) } catch {}
+}
+
+# ----- Importance rule + Code 22 repair (the only device change in A12). -----
+function Get-AMRDriverRepairCandidates {
+    param($Diagnosis,$Snapshot)
+    $result = New-Object System.Collections.ArrayList
+    if (-not $Diagnosis -or -not $Snapshot) { return @() }
+    $devices = @(Get-AMRDiagProp $Snapshot 'Devices' @())
+    foreach ($item in @($Diagnosis.Items | Where-Object { $_.Tier -eq 1 -and [int]$_.ProblemCode -eq 22 })) {
+        # Essential family only (weight >= 80: network, storage, audio, display, input, biometric).
+        if ([int]$item.SortWeight -lt 80) { continue }
+        # No working peer in the same family means the function is actually missing.
+        $peers = @($devices | Where-Object {
+            $peerId = [string](Get-AMRDiagProp $_ 'InstanceId' '')
+            $peerCode = 0; try { $peerCode = [int](Get-AMRDiagProp $_ 'ProblemCode' 0) } catch {}
+            ($peerId -ne [string]$item.DeviceId) -and $peerCode -eq 0 -and [string](Get-AMRDiagProp $_ 'Status' '') -eq 'OK' -and
+            ((Get-AMRDeviceFamily -Class ([string](Get-AMRDiagProp $_ 'Class' '')) -Name ([string](Get-AMRDiagProp $_ 'Name' ''))) -eq [string]$item.Family)
+        })
+        if ($peers.Count -gt 0) { continue }
+        # Parent must be read and healthy.
+        if ([string]::IsNullOrWhiteSpace([string]$item.Parent) -or [string]$item.Parent -match 'problem code|not in the present') { continue }
+        [void]$result.Add($item)
+    }
+    return @($result)
+}
+
+function New-AMRRepairToneStream {
+    $rate = 22050; $samples = [int]($rate * 0.35)
+    $stream = New-Object System.IO.MemoryStream
+    $writer = New-Object System.IO.BinaryWriter($stream)
+    $writer.Write([System.Text.Encoding]::ASCII.GetBytes('RIFF')); $writer.Write([int](36 + $samples * 2)); $writer.Write([System.Text.Encoding]::ASCII.GetBytes('WAVEfmt '))
+    $writer.Write([int]16); $writer.Write([int16]1); $writer.Write([int16]1); $writer.Write([int]$rate); $writer.Write([int]($rate * 2)); $writer.Write([int16]2); $writer.Write([int16]16)
+    $writer.Write([System.Text.Encoding]::ASCII.GetBytes('data')); $writer.Write([int]($samples * 2))
+    for ($i = 0; $i -lt $samples; $i++) {
+        $envelope = [math]::Min(1.0, [math]::Min($i / 800.0, ($samples - $i) / 800.0))
+        $writer.Write([int16]([math]::Round(0.04 * 32767 * $envelope * [math]::Sin(2 * [math]::PI * 440 * $i / $rate))))
+    }
+    $writer.Flush(); $stream.Position = 0
+    return $stream
+}
+
+# Runs in a background job. Mode 'Repair' enables the device; mode 'Undo' disables it again. Returns step records.
+function Invoke-AMRDriverRepairWork {
+    param([string[]]$InstanceIds,[string]$Mode = 'Repair')
+    $out = New-Object System.Collections.ArrayList
+    $anyChange = $false
+    foreach ($id in $InstanceIds) {
+        $steps = New-Object System.Collections.ArrayList
+        $rec = [ordered]@{ InstanceId=$id; Name=''; BeforeCode=-1; BeforeStatus=''; AfterCode=-1; AfterStatus=''; Outcome='NotRun'; Verification=''; Error=''; Steps=$steps; Class='' }
+        try {
+            $dev = Get-PnpDevice -InstanceId $id -ErrorAction Stop
+            $rec.Name = [string]$dev.FriendlyName; if (-not $rec.Name) { $rec.Name = [string]$dev.Name }
+            $rec.Class = [string]$dev.Class
+            $rec.BeforeStatus = [string]$dev.Status
+            $code = 0; try { $code = [int]$dev.ConfigManagerErrorCode } catch {}
+            $rec.BeforeCode = $code
+            [void]$steps.Add(('Before: status {0}, problem code {1}.' -f $rec.BeforeStatus,$code))
+            if ($Mode -eq 'Undo') {
+                if ($code -eq 22) { $rec.Outcome = 'Skipped'; [void]$steps.Add('Already disabled; nothing to undo.') }
+                else {
+                    Disable-PnpDevice -InstanceId $id -Confirm:$false -ErrorAction Stop
+                    $anyChange = $true
+                    Start-Sleep -Seconds 1
+                    $after = Get-PnpDevice -InstanceId $id -ErrorAction Stop
+                    $rec.AfterStatus = [string]$after.Status; try { $rec.AfterCode = [int]$after.ConfigManagerErrorCode } catch {}
+                    $rec.Outcome = $(if ($rec.AfterCode -eq 22) { 'Undone' } else { 'UndoNotConfirmed' })
+                    [void]$steps.Add(('Disabled again. After: status {0}, problem code {1}.' -f $rec.AfterStatus,$rec.AfterCode))
+                }
+            } else {
+                if ($code -ne 22) { $rec.Outcome = 'Skipped'; [void]$steps.Add('State changed since the diagnosis (problem code is not 22); nothing was changed.') }
+                else {
+                    Enable-PnpDevice -InstanceId $id -Confirm:$false -ErrorAction Stop
+                    $anyChange = $true
+                    [void]$steps.Add('Enable-PnpDevice finished without an error.')
+                    Start-Sleep -Seconds 2
+                    $after = Get-PnpDevice -InstanceId $id -ErrorAction Stop
+                    $rec.AfterStatus = [string]$after.Status; try { $rec.AfterCode = [int]$after.ConfigManagerErrorCode } catch {}
+                    [void]$steps.Add(('After: status {0}, problem code {1}.' -f $rec.AfterStatus,$rec.AfterCode))
+                    if ($rec.AfterCode -eq 0 -and $rec.AfterStatus -eq 'OK') {
+                        $rec.Outcome = 'Enabled'; $rec.Verification = 'Verified: Windows reports the device as working (problem code 0).'
+                        $isAudio = ($rec.Class -match '^(?i)(MEDIA|SoftwareComponent|System|Extension|AudioEndpoint)$' -and $rec.Name -match '(?i)audio|sound|codec|\bSST\b')
+                        if ($isAudio) {
+                            $endpoints = 0
+                            for ($try = 0; $try -lt 3; $try++) {
+                                $endpoints = @(Get-PnpDevice -Class AudioEndpoint -PresentOnly -ErrorAction SilentlyContinue | Where-Object { [string]$_.Status -eq 'OK' }).Count
+                                if ($endpoints -gt 0) { break }
+                                Start-Sleep -Seconds 2
+                            }
+                            [void]$steps.Add(('Working audio endpoints: {0}.' -f $endpoints))
+                            if ($endpoints -gt 0) {
+                                try {
+                                    $tone = New-AMRRepairToneStream
+                                    $player = New-Object System.Media.SoundPlayer($tone)
+                                    $player.PlaySync()
+                                    [void]$steps.Add('A short low-volume test tone played without an error. The system volume was not changed. Whether it was audible is not measured (no peak meter).')
+                                    $rec.Verification = 'Partial verification: device works (code 0) and endpoints exist; tone played without error, audibility not measured.'
+                                } catch {
+                                    [void]$steps.Add('The test tone could not be played: ' + $_.Exception.Message)
+                                    $rec.Verification = 'Partial verification: device works (code 0); the tone test could not run.'
+                                }
+                            } else { $rec.Verification = 'Partial verification: device works (code 0), but no working audio endpoint appeared within 6 seconds.' }
+                        }
+                    } else { $rec.Outcome = 'NotWorking'; $rec.Verification = 'Not verified: the device still reports a problem after enabling.' }
+                }
+            }
+        } catch {
+            $rec.Outcome = 'Failed'; $rec.Error = $_.Exception.Message
+            [void]$steps.Add('Failed: ' + $_.Exception.Message)
+        }
+        [void]$out.Add([pscustomobject]$rec)
+    }
+    $rescan = ''
+    if ($anyChange) {
+        try { $null = & pnputil.exe /scan-devices 2>&1; $rescan = 'Device rescan requested (pnputil /scan-devices).' } catch { $rescan = 'Device rescan failed: ' + $_.Exception.Message }
+    }
+    return [pscustomobject]@{ Records=@($out); Rescan=$rescan; Mode=$Mode }
+}
+
+
+function Update-AMRDriverRepairButtons {
+    try {
+        $repair = C 'DriverRepairBtn'; $undo = C 'DriverRepairUndoBtn'
+        $busy = [bool]($script:DriverScanJob -or $script:DriverActionJob -or $script:DriverManagedJob -or $script:DriverDiagJob -or $script:DriverRepairJob -or $script:DriverBatchActive -or $script:DriverSmartQueueActive)
+        $count = @($script:DriverRepairCandidates).Count
+        if ($repair) {
+            $repair.Visibility = $(if ($count -gt 0) { 'Visible' } else { 'Collapsed' })
+            $repair.IsEnabled = ($count -gt 0 -and -not $busy)
+            $repair.Content = ('Repair essential device ({0})' -f $count)
+        }
+        if ($undo) {
+            $undo.Visibility = $(if (@($script:DriverRepairUndoIds).Count -gt 0) { 'Visible' } else { 'Collapsed' })
+            $undo.IsEnabled = (-not $busy)
+        }
+    } catch {}
+}
+
+function Start-AMRDriverRepairJob {
+    param([string]$Mode)
+    if ($script:DriverRepairJob) { return }
+    $ids = @()
+    if ($Mode -eq 'Undo') { $ids = @($script:DriverRepairUndoIds) } else { $ids = @($script:DriverRepairCandidates | Select-Object -First 3 | ForEach-Object { [string]$_.DeviceId }) }
+    if ($ids.Count -eq 0) { return }
+    if ($script:DriverScanJob -or $script:DriverActionJob -or $script:DriverManagedJob -or $script:DriverDiagJob -or $script:DriverBatchActive -or $script:DriverSmartQueueActive) {
+        Show-AMRGlassDialog -Message 'Wait for the active Driver Center operation to finish first.' -Title 'AMR | Driver Center' | Out-Null
+        return
+    }
+    if (-not (Test-AMRAdmin)) {
+        Write-AMRDriverDiagnostic -Severity WARNING -Operation DeviceRepair -Stage Unavailable -Message 'Repair is unavailable: Administrator rights are required to enable a device. Nothing was changed.' -Source 'AMRDriverRepair' -Result 'NotAdmin'
+        Show-AMRGlassDialog -Message "Repair needs Administrator rights to enable a device.`n`nClose the utility and start it again as Administrator. Nothing was changed." -Title 'AMR | Administrator required' -Icon Warning | Out-Null
+        return
+    }
+    try {
+        $script:DriverRepairMode = $Mode
+        $script:DriverRepairStartedAt = Get-Date
+        foreach ($id in $ids) { Write-AMRDriverDiagnostic -Severity INFO -Operation DeviceRepair -Stage Started -Message ('{0} started for a device (InstanceId in DeviceId; undo = disable the same InstanceId).' -f $Mode) -DeviceId $id -Source 'AMRDriverRepair' }
+        $statusText = C 'DriverActionStatus'
+        if ($statusText) { $statusText.Text = $(if ($Mode -eq 'Undo') { 'Undoing the repair in the background...' } else { 'Repairing the essential device in the background and verifying it...' }) }
+        $workDefinition = [string](Get-Command -Name Invoke-AMRDriverRepairWork -CommandType Function -ErrorAction Stop).Definition
+        $toneDefinition = [string](Get-Command -Name New-AMRRepairToneStream -CommandType Function -ErrorAction Stop).Definition
+        $script:DriverRepairJob = Start-Job -ArgumentList $workDefinition,$toneDefinition,$ids,$Mode -ScriptBlock {
+            param($WorkDef,$ToneDef,$Ids,$RunMode)
+            Set-Item -Path 'Function:\New-AMRRepairToneStream' -Value ([scriptblock]::Create([string]$ToneDef)) -Force
+            Set-Item -Path 'Function:\Invoke-AMRDriverRepairWork' -Value ([scriptblock]::Create([string]$WorkDef)) -Force
+            Add-Type -AssemblyName System.Windows.Forms -ErrorAction SilentlyContinue
+            Invoke-AMRDriverRepairWork -InstanceIds $Ids -Mode $RunMode
+        }
+        Update-AMRDriverRepairButtons
+        $diagButton = C 'DriverDiagnosisBtn'; if ($diagButton) { $diagButton.IsEnabled = $false }
+        if (-not $script:DriverRepairTimer) {
+            $script:DriverRepairTimer = New-Object System.Windows.Threading.DispatcherTimer
+            $script:DriverRepairTimer.Interval = [TimeSpan]::FromMilliseconds(500)
+            $script:DriverRepairTimer.Add_Tick({
+                try {
+                    $job = $script:DriverRepairJob
+                    $finish = $false; $payload = $null; $failure = ''
+                    if (-not $job) { $finish = $true; $failure = 'The repair job reference was lost.' }
+                    elseif ($job.State -eq 'Running' -or $job.State -eq 'NotStarted') {
+                        if (((Get-Date) - [datetime]$script:DriverRepairStartedAt).TotalSeconds -gt 150) { try { Stop-Job -Job $job -ErrorAction SilentlyContinue } catch {}; $finish = $true; $failure = 'The repair exceeded its 150-second limit and was stopped.' }
+                    } else {
+                        $finish = $true
+                        if ($job.State -eq 'Completed') {
+                            $received = @(Receive-Job -Job $job -ErrorAction SilentlyContinue)
+                            $withRecords = @($received | Where-Object { $_ -and $_.PSObject.Properties['Records'] } | Select-Object -Last 1)
+                            if ($withRecords.Count -gt 0) { $payload = $withRecords[0] } else { $failure = 'The repair job returned no data.' }
+                        } else { $failure = ('The repair job ended as {0}.' -f [string]$job.State) }
+                    }
+                    if (-not $finish) { return }
+                    $script:DriverRepairTimer.Stop()
+                    if ($job) { try { Remove-Job -Job $job -Force -ErrorAction SilentlyContinue } catch {} }
+                    $script:DriverRepairJob = $null
+                    Complete-AMRDriverRepair -Payload $payload -Failure $failure
+                } catch {
+                    try { $script:DriverRepairTimer.Stop() } catch {}
+                    $script:DriverRepairJob = $null
+                    Write-AMRDriverDiagnostic -Severity ERROR -Operation DeviceRepair -Stage Failed -Message 'The repair polling step failed.' -Source 'AMRDriverRepair' -ErrorRecord $_
+                    try { Update-AMRDriverActionButtons } catch {}
+                }
+            })
+        }
+        $script:DriverRepairTimer.Start()
+    } catch {
+        $script:DriverRepairJob = $null
+        Write-AMRDriverDiagnostic -Severity ERROR -Operation DeviceRepair -Stage Failed -Message 'The repair could not be started.' -Source 'AMRDriverRepair' -ErrorRecord $_
+        Show-AMRGlassDialog -Message ('The repair could not be started: ' + $_.Exception.Message + "`n`nNothing was changed.") -Title 'AMR | Driver repair' -Icon Warning | Out-Null
+        try { Update-AMRDriverActionButtons } catch {}
+    }
+}
+
+function Complete-AMRDriverRepair {
+    param($Payload,[string]$Failure = '')
+    $mode = [string]$script:DriverRepairMode
+    try {
+        if ($Failure -or $null -eq $Payload) {
+            Write-AMRDriverDiagnostic -Severity WARNING -Operation DeviceRepair -Stage Failed -Message ('Repair did not complete: ' + $Failure + ' The device state is unknown; run Diagnose again.') -Source 'AMRDriverRepair' -Result 'Failed'
+            $statusText = C 'DriverActionStatus'; if ($statusText) { $statusText.Text = 'The repair did not complete. Run Diagnose again to see the current state.' }
+            Show-AMRGlassDialog -Message ("The repair did not complete: $Failure`n`nThe device state is unknown. Run Diagnose again to see the current state. Undo remains available if the device was enabled.") -Title 'AMR | Driver repair' -Icon Warning | Out-Null
+            return
+        }
+        $lines = New-Object System.Collections.ArrayList
+        $oneLine = New-Object System.Collections.ArrayList
+        $newUndo = New-Object System.Collections.ArrayList
+        foreach ($rec in @($Payload.Records)) {
+            $sev = 'INFO'; if ($rec.Outcome -eq 'Enabled' -or $rec.Outcome -eq 'Undone') { $sev = 'SUCCESS' } elseif ($rec.Outcome -in @('Failed','NotWorking','UndoNotConfirmed')) { $sev = 'WARNING' }
+            Write-AMRDriverDiagnostic -Severity $sev -Operation DeviceRepair -Stage $rec.Outcome -Message ('{0}: {1} {2}' -f $mode,$rec.Name,($rec.Steps -join ' | ')) -DeviceId ([string]$rec.InstanceId) -Source 'AMRDriverRepair' -Result ([string]$rec.Outcome) -Context @{BeforeCode=$rec.BeforeCode;AfterCode=$rec.AfterCode;Verification=$rec.Verification;Error=$rec.Error}
+            [void]$lines.Add([string]$rec.Name)
+            foreach ($s in @($rec.Steps)) { [void]$lines.Add('  - ' + [string]$s) }
+            if ($rec.Verification) { [void]$lines.Add('  Result: ' + [string]$rec.Verification) }
+            [void]$lines.Add('')
+            switch ([string]$rec.Outcome) {
+                'Enabled' { [void]$oneLine.Add(('{0}: enabled. {1}' -f $rec.Name,$rec.Verification)); [void]$newUndo.Add([string]$rec.InstanceId) }
+                'NotWorking' { [void]$oneLine.Add(('{0}: enabled but still reports a problem.' -f $rec.Name)); [void]$newUndo.Add([string]$rec.InstanceId) }
+                'Undone' { [void]$oneLine.Add(('{0}: disabled again (undo done).' -f $rec.Name)) }
+                'Skipped' { [void]$oneLine.Add(('{0}: skipped, state changed.' -f $rec.Name)) }
+                default { [void]$oneLine.Add(('{0}: {1}.' -f $rec.Name,$rec.Outcome)) }
+            }
+        }
+        if ($mode -eq 'Undo') { $script:DriverRepairUndoIds = @() } else { $script:DriverRepairUndoIds = @($newUndo) }
+        if ($Payload.Rescan) { Write-AMRDriverDiagnostic -Severity INFO -Operation DeviceRepair -Stage Rescan -Message ([string]$Payload.Rescan) -Source 'AMRDriverRepair' }
+        $statusText = C 'DriverActionStatus'
+        if ($statusText) { $statusText.Text = ($oneLine -join ' ') }
+        if ([string]$script:DriverExperienceMode -eq 'Advanced') {
+            [void]$lines.Add([string]$Payload.Rescan)
+            [void]$lines.Add('Undo: the Undo repair button disables the same device again (available in this session).')
+            Show-AMRGlassDialog -Message (($lines -join "`n").Trim()) -Title 'AMR | Driver repair steps' | Out-Null
+        }
+        $script:DriverRepairCandidates = @()
+    } catch {
+        Write-AMRDriverDiagnostic -Severity ERROR -Operation DeviceRepair -Stage Failed -Message 'Repair result processing failed.' -Source 'AMRDriverRepair' -ErrorRecord $_
+    } finally {
+        try { Update-AMRDriverActionButtons } catch {}
+        try { Update-AMRDriverRepairButtons } catch {}
+        # Re-diagnose automatically after a repair (rescan is part of repair).
+        try { $script:Window.Dispatcher.BeginInvoke([System.Windows.Threading.DispatcherPriority]::ApplicationIdle,[Action]{ Start-AMRDriverAutoDiagnosis }) | Out-Null } catch {}
+    }
+}
+
+function Start-AMRDriverAutoDiagnosis {
+    if ($script:DriverDiagJob -or $script:DriverScanJob -or $script:DriverActionJob -or $script:DriverManagedJob -or $script:DriverRepairJob -or $script:DriverBatchActive -or $script:DriverSmartQueueActive) { return }
+    if (@($script:DriverAllDeviceRows).Count -eq 0) { return }
+    try { Show-AMRDriverSystemDiagnosis -Auto } catch {
+        Write-AMRDriverDiagnostic -Severity WARNING -Operation SystemDiagnosis -Stage Failed -Message ('Automatic diagnosis could not start: ' + $_.Exception.Message) -Source 'AMRDriverSystemDiagnosis'
+    }
+}
+
+# ----- Restore-point prompt on opening Driver Center (once per session, skipped when a recorded point is under 24 h old). -----
+function Get-AMRDriverRecentRestoreReceiptAgeHours {
+    try {
+        $path = [string]$script:DriverRestorePointStateFile
+        if ([string]::IsNullOrWhiteSpace($path) -or -not (Test-Path -LiteralPath $path -PathType Leaf)) { return $null }
+        $state = Get-Content -LiteralPath $path -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        $created = [datetime]$state.CreationTime
+        return [double]((Get-Date) - $created).TotalHours
+    } catch { return $null }
+}
+
+function Invoke-AMRDriverRestorePrompt {
+    if ($script:DriverRestorePromptShown) { return }
+    $script:DriverRestorePromptShown = $true
+    try {
+        $age = Get-AMRDriverRecentRestoreReceiptAgeHours
+        if ($null -ne $age -and $age -lt 24) {
+            Write-AMRDriverDiagnostic -Severity INFO -Operation RestorePrompt -Stage Skipped -Message ('Restore-point prompt skipped: the recorded Driver Safety Point is {0:N1} hours old (under 24 h).' -f $age) -Source 'AMRRestorePrompt'
+            return
+        }
+        if (-not (Test-AMRAdmin)) {
+            Write-AMRDriverDiagnostic -Severity INFO -Operation RestorePrompt -Stage Skipped -Message 'Restore-point prompt skipped: Administrator rights are required to create one.' -Source 'AMRRestorePrompt'
+            return
+        }
+        $answer = Show-AMRGlassDialog -Message "Driver Center can change drivers. Create a Windows System Restore point first so you can go back if needed?`n`nA point is created only if you choose Yes. Nothing is installed or changed by this step." -Title 'AMR | Create a restore point?' -Buttons YesNo -Icon Warning
+        Write-AMRDriverDiagnostic -Severity INFO -Operation RestorePrompt -Stage Answered -Message ('Restore-point prompt answered: ' + $answer) -Source 'AMRRestorePrompt' -Result $answer
+        if ($answer -eq 'Yes') {
+            $script:DriverRestorePromptApproved = $true
+            $button = C 'DriverCreateRestorePointBtn'
+            if ($button -and $button.IsEnabled) { $button.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent))) }
+            $script:DriverRestorePromptApproved = $false
+        }
+    } catch {
+        $script:DriverRestorePromptApproved = $false
+        Write-AMRDriverDiagnostic -Severity WARNING -Operation RestorePrompt -Stage Failed -Message ('Restore-point prompt failed: ' + $_.Exception.Message) -Source 'AMRRestorePrompt'
+    }
+}
+
+(C 'OverviewSubTabs').Add_SelectionChanged({
+    param($sender,$e)
+    try {
+        if ($e.OriginalSource -isnot [System.Windows.Controls.TabControl]) { return }
+        if ($sender.SelectedItem -ne (C 'DriverCenterTab')) { return }
+        if ($script:DriverRestorePromptShown) { return }
+        $script:Window.Dispatcher.BeginInvoke([System.Windows.Threading.DispatcherPriority]::ApplicationIdle,[Action]{ Invoke-AMRDriverRestorePrompt }) | Out-Null
+    } catch {}
+})
+
+(C 'DriverTabUpdateBtn').Add_Click({ Set-AMRDriverTab -Tab 'Update' })
+(C 'DriverTabProblemsBtn').Add_Click({ Set-AMRDriverTab -Tab 'Problems' })
+
+(C 'DriverDiagViewTextBtn').Add_Click({
+    try {
+        if (-not $script:DriverDiagLast) { return }
+        Show-AMRGlassDialog -Message (Format-AMRDriverSystemDiagnosisText -Diagnosis $script:DriverDiagLast -MaxItems 40) -Title 'AMR | Driver Diagnosis (read-only)' | Out-Null
+    } catch { try { Show-AMRMessageGlass ('Could not show the text view: ' + $_.Exception.Message) 'Driver Diagnosis' OK Warning | Out-Null } catch {} }
+})
+(C 'DriverDiagShowMoreBtn').Add_Click({ try { Add-AMRDriverDiagCardBatch } catch {} })
+(C 'DriverRepairBtn').Add_Click({ Start-AMRDriverRepairJob -Mode 'Repair' })
+(C 'DriverRepairUndoBtn').Add_Click({ Start-AMRDriverRepairJob -Mode 'Undo' })
+
+(C 'DriverDiagnosisBtn').Add_Click({ Show-AMRDriverSystemDiagnosis })
+
 (C 'DriverExportReportBtn').Add_Click({
     try {
         $rows = @($script:DriverAllDeviceRows)
         if ($rows.Count -eq 0) {
-            Show-AMRMessage 'Run Scan Device before exporting a driver inventory report.' 'Driver Center Report' OK Information | Out-Null
+            Show-AMRMessageGlass 'Run Scan Device before exporting a driver inventory report.' 'Driver Center Report' OK Information | Out-Null
             return
         }
         $destination = Join-Path $script:ExportDir ("DriverCenter_ScanReport_{0}.csv" -f (Get-Date -Format 'yyyyMMdd_HHmmss'))
-        $rows | Select-Object DeviceName,DeviceClass,Manufacturer,StatusText,ErrorCode,DriverProvider,DriverVersion,DriverDate,DriverInf,DriverIsSigned,DeviceId,HardwareIds,CompatibleIds,UpdateStatus,AvailableVersion,AvailableUpdate,UpdateReady,UpdateDownloadSize | Export-Csv -LiteralPath $destination -NoTypeInformation -Encoding UTF8 -ErrorAction Stop
-        Show-AMRMessage ("Driver inventory report exported to:`n" + $destination) 'Export Complete' OK Information | Out-Null
+        $rows | Select-Object DeviceName,DeviceClass,Manufacturer,StatusText,ErrorCode,DriverProvider,DriverVersion,DriverDate,DriverInf,DriverIsSigned,DeviceId,HardwareIds,CompatibleIds,UpdateStatus,AvailableVersion,AvailableUpdate,UpdateReady,UpdateDownloadSize,DiagnosisTier,DiagnosisCategory,DiagnosisConfidence,DiagnosisAssessment,DiagnosisRecommendedAction | Export-Csv -LiteralPath $destination -NoTypeInformation -Encoding UTF8 -ErrorAction Stop
+        Show-AMRMessageGlass ("Driver inventory report exported to:`n" + $destination) 'Export Complete' OK Information | Out-Null
         Write-AMRLog ('Exported Driver Center scan report: ' + $destination) SUCCESS Overview
     } catch {
-        Show-AMRMessage ('Could not export Driver Center scan report: ' + $_.Exception.Message) 'Export Error' OK Error | Out-Null
+        Show-AMRMessageGlass ('Could not export Driver Center scan report: ' + $_.Exception.Message) 'Export Error' OK Error | Out-Null
         Write-AMRLog ('Driver Center scan report export failed: ' + $_.Exception.Message) ERROR Overview
     }
 })
@@ -15501,15 +18132,15 @@ function Add-AMRDriverHistoryEntry {
 (C 'DriverExportHistoryBtn').Add_Click({
     try {
         if (-not (Test-Path -LiteralPath $script:DriverHistoryFile -PathType Leaf)) {
-            Show-AMRMessage 'No Driver Center download or installation history has been recorded yet.' 'Driver Center History' OK Information | Out-Null
+            Show-AMRMessageGlass 'No Driver Center download or installation history has been recorded yet.' 'Driver Center History' OK Information | Out-Null
             return
         }
         $destination = Join-Path $script:ExportDir ("DriverCenterHistory_{0}.csv" -f (Get-Date -Format 'yyyyMMdd_HHmmss'))
         Copy-Item -LiteralPath $script:DriverHistoryFile -Destination $destination -Force -ErrorAction Stop
-        Show-AMRMessage ("Driver Center history exported to:`n" + $destination) 'Export Complete' OK Information | Out-Null
+        Show-AMRMessageGlass ("Driver Center history exported to:`n" + $destination) 'Export Complete' OK Information | Out-Null
         Write-AMRLog ('Exported Driver Center history: ' + $destination) SUCCESS Overview
     } catch {
-        Show-AMRMessage ('Could not export Driver Center history: ' + $_.Exception.Message) 'Export Error' OK Error | Out-Null
+        Show-AMRMessageGlass ('Could not export Driver Center history: ' + $_.Exception.Message) 'Export Error' OK Error | Out-Null
     }
 })
 
@@ -15519,7 +18150,7 @@ function Add-AMRDriverHistoryEntry {
         New-Item -ItemType Directory -Path $driverDownloadsRoot -Force -ErrorAction Stop | Out-Null
         Start-Process -FilePath 'explorer.exe' -ArgumentList ('"{0}"' -f $driverDownloadsRoot) -ErrorAction Stop
     } catch {
-        Show-AMRMessage ('Could not open the driver downloads folder: ' + $_.Exception.Message) 'Driver Downloads' OK Error | Out-Null
+        Show-AMRMessageGlass ('Could not open the driver downloads folder: ' + $_.Exception.Message) 'Driver Downloads' OK Error | Out-Null
     }
 })
 
@@ -15563,7 +18194,7 @@ function Invoke-AMRSmartSelect {
     if ($script:DriverSmartQueueActive -or $script:DriverActionJob -or $script:DriverScanJob -or $script:DriverManagedJob -or $script:DriverBatchActive) { return }
     $allRows = @($script:DriverAllDeviceRows)
     if ($allRows.Count -eq 0) {
-        Show-AMRMessage 'Run Scan Device first. Smart Select needs a current hardware and driver inventory.' 'Smart Select' OK Information | Out-Null
+        Show-AMRMessageGlass 'Run Scan Device first. Smart Select needs a current hardware and driver inventory.' 'Smart Select' OK Information | Out-Null
         return
     }
 
@@ -15582,7 +18213,7 @@ function Invoke-AMRSmartSelect {
         }
         (C 'DriverActionStatus').Text = $message
         Update-AMRDriverActionButtons
-        Show-AMRMessage $message 'Smart Select Results' OK Information | Out-Null
+        Show-AMRMessageGlass $message 'Smart Select Results' OK Information | Out-Null
         return
     }
 
@@ -15613,7 +18244,7 @@ function Invoke-AMRSmartSelect {
     $message = "Smart Select completed. No files were downloaded and no drivers were installed.`n`nRecommended unique updates: $($recommendedRows.Count)`nAlready ready: $readyCount`nNeed download and validation: $downloadCount`nDevice issues without a confirmed candidate: $issueWithoutCandidate`n`n$details`n`nAMR selected only candidates returned by the current scan and removed duplicate update identities. Review the highlighted rows. You can change the selection before choosing Start Smart Install."
     (C 'DriverActionStatus').Text = ('Smart Select recommended {0} unique driver update(s): {1} ready, {2} need preparation. Review the highlighted rows; nothing has been downloaded or installed.' -f $recommendedRows.Count,$readyCount,$downloadCount)
     Update-AMRDriverActionButtons
-    Show-AMRMessage $message 'Smart Select Results' OK Information | Out-Null
+    Show-AMRMessageGlass $message 'Smart Select Results' OK Information | Out-Null
 }
 
 function Complete-AMRSmartInstallPreparation {
@@ -15634,7 +18265,7 @@ function Complete-AMRSmartInstallPreparation {
 
     if ($readyRows.Count -eq 0) {
         (C 'DriverActionStatus').Text = ('Smart Install preparation finished, but none of the {0} selected package(s) passed the Ready-to-install checks. All candidates remain selected for review or retry. No driver was installed.' -f $approvedKeys.Count)
-        Show-AMRMessage 'None of the selected packages passed the Ready-to-install checks. All approved candidates remain selected so you can review or retry them. No driver was installed.' 'Smart Install Preparation' OK Warning | Out-Null
+        Show-AMRMessageGlass 'None of the selected packages passed the Ready-to-install checks. All approved candidates remain selected so you can review or retry them. No driver was installed.' 'Smart Install Preparation' OK Warning | Out-Null
         Update-AMRDriverActionButtons
         return
     }
@@ -15644,7 +18275,7 @@ function Complete-AMRSmartInstallPreparation {
     $preparationNote = if ($failedOrUnready -gt 0) { ' ' + $failedOrUnready + ' selected candidate(s) could not be prepared and remain selected for retry.' } else { '' }
     (C 'DriverActionStatus').Text = ('Smart Install prepared {0} of {1} selected package(s).{2} Review the installation plan; nothing installs until you approve it.' -f $selectedReady.Count,$approvedKeys.Count,$preparationNote)
     Update-AMRDriverActionButtons
-    if ($failedOrUnready -gt 0) { Show-AMRMessage (('{0} selected package(s) could not be prepared safely and will remain selected for retry. Only verified-ready packages will appear in the installation plan.' -f $failedOrUnready)) 'Some Drivers Not Ready' OK Warning | Out-Null }
+    if ($failedOrUnready -gt 0) { Show-AMRMessageGlass (('{0} selected package(s) could not be prepared safely and will remain selected for retry. Only verified-ready packages will appear in the installation plan.' -f $failedOrUnready)) 'Some Drivers Not Ready' OK Warning | Out-Null }
     if ($selectedReady.Count -gt 0) { Show-AMRDriverInstallPlan }
 }
 
@@ -15679,25 +18310,25 @@ function Start-AMRSmartInstall {
     if ($script:DriverSmartQueueActive -or $script:DriverActionJob -or $script:DriverScanJob -or $script:DriverManagedJob -or $script:DriverBatchActive) { return }
     $allRows = @($script:DriverAllDeviceRows)
     if ($allRows.Count -eq 0) {
-        Show-AMRMessage 'Run Scan Device first, then use Smart Select before starting Smart Install.' 'Smart Install' OK Information | Out-Null
+        Show-AMRMessageGlass 'Run Scan Device first, then use Smart Select before starting Smart Install.' 'Smart Install' OK Information | Out-Null
         return
     }
     if (-not $script:DriverSmartSelectionReady -or @($script:DriverSmartSelectedKeys).Count -eq 0) {
-        Show-AMRMessage 'Smart Select has not created a recommendation set yet. Run Smart Select first, review its highlighted choices, then start Smart Install.' 'Smart Select Required' OK Information | Out-Null
+        Show-AMRMessageGlass 'Smart Select has not created a recommendation set yet. Run Smart Select first, review its highlighted choices, then start Smart Install.' 'Smart Select Required' OK Information | Out-Null
         return
     }
 
     $list = C 'DriverDeviceList'
     $selectedRows = @($list.SelectedItems | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_.UpdateId) })
     if ($selectedRows.Count -eq 0) {
-        Show-AMRMessage 'No recommended drivers are selected. Run Smart Select again or select one or more candidate rows before continuing.' 'Selection Required' OK Information | Out-Null
+        Show-AMRMessageGlass 'No recommended drivers are selected. Run Smart Select again or select one or more candidate rows before continuing.' 'Selection Required' OK Information | Out-Null
         return
     }
     $selectedKeys = @($selectedRows | ForEach-Object { Get-AMRDriverUpdateSelectionKey -Row $_ } | Select-Object -Unique)
     $approvedKeys = @($script:DriverSmartSelectedKeys)
     $changed = (@(Compare-Object -ReferenceObject ($approvedKeys | Sort-Object) -DifferenceObject ($selectedKeys | Sort-Object)).Count -gt 0)
     if ($changed) {
-        $choice = Show-AMRMessage 'Your highlighted selection has changed since Smart Select. Do you want Smart Install to use exactly the currently selected candidate rows? AMR will still validate every package and will not install without a separate final approval.' 'Confirm Changed Selection' YesNo Question
+        $choice = Show-AMRMessageGlass 'Your highlighted selection has changed since Smart Select. Do you want Smart Install to use exactly the currently selected candidate rows? AMR will still validate every package and will not install without a separate final approval.' 'Confirm Changed Selection' YesNo Question
         if ($choice -ne 'Yes') { return }
         $script:DriverSmartSelectedKeys = @($selectedKeys)
         $script:DriverSmartSelectionTime = Get-Date
@@ -15706,13 +18337,13 @@ function Start-AMRSmartInstall {
     $candidateRows = @($selectedRows | Where-Object { $script:DriverSmartSelectedKeys -contains (Get-AMRDriverUpdateSelectionKey -Row $_) })
     $plan = @(Get-AMRDriverInstallPlan -Rows $candidateRows)
     if ($plan.Count -eq 0) {
-        Show-AMRMessage 'The current selection contains no unique confirmed update candidates.' 'Smart Install' OK Information | Out-Null
+        Show-AMRMessageGlass 'The current selection contains no unique confirmed update candidates.' 'Smart Install' OK Information | Out-Null
         return
     }
 
     $admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
     if (-not $admin) {
-        Show-AMRMessage 'Smart Select can run without elevation, but preparing and installing driver packages requires Administrator permissions. Reopen AMR as Administrator, scan again, and repeat Smart Select before starting Smart Install.' 'Administrator permission required' OK Warning | Out-Null
+        Show-AMRMessageGlass 'Smart Select can run without elevation, but preparing and installing driver packages requires Administrator permissions. Reopen AMR as Administrator, scan again, and repeat Smart Select before starting Smart Install.' 'Administrator permission required' OK Warning | Out-Null
         return
     }
 
@@ -15724,7 +18355,7 @@ function Start-AMRSmartInstall {
     }) -join "`n"
     if ($plan.Count -gt 8) { $preview += "`n• … and $($plan.Count - 8) more selected candidate(s)" }
     $consent = "Smart Install preparation`n`nSelected unique candidates: $($plan.Count)`nAlready ready: $readyCount`nTo download and validate: $($downloadQueue.Count)`n`n$preview`n`nSmart Select has already made the recommendation. Smart Install will use only the selected candidates shown above, prepare packages sequentially using the AMR internal engine first, and use Windows Update only as a fallback. It will NOT install automatically. After preparation, you will review a separate installation plan and approve installation. Continue?"
-    if ((Show-AMRMessage $consent 'Start Smart Install Preparation?' YesNo Question) -ne 'Yes') { return }
+    if ((Show-AMRMessageGlass $consent 'Start Smart Install Preparation?' YesNo Question) -ne 'Yes') { return }
 
     if ($downloadQueue.Count -eq 0) {
         Complete-AMRSmartInstallPreparation
@@ -15766,11 +18397,11 @@ function Start-AMRDriverUpdateAction {
     if($selected){$selectedCatalogCandidate=$selected.ProfessionalSelectedCandidate}
     $isCatalogPackage = ($selected -and [string]$selected.SourceAdapter -eq 'MicrosoftUpdateCatalog' -and $selectedCatalogCandidate -and [bool]$selectedCatalogCandidate.IsInstallable -and -not [string]::IsNullOrWhiteSpace([string]$selected.LocalPackageFolder))
     if (-not $selected -or ([string]::IsNullOrWhiteSpace([string]$selected.UpdateId) -and -not $isCatalogPackage)) {
-        Show-AMRMessage 'Select a verified Windows Update candidate or a Catalog package that has passed Windows Driver Store staging.' 'Driver Center' OK Information | Out-Null
+        Show-AMRMessageGlass 'Select a verified Windows Update candidate or a Catalog package that has passed Windows Driver Store staging.' 'Driver Center' OK Information | Out-Null
         return
     }
     if($isCatalogPackage -and $Action -eq 'Download') {
-        if(-not (Test-Path -LiteralPath (Join-Path ([string]$selected.LocalPackageFolder) 'AMR_DriverPackage_Manifest.json') -PathType Leaf)) { Show-AMRMessage 'The verified Catalog package manifest is missing. Run Verify & Acquire Package again.' 'Catalog Package' OK Warning | Out-Null; return }
+        if(-not (Test-Path -LiteralPath (Join-Path ([string]$selected.LocalPackageFolder) 'AMR_DriverPackage_Manifest.json') -PathType Leaf)) { Show-AMRMessageGlass 'The verified Catalog package manifest is missing. Run Verify & Acquire Package again.' 'Catalog Package' OK Warning | Out-Null; return }
         $selected.UpdateReady=$true; $selected.LocalPackageReady=$true; $selected.UpdateStatus='Catalog package already acquired and staged; no second download required.'
         (C 'DriverActionStatus').Text='The selected Catalog package is already downloaded, verified and staged by Windows. No second download was performed.'
         Update-AMRDriverActionButtons
@@ -15778,23 +18409,23 @@ function Start-AMRDriverUpdateAction {
     }
     if ($Action -eq 'Install') {
         if (-not [bool]$selected.UpdateReady) {
-            Show-AMRMessage 'This update is not downloaded yet. Download it first.' 'Driver Center' OK Information | Out-Null
+            Show-AMRMessageGlass 'This update is not downloaded yet. Download it first.' 'Driver Center' OK Information | Out-Null
             return
         }
         $admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
         if (-not $admin) {
-            Show-AMRMessage 'Installing a device driver requires administrator permissions. Close the app and reopen it as Administrator, then scan again.' 'Administrator permission required' OK Warning | Out-Null
+            Show-AMRMessageGlass 'Installing a device driver requires administrator permissions. Close the app and reopen it as Administrator, then scan again.' 'Administrator permission required' OK Warning | Out-Null
             return
         }
         if (-not $SkipConfirmation) {
             $sourceLabel=if($isCatalogPackage){'Microsoft Update Catalog package staged by Windows'}else{'Microsoft-matched driver update'}
             $confirmText = "Install this ${sourceLabel}?`n`nDevice: $($selected.DeviceName)`nUpdate: $($selected.AvailableUpdate)`nVersion: $($selected.AvailableVersion)`n`nThe installation may temporarily affect the device and may require restarting Windows. Continue?"
-            if ((Show-AMRMessage $confirmText 'Confirm Driver Installation' YesNo Warning) -ne 'Yes') { return }
+            if ((Show-AMRMessageGlass $confirmText 'Confirm Driver Installation' YesNo Warning) -ne 'Yes') { return }
         }
     } else {
         $sizeText = if ([int64]$selected.UpdateDownloadSize -gt 0) { ('Approx. download size: {0:N1} MB' -f ([int64]$selected.UpdateDownloadSize / 1MB)) } else { 'Download size not supplied by the update service.' }
         $confirmText = "Download this Microsoft-matched driver update?`n`nDevice: $($selected.DeviceName)`nUpdate: $($selected.AvailableUpdate)`nVersion: $($selected.AvailableVersion)`n$sizeText`n`nAMR will use its internal HTTPS download and package-validation engine first. If the package format is supported, AMR will save and prepare it for local installation without downloading it a second time. Windows Update is used only if AMR cannot complete or safely prepare the package. Nothing will be installed until you choose Install Ready Update. Continue?"
-        if (-not $SkipConfirmation) { if ((Show-AMRMessage $confirmText 'Confirm Driver Download' YesNo Question) -ne 'Yes') { return } }
+        if (-not $SkipConfirmation) { if ((Show-AMRMessageGlass $confirmText 'Confirm Driver Download' YesNo Question) -ne 'Yes') { return } }
     }
 
     $restorePointStatus = 'Not applicable to download'
@@ -15820,6 +18451,7 @@ function Start-AMRDriverUpdateAction {
     (C 'DriverOperationProgress').Value = 0
 
     $script:DriverActionProgressFile = Join-Path $env:TEMP ('AMR_DriverProgress_{0}.json' -f [guid]::NewGuid().ToString('N'))
+    $script:DriverActionCancelRequested = $false
     $hardwareIdsText = (@($selected.HardwareIds) | ForEach-Object { [string]$_ }) -join "`n"
     $compatibleIdsText = (@($selected.CompatibleIds) | ForEach-Object { [string]$_ }) -join "`n"
     $driverPackageRoot = Join-Path $script:DownloadDir 'Drivers'
@@ -15992,6 +18624,7 @@ function Test-AMRDriverVersionMatch {
                         $parsedContentUri = $null
                         if (-not [Uri]::TryCreate($contentUrl,[UriKind]::Absolute,[ref]$parsedContentUri)) { throw 'The official package content URL was invalid.' }
                         if ($parsedContentUri.Scheme -ne 'https') { throw ('A package content URL did not use HTTPS. Host: ' + $parsedContentUri.Host) }
+                        if (Test-Path -LiteralPath ($ProgressFile + '.cancel')) { throw 'AMR_USER_CANCELLED' }
                         $contentIndex++
                         $urlLeaf = [IO.Path]::GetFileName($parsedContentUri.AbsolutePath)
                         if ([string]::IsNullOrWhiteSpace($urlLeaf)) { $urlLeaf = ('DriverContent_{0}.bin' -f $contentIndex) }
@@ -16030,6 +18663,7 @@ function Test-AMRDriverVersionMatch {
                                 $fileBytes = [int64]0; $lastProgressBytes = [int64]0; $lastProgressAt = Get-Date
                                 while (($readCount = $inputStream.Read($buffer,0,$buffer.Length)) -gt 0) {
                                     $outputStream.Write($buffer,0,$readCount)
+                                    if (Test-Path -LiteralPath ($ProgressFile + '.cancel')) { throw 'AMR_USER_CANCELLED' }
                                     $fileBytes += $readCount
                                     if ($fileBytes -gt 4GB -or ($aggregateBytes + $fileBytes) -gt 4GB) { throw 'The package exceeded the 4 GB safety limit while downloading.' }
                                     $progressNow = Get-Date
@@ -16053,6 +18687,7 @@ function Test-AMRDriverVersionMatch {
                                 $downloadSucceeded = $true
                                 break
                             } catch {
+                                if ([string]$_.Exception.Message -eq 'AMR_USER_CANCELLED') { throw }
                                 $lastContentError = $_.Exception.Message
                                 if ($contentAttempt -lt 3) { Start-Sleep -Seconds ([int](2 * $contentAttempt)) }
                             } finally {
@@ -16066,6 +18701,7 @@ function Test-AMRDriverVersionMatch {
                     # Inspect package types instead of treating every payload as an opaque file.
                     # Driver INF packages are prepared for local installation; unsupported or
                     # incomplete formats deliberately trigger the Windows Update fallback.
+                    if (Test-Path -LiteralPath ($ProgressFile + '.cancel')) { throw 'AMR_USER_CANCELLED' }
                     $inspectionRoot = Join-Path $savedFolder '_AMR_Expanded'
                     New-Item -ItemType Directory -Path $inspectionRoot -Force | Out-Null
                     $expandExe = Join-Path $env:WINDIR 'System32\expand.exe'
@@ -16202,6 +18838,11 @@ function Test-AMRDriverVersionMatch {
                     $completePayload | ConvertTo-Json -Compress | Set-Content -LiteralPath ($ProgressFile + '.tmp') -Encoding UTF8
                     Move-Item -LiteralPath ($ProgressFile + '.tmp') -Destination $ProgressFile -Force
                 } catch {
+                    if ([string]$_.Exception.Message -eq 'AMR_USER_CANCELLED') {
+                        # Cancelled by the user at a safe point: remove only this attempt's partial folder and skip the Windows Update fallback.
+                        try { if ($savedFolder -and (Test-Path -LiteralPath $savedFolder -PathType Container)) { Remove-Item -LiteralPath $savedFolder -Recurse -Force -ErrorAction Stop } } catch {}
+                        throw 'Download cancelled by the user. The partial package was removed.'
+                    }
                     $directFailure = [string]$_.Exception.Message
                     try { $directFailureDetails = [string]$_.Exception.ToString() } catch {}
                     try { $directFailureHResult = [int]$_.Exception.HResult } catch {}
@@ -16528,9 +19169,12 @@ function Test-AMRDriverVersionMatch {
                 if ($script:DriverActionProgressFile) {
                     try { Remove-Item -LiteralPath $script:DriverActionProgressFile -Force -ErrorAction SilentlyContinue } catch {}
                     try { Remove-Item -LiteralPath ($script:DriverActionProgressFile + '.tmp') -Force -ErrorAction SilentlyContinue } catch {}
+                    try { Remove-Item -LiteralPath ($script:DriverActionProgressFile + '.cancel') -Force -ErrorAction SilentlyContinue } catch {}
                 }
                 $script:DriverActionProgressFile=$null
                 $script:DriverActionJob=$null
+                $script:DriverActionCancelRequested=$false
+                try { $finCancelButton=C 'DriverCancelManagedOperationBtn'; if($finCancelButton -and -not $script:DriverManagedJob){$finCancelButton.Visibility='Collapsed';$finCancelButton.IsEnabled=$false} } catch {}
                 $script:DriverActionUpdateId=$null; $script:DriverActionUpdateRevision=0
                 $script:DriverActionType=$null
                 $script:DriverActionDeviceName=$null
@@ -16566,6 +19210,14 @@ function Test-AMRDriverVersionMatch {
                         }
                         Write-AMRDriverDiagnostic -Severity TRACE -Operation ('Driver' + [string]$script:DriverActionType) -Stage $progressStage -Message 'Driver action worker reported a new progress stage.' -DeviceId ([string]$script:DriverActionDeviceId) -OperationId $script:DriverCurrentOperationId -Source 'DriverActionWorker' -Context $progressContext
                     }
+                    try {
+                        $actionCancelButton = C 'DriverCancelManagedOperationBtn'
+                        if ($actionCancelButton -and [string]$script:DriverActionType -eq 'Download') {
+                            $actionCancellable = (($progressStage -eq 'DirectDownload') -and -not $script:DriverActionCancelRequested)
+                            $actionCancelButton.Visibility = $(if ($actionCancellable) { 'Visible' } else { 'Collapsed' })
+                            $actionCancelButton.IsEnabled = [bool]$actionCancellable
+                        }
+                    } catch {}
                     $progressPercent = [int][Math]::Max(0,[Math]::Min(100,[double]$progressData.Percent))
                     $progressIndeterminate = ([string]$progressData.Stage -in @('WuaFallbackDownloadStarting','Installing'))
                     (C 'DriverOperationProgress').IsIndeterminate = [bool]$progressIndeterminate
@@ -16615,11 +19267,11 @@ function Test-AMRDriverVersionMatch {
             if ($job.State -eq 'Running' -and $actionTimeoutExpired) {
                 try { Stop-Job -Job $job -ErrorAction SilentlyContinue; Remove-Job -Job $job -Force -ErrorAction SilentlyContinue } catch {}
                 $script:DriverActionJob=$null; $script:DriverActionTimer.Stop(); Release-AMRDriverOperationLock
-                if($script:DriverActionProgressFile){try{Remove-Item -LiteralPath $script:DriverActionProgressFile -Force -ErrorAction SilentlyContinue;Remove-Item -LiteralPath ($script:DriverActionProgressFile+'.tmp') -Force -ErrorAction SilentlyContinue}catch{}}
+                if($script:DriverActionProgressFile){try{Remove-Item -LiteralPath $script:DriverActionProgressFile -Force -ErrorAction SilentlyContinue;Remove-Item -LiteralPath ($script:DriverActionProgressFile+'.tmp') -Force -ErrorAction SilentlyContinue;Remove-Item -LiteralPath ($script:DriverActionProgressFile+'.cancel') -Force -ErrorAction SilentlyContinue}catch{}}
                 $timedOutAction=[string]$script:DriverActionType
                 $script:DriverActionProgressFile=$null; $script:DriverActionType=$null; $script:DriverActionUpdateId=$null; $script:DriverActionUpdateRevision=0
                 $script:DriverSmartQueueActive=$false; $script:DriverSmartDownloadQueue=@(); $script:DriverBatchActive=$false; $script:DriverBatchQueue=@()
-                if($script:DriverOperationState.Name -in @('DriverDownload','DriverInstall')){$script:DriverOperationState=[pscustomobject]@{Name='Idle';State='Idle';StartedAt=$null;Generation=[int]$script:DriverOperationState.Generation;CanCancel=$false;Status='Ready'}}
+                if($script:DriverOperationState.Name -in @('DriverDownload','DriverInstall')){$script:DriverOperationState=[pscustomobject]@{Name='Idle';State='Idle';StartedAt=$null;Generation=[int]$script:DriverOperationState.Generation;CanCancel=$false;Status='Ready'; PartialShown=$false }}
                 (C 'DriverOperationProgress').Visibility='Collapsed'; (C 'DriverOperationProgress').IsIndeterminate=$false
                 Write-AMRDriverTimeoutEvent -Operation ('Driver'+$timedOutAction) -Message $(if($timedOutAction -eq 'Install'){'Driver installation exceeded its configured timeout plus the Windows Update abort grace period and was stopped.'}else{'Driver action exceeded its configured timeout and was stopped.'}) -OperationId ([string]$script:DriverCurrentOperationId)
                 (C 'DriverActionStatus').Text='Driver operation timed out and was stopped. Review Diagnostics and retry only after checking device state.'
@@ -16635,6 +19287,22 @@ function Test-AMRDriverVersionMatch {
                 }
                 $actionResult = Receive-Job -Job $job -ErrorAction Stop | Select-Object -Last 1
                 if (-not $actionResult) { throw 'The driver update operation returned no result.' }
+                # A8 driver fix: results of different actions (Download / Install / failure) carry different
+                # optional properties; under StrictMode a missing one aborted the completion handler
+                # ('DirectFailure', 'RestorePointStatus' cannot be found). Missing ones are added as empty values only.
+                if ($actionResult -isnot [System.Collections.IDictionary]) {
+                    foreach ($optionalName in @('Action','Success','Message','ResultCode','HResult','RebootRequired','OutcomeStatus','InstallReady','LocalInstallReady','WuaReady',
+                        'SavedCopy','SavedFolder','SavedCopyMessage','WuaDownloadError','WuaDownloadErrorDetails','WuaDownloadHResult','WuaDownloadErrorLine','WuaDownloadStackTrace',
+                        'DirectFailure','DirectFailureDetails','DirectFailureHResult','DirectFailureLine','DirectFailureStackTrace',
+                        'RestorePointStatus','PreInstallVerification','SignatureAudit','PostInstallVerification','InstalledDriverVersion','InstalledDriverInf',
+                        'PreviousDriverVersion','PreviousDriverBackupStatus','PreviousDriverBackupPath','DeviceConfigManagerErrorCode',
+                        'ErrorStage','ErrorLine','ErrorSourceLine','ErrorDetails','ScriptStackTrace')) {
+                        if (-not $actionResult.PSObject.Properties[$optionalName]) {
+                            $actionResult | Add-Member -NotePropertyName $optionalName -NotePropertyValue $null -Force
+                        }
+                    }
+                    if (-not $actionResult.PSObject.Properties['SavedFiles']) { $actionResult | Add-Member -NotePropertyName SavedFiles -NotePropertyValue @() -Force }
+                }
                 if (-not [bool]$actionResult.Success) {
                     $failureText = [string]$actionResult.Message
                     if ($actionResult.HResult) { $failureText += ("`nHRESULT: 0x{0:X8}" -f [int]$actionResult.HResult) }
@@ -16723,13 +19391,19 @@ function Test-AMRDriverVersionMatch {
                 Write-AMRLog ("Driver update {0} completed with status {1}. UpdateId={2}; ResultCode={3}; RebootRequired={4}." -f $actionResult.Action,$historyStatus,$script:DriverActionUpdateId,$actionResult.ResultCode,$actionResult.RebootRequired) $completionLogLevel Overview
                 Write-AMRDriverDiagnostic -Severity $(if ($completionLogLevel -eq 'SUCCESS') {'SUCCESS'} else {'WARNING'}) -Operation ('Driver' + [string]$actionResult.Action) -Stage Completed -Message ('Driver operation completed with status ' + $historyStatus + '.') -DeviceId ([string]$script:DriverActionDeviceId) -OperationId $script:DriverCurrentOperationId -Source ([string]$script:DriverActionSource) -DurationMs ([long]((Get-Date)-$script:DriverActionStartedAt).TotalMilliseconds) -Result $historyStatus -Context @{UpdateId=$script:DriverActionUpdateId;ResultCode=$actionResult.ResultCode;RebootRequired=[bool]$actionResult.RebootRequired;PostInstallVerification=$actionResult.PostInstallVerification;InstalledDriverVersion=$actionResult.InstalledDriverVersion;DirectFailure=$actionResult.DirectFailure;DirectFailureLine=$actionResult.DirectFailureLine;DirectFailureHResult=$actionResult.DirectFailureHResult;WuaDownloadError=$actionResult.WuaDownloadError;WuaDownloadErrorLine=$actionResult.WuaDownloadErrorLine;WuaDownloadHResult=$actionResult.WuaDownloadHResult}
                 if ($actionResult.Action -eq 'Install' -and $actionResult.RebootRequired -and -not $script:DriverBatchActive) {
-                    Show-AMRMessage 'The driver installation completed and Windows reports that a restart is required. Save your work and restart when convenient.' 'Restart Required' OK Information | Out-Null
+                    Show-AMRMessageGlass 'The driver installation completed and Windows reports that a restart is required. Save your work and restart when convenient.' 'Restart Required' OK Information | Out-Null
                 }
                 if ($script:DriverBatchActive -and $actionResult.Action -eq 'Install') {
                     $script:DriverBatchResults += [pscustomobject]@{ Device=[string]$script:DriverActionDeviceName; Update=[string]$script:DriverActionUpdateTitle; Success=($historyStatus -in @('InstalledAndVerified','InstalledRestartRequired')); VerificationPending=($historyStatus -eq 'CompletedVerificationPending'); RebootRequired=[bool]$actionResult.RebootRequired; Status=[string]$historyStatus }
                     if ([bool]$actionResult.RebootRequired) { $script:DriverBatchRebootRequired = $true }
                 }
             } catch {
+                if ($script:DriverActionCancelRequested -and [string]$_.Exception.Message -like '*Download cancelled by the user*') {
+                    (C 'DriverActionStatus').Text = 'Download cancelled. The partial package was removed; nothing was installed.'
+                    try { Add-AMRDriverHistoryEntry -Action 'Download' -Device ([string]$script:DriverActionDeviceName) -Update ([string]$script:DriverActionUpdateTitle) -Version ([string]$script:DriverActionVersion) -Status 'Cancelled' -Details 'Cancelled by the user; the partial package was removed.' -DeviceInstanceId ([string]$script:DriverActionDeviceId) -OperationId $script:DriverCurrentOperationId } catch {}
+                    Write-AMRLog 'Driver download cancelled by the user; the partial package was removed.' WARNING Overview
+                    if ($script:DriverSmartQueueActive) { $script:DriverSmartDownloadQueue = @() }
+                } else {
                 (C 'DriverActionStatus').Text = 'Driver operation failed: ' + $_.Exception.Message
                 Add-AMRDriverHistoryEntry -Action ([string]$script:DriverActionType) -Device ([string]$script:DriverActionDeviceName) -Update ([string]$script:DriverActionUpdateTitle) -Version ([string]$script:DriverActionVersion) -Status 'Failed' -Details ([string]$_.Exception.Message) -DeviceInstanceId ([string]$script:DriverActionDeviceId) -OperationId $script:DriverCurrentOperationId
                 Write-AMRLog ('Driver update action failed: ' + $_.Exception.Message) ERROR Overview
@@ -16737,7 +19411,7 @@ function Test-AMRDriverVersionMatch {
                 if ([string]$script:DriverActionType -eq 'Install') {
                     $recoveryRoot=Join-Path $env:ProgramData 'AMR Windows Utility\DriverRecovery'
                     $recoveryPrompt="The driver installation failed. Recovery options:`n`n1. Device Manager > device Properties > Driver > Roll Back Driver (if Windows enables it).`n2. Use Smart Restore to target the exact verified AMR System Restore point you created manually, if available.`n3. Review previous-driver exports under:`n$recoveryRoot`n`nOpen Device Manager now?"
-                    if((Show-AMRMessage $recoveryPrompt 'Driver Installation Recovery' YesNo Warning) -eq 'Yes'){try{Start-Process -FilePath 'devmgmt.msc' -ErrorAction Stop}catch{Show-AMRMessage ('Could not open Device Manager: '+[string]$_.Exception.Message) 'Recovery' OK Warning | Out-Null}}
+                    if((Show-AMRMessageGlass $recoveryPrompt 'Driver Installation Recovery' YesNo Warning) -eq 'Yes'){try{Start-Process -FilePath 'devmgmt.msc' -ErrorAction Stop}catch{Show-AMRMessageGlass ('Could not open Device Manager: '+[string]$_.Exception.Message) 'Recovery' OK Warning | Out-Null}}
                 }
                 if ($script:DriverBatchActive -and $script:DriverActionType -eq 'Install') {
                     $script:DriverBatchResults += [pscustomobject]@{ Device=[string]$script:DriverActionDeviceName; Update=[string]$script:DriverActionUpdateTitle; Success=$false; RebootRequired=$false; Status='Failed'; Details=[string]$_.Exception.Message }
@@ -16745,7 +19419,8 @@ function Test-AMRDriverVersionMatch {
                     (C 'DriverActionStatus').Text = ('Smart Install could not prepare {0}: {1}. AMR will continue with the remaining candidates.' -f [string]$script:DriverActionDeviceName,[string]$_.Exception.Message)
                     Write-AMRLog ('Smart Install package preparation failed and will be skipped: ' + [string]$_.Exception.Message) WARNING Overview
                 } else {
-                    Show-AMRMessage ('Driver update operation failed:`n' + $_.Exception.Message) 'Driver Center' OK Error | Out-Null
+                    Show-AMRMessageGlass ('Driver update operation failed:`n' + $_.Exception.Message) 'Driver Center' OK Error | Out-Null
+                }
                 }
             } finally {
                 $wasBatchInstall = ($script:DriverBatchActive -and [string]$script:DriverActionType -eq 'Install')
@@ -16753,7 +19428,9 @@ function Test-AMRDriverVersionMatch {
                 try { Remove-Job -Job $job -Force -ErrorAction SilentlyContinue } catch {}
                 Release-AMRDriverOperationLock
                 $script:DriverActionJob = $null
-                if($script:DriverOperationState.Name -in @('DriverDownload','DriverInstall')){$script:DriverOperationState=[pscustomobject]@{Name='Idle';State='Idle';StartedAt=$null;Generation=[int]$script:DriverOperationState.Generation;CanCancel=$false;Status='Ready'}}
+                $script:DriverActionCancelRequested = $false
+                try { $doneCancelButton = C 'DriverCancelManagedOperationBtn'; if ($doneCancelButton -and -not $script:DriverManagedJob) { $doneCancelButton.Visibility = 'Collapsed'; $doneCancelButton.IsEnabled = $false } } catch {}
+                if($script:DriverOperationState.Name -in @('DriverDownload','DriverInstall')){$script:DriverOperationState=[pscustomobject]@{Name='Idle';State='Idle';StartedAt=$null;Generation=[int]$script:DriverOperationState.Generation;CanCancel=$false;Status='Ready'; PartialShown=$false }}
                 $script:DriverActionUpdateId = $null
                 $script:DriverActionUpdateRevision = 0
                 $script:DriverActionType = $null
@@ -16768,6 +19445,7 @@ function Test-AMRDriverVersionMatch {
                 if ($script:DriverActionProgressFile) {
                     try { Remove-Item -LiteralPath $script:DriverActionProgressFile -Force -ErrorAction SilentlyContinue } catch {}
                     try { Remove-Item -LiteralPath ($script:DriverActionProgressFile + '.tmp') -Force -ErrorAction SilentlyContinue } catch {}
+                    try { Remove-Item -LiteralPath ($script:DriverActionProgressFile + '.cancel') -Force -ErrorAction SilentlyContinue } catch {}
                 }
                 $script:DriverActionProgressFile = $null
                 Update-AMRDriverActionButtons
@@ -16887,7 +19565,7 @@ function Get-AMRDriverInstallPlan {
 
 function Show-AMRDriverInstallPlan {
     $selectedRows = @((C 'DriverDeviceList').SelectedItems | Where-Object { $_.UpdateReady -and -not [string]::IsNullOrWhiteSpace([string]$_.UpdateId) })
-    if ($selectedRows.Count -eq 0) { Show-AMRMessage 'Select one or more Ready driver packages first.' 'Install Planning' OK Information | Out-Null; return }
+    if ($selectedRows.Count -eq 0) { Show-AMRMessageGlass 'Select one or more Ready driver packages first.' 'Install Planning' OK Information | Out-Null; return }
     $plan = @(Get-AMRDriverInstallPlan -Rows $selectedRows)
     if ($plan.Count -eq 0) { return }
     $lines = @(); $index=0
@@ -16898,13 +19576,13 @@ function Show-AMRDriverInstallPlan {
         $lines += ('{0}. [{1}] {2} — {3} ({4})' -f $index,$entry.Group,[string]$row.DeviceName,[string]$row.AvailableUpdate,$version)
     }
     $body = "AMR proposed installation order`n`n" + ($lines -join "`n") + "`n`nPlanning rules: platform/chipset → storage/controllers → network → graphics → audio → other devices. This is a conservative class-based heuristic, not a vendor-provided dependency graph. Each package is revalidated immediately before installation. If Windows requests a restart, the remaining queue will pause until you restart and scan again. AMR does not create a System Restore point automatically. Create one manually first if you want a recovery point; AMR also attempts to export the currently installed OEM driver package for each device when Windows permits it.`n`nContinue with this plan?"
-    if ((Show-AMRMessage $body 'Review Driver Installation Plan' YesNo Warning) -ne 'Yes') { return }
+    if ((Show-AMRMessageGlass $body 'Review Driver Installation Plan' YesNo Warning) -ne 'Yes') { return }
     Start-AMRDriverBatchInstall -ApprovedPlan $plan
 }
 
 function Complete-AMRDriverBatchSummary {
     $batchSuccessCount = @($script:DriverBatchResults | Where-Object { $_.Success }).Count
-    $batchPendingCount = @($script:DriverBatchResults | Where-Object { $_.VerificationPending -or $_.Status -eq 'CompletedVerificationPending' }).Count
+    $batchPendingCount = @($script:DriverBatchResults | Where-Object { $_.Status -eq 'CompletedVerificationPending' }).Count
     $deferredCount = @($script:DriverBatchResults | Where-Object { $_.Status -eq 'Deferred - restart required' }).Count
     $batchFailureCount = @($script:DriverBatchResults | Where-Object { $_.Status -notin @('InstalledAndVerified','InstalledRestartRequired','CompletedVerificationPending','Deferred - restart required') }).Count
     $batchRebootText = if ($script:DriverBatchRebootRequired) { ' Windows requires a restart to complete one or more updates. No restart was performed.' } else { ' No restart was requested by Windows.' }
@@ -16918,7 +19596,7 @@ function Complete-AMRDriverBatchSummary {
     $script:DriverBatchRestorePointStatus = $null
     $script:DriverBatchResults = @()
     Update-AMRDriverActionButtons
-    Show-AMRMessage $batchSummary 'Batch Installation Results' OK Information | Out-Null
+    Show-AMRMessageGlass $batchSummary 'Batch Installation Results' OK Information | Out-Null
 }
 
 function Start-AMRDriverBatchInstall {
@@ -16926,12 +19604,12 @@ function Start-AMRDriverBatchInstall {
     if ($script:DriverManagedJob -or $script:DriverActionJob -or $script:DriverScanJob -or $script:DriverOperationState.State -eq 'Running' -or $script:DriverBatchActive -or $script:DriverSmartQueueActive) { return }
     $selectedRows = @((C 'DriverDeviceList').SelectedItems | Where-Object { $_.UpdateReady -and -not [string]::IsNullOrWhiteSpace([string]$_.UpdateId) })
     if ($selectedRows.Count -eq 0) {
-        Show-AMRMessage 'Select one or more rows marked Ready to install. Use Select All Ready to select every downloaded update.' 'Selection Required' OK Information | Out-Null
+        Show-AMRMessageGlass 'Select one or more rows marked Ready to install. Use Select All Ready to select every downloaded update.' 'Selection Required' OK Information | Out-Null
         return
     }
     $admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
     if (-not $admin) {
-        Show-AMRMessage 'Installing device drivers requires administrator permissions. Reopen AMR as Administrator, scan again, then retry.' 'Administrator permission required' OK Warning | Out-Null
+        Show-AMRMessageGlass 'Installing device drivers requires administrator permissions. Reopen AMR as Administrator, scan again, then retry.' 'Administrator permission required' OK Warning | Out-Null
         return
     }
     # Use the reviewed plan when supplied; otherwise create the same deterministic plan.
@@ -16942,7 +19620,7 @@ function Start-AMRDriverBatchInstall {
     if ($uniqueRows.Count -gt 12) { $preview += "`n• … and $($uniqueRows.Count - 12) more update(s)" }
     $confirmText = "Install $($uniqueRows.Count) selected ready driver update(s) in AMR's planned order, one at a time?`n`n$preview`n`nEach update will be revalidated by Windows Update before installation. Failed items will be recorded and the remaining queue will continue. If Windows requests a restart, AMR pauses the remaining queue; restart and scan again before continuing. AMR will NOT restart automatically. Continue?"
     if (-not ($ApprovedPlan -and $ApprovedPlan.Count -gt 0)) {
-        if ((Show-AMRMessage $confirmText 'Confirm Batch Driver Installation' YesNo Warning) -ne 'Yes') { return }
+        if ((Show-AMRMessageGlass $confirmText 'Confirm Batch Driver Installation' YesNo Warning) -ne 'Yes') { return }
     }
 
     $script:DriverBatchQueueIterations = 0
@@ -16993,17 +19671,17 @@ function Open-AMRDriverRecoveryFolder {
     $root = Join-Path $env:ProgramData 'AMR Windows Utility\DriverRecovery'
     try {
         if (-not (Test-Path -LiteralPath $root -PathType Container)) {
-            Show-AMRMessage 'No previous-driver recovery exports have been created yet. AMR creates an export automatically before an installation when Windows exposes an exportable OEM driver package.' 'Driver Recovery Backups' OK Information | Out-Null
+            Show-AMRMessageGlass 'No previous-driver recovery exports have been created yet. AMR creates an export automatically before an installation when Windows exposes an exportable OEM driver package.' 'Driver Recovery Backups' OK Information | Out-Null
             return
         }
         Start-Process -FilePath 'explorer.exe' -ArgumentList @($root) -ErrorAction Stop
-    } catch { Show-AMRMessage ('Could not open the driver recovery folder: ' + [string]$_.Exception.Message) 'Driver Recovery Backups' OK Error | Out-Null }
+    } catch { Show-AMRMessageGlass ('Could not open the driver recovery folder: ' + [string]$_.Exception.Message) 'Driver Recovery Backups' OK Error | Out-Null }
 }
 
 function Invoke-AMRDriverRollbackCheck {
     $selected = (C 'DriverDeviceList').SelectedItem
     if (-not $selected -or [string]::IsNullOrWhiteSpace([string]$selected.DeviceId)) {
-        Show-AMRMessage 'Select a device row first.' 'Driver Rollback' OK Information | Out-Null
+        Show-AMRMessageGlass 'Select a device row first.' 'Driver Rollback' OK Information | Out-Null
         return
     }
     if($script:DriverManagedJob -or $script:DriverActionJob -or $script:DriverScanJob){return}
@@ -17025,17 +19703,17 @@ function Invoke-AMRDriverRollbackCheck {
                     (C 'DriverActionStatus').Text='Rollback availability check completed. No driver was changed.'
                     Write-AMRLog ("Rollback availability checked for '{0}' ({1}). {2}" -f $result.DeviceName,$result.DeviceId,$result.CandidateText) INFO Overview
                     $confirm="Selected device:`n$($result.DeviceName)`n`n$($result.CurrentInf)`n`n$($result.Status)`n`nOpen Device Manager now? AMR will not change or remove any driver."
-                    if((Show-AMRMessage $confirm 'Check Driver Rollback' YesNo Information) -eq 'Yes'){Start-Process -FilePath 'devmgmt.msc' -ErrorAction Stop}
+                    if((Show-AMRMessageGlass $confirm 'Check Driver Rollback' YesNo Information) -eq 'Yes'){Start-Process -FilePath 'devmgmt.msc' -ErrorAction Stop}
                 } catch {
                     (C 'DriverRollbackStatus').Text='Rollback check failed: '+[string]$_.Exception.Message
-                    Show-AMRMessage ([string]$_.Exception.Message) 'Driver Rollback' OK Error | Out-Null
+                    Show-AMRMessageGlass ([string]$_.Exception.Message) 'Driver Rollback' OK Error | Out-Null
                 }
             }
         }).GetNewClosure())
         $script:DriverManagedTimer=$poll; $poll.Start()
     } catch {
         (C 'DriverRollbackStatus').Text='Could not start rollback check: '+[string]$_.Exception.Message
-        Show-AMRMessage ([string]$_.Exception.Message) 'Driver Rollback' OK Error | Out-Null
+        Show-AMRMessageGlass ([string]$_.Exception.Message) 'Driver Rollback' OK Error | Out-Null
     }
 }
 
@@ -17055,13 +19733,36 @@ function Invoke-AMRDriverRollbackCheck {
 })
 (C 'DriverCancelManagedOperationBtn').Add_Click({
     try {
+        # A4: cooperative cancel of a driver download (direct/Windows Update download worker): the worker stops at its next safe point and removes its own partial folder.
+        if($script:DriverActionJob -and [string]$script:DriverActionType -eq 'Download' -and -not $script:DriverManagedJob){
+            if($script:DriverActionCancelRequested -or [string]::IsNullOrWhiteSpace([string]$script:DriverActionProgressFile)){return}
+            if((Show-AMRMessageGlass 'Cancel the current DriverDownload operation? The partial package will be removed and nothing will be installed.' 'Cancel Background Operation' YesNo Warning) -ne 'Yes'){return}
+            if(-not $script:DriverActionJob){return}
+            Set-Content -LiteralPath ($script:DriverActionProgressFile + '.cancel') -Value 'cancel' -Encoding ASCII -ErrorAction Stop
+            $script:DriverActionCancelRequested=$true
+            (C 'DriverActionStatus').Text='Cancelling the download at the next safe point…'
+            $cancelNow=C 'DriverCancelManagedOperationBtn'; if($cancelNow){$cancelNow.IsEnabled=$false}
+            Write-AMRDriverDiagnostic -Severity WARNING -Operation 'DriverDownload' -Stage CancelRequested -Message 'The user requested cancellation of the driver download.' -Source 'DriverCancelButton'
+            return
+        }
         if(-not $script:DriverManagedJob){return}
-        if(-not $script:DriverOperationState.CanCancel){Show-AMRMessage 'This operation is in a protected stage and cannot be safely interrupted. Please wait for it to finish.' 'Operation Cannot Be Cancelled' OK Information | Out-Null;return}
-        if((Show-AMRMessage ('Cancel the current {0} operation?' -f $script:DriverOperationState.Name) 'Cancel Background Operation' YesNo Warning) -ne 'Yes'){return}
+        if(-not $script:DriverOperationState.CanCancel){Show-AMRMessageGlass 'This operation is in a protected stage and cannot be safely interrupted. Please wait for it to finish.' 'Operation Cannot Be Cancelled' OK Information | Out-Null;return}
+        if((Show-AMRMessageGlass ('Cancel the current {0} operation?' -f $script:DriverOperationState.Name) 'Cancel Background Operation' YesNo Warning) -ne 'Yes'){return}
+        if(-not $script:DriverManagedJob){return}
+        $cancelOperation=[string]$script:DriverOperationState.Name
+        if($cancelOperation -in @('CatalogAcquisition','VendorPackageAcquisition')){
+            if([string]::IsNullOrWhiteSpace([string]$script:DriverManagedProgressFile)){return}
+            Set-Content -LiteralPath ($script:DriverManagedProgressFile + '.cancel') -Value 'cancel' -Encoding ASCII -ErrorAction Stop
+            (C 'DriverActionStatus').Text='Cancelling the download at the next safe point…'
+            $cancelNow=C 'DriverCancelManagedOperationBtn'; if($cancelNow){$cancelNow.IsEnabled=$false}
+            Write-AMRDriverDiagnostic -Severity WARNING -Operation $cancelOperation -Stage CancelRequested -Message 'The user requested cancellation of the package download.' -Source 'DriverCancelButton'
+            return
+        }
         Stop-AMRDriverManagedWorker
         (C 'DriverActionStatus').Text='Background operation cancelled safely.'
+        if($cancelOperation -eq 'RollbackCheck'){ try { (C 'DriverRollbackStatus').Text='Rollback check cancelled. No driver was changed.' } catch {} }
         Update-AMRDriverActionButtons
-    } catch { Show-AMRMessage ([string]$_.Exception.Message) 'Cancel Operation' OK Error | Out-Null }
+    } catch { Show-AMRMessageGlass ([string]$_.Exception.Message) 'Cancel Operation' OK Error | Out-Null }
 })
 Set-AMRDriverExperienceMode -Mode Smart
 
@@ -17109,6 +19810,15 @@ function Get-AMRDriverWorkerFunctionBundle {
     return ($definitions -join "`r`n`r`n")
 }
 
+# A4: cooperative cancel for driver downloads. The UI creates '<progress file>.cancel'; the worker checks it at defined points
+# (between download chunks, between files, before the manifest is written) and cleans its own partial folder.
+function Test-AMRDriverWorkerCancel {
+    $cancelBase = ''
+    try { $cancelBase = [string]$script:DriverWorkerProgressPath } catch {}
+    if ([string]::IsNullOrWhiteSpace($cancelBase)) { return $false }
+    return [bool](Test-Path -LiteralPath ($cancelBase + '.cancel'))
+}
+
 function Start-AMRDriverManagedWorker {
     [CmdletBinding()]
     param(
@@ -17123,15 +19833,15 @@ function Start-AMRDriverManagedWorker {
     $functionNames = if ($Operation -eq 'CatalogDiscovery') {
         @('ConvertFrom-AMRDriverCatalogCellText','Get-AMRDriverCatalogDiscovery')
     } elseif ($Operation -eq 'CatalogAcquisition') {
-        @('ConvertFrom-AMRDriverCatalogCellText','Test-AMRDriverInfDeviceApplicability','Get-AMRCatalogUpdateDetails','Get-AMRCatalogDownloadInfo','Invoke-AMRCatalogPackageAcquisition')
+        @('ConvertFrom-AMRDriverCatalogCellText','Test-AMRDriverInfDeviceApplicability','Get-AMRCatalogUpdateDetails','Get-AMRCatalogDownloadInfo','Invoke-AMRCatalogPackageAcquisition','Test-AMRDriverWorkerCancel')
     } elseif ($Operation -eq 'CatalogStaging') {
         @('Test-AMRDriverInfDeviceApplicability')
     } elseif ($Operation -eq 'RestorePoint') {
-        @('Get-AMRComputerRestorePoints','New-AMRDriverSafetyRestorePoint','Get-AMRRecordedDriverRestorePoint')
+        @('Get-AMRComputerRestorePoints','ConvertFrom-AMRRestorePointTime','New-AMRDriverSafetyRestorePoint','Get-AMRRecordedDriverRestorePoint')
     } elseif ($Operation -eq 'VendorDiscovery') {
         @('Get-AMRDriverVendorRegistry','Resolve-AMRDriverVendorName','Get-AMRLocalVendorAdapterRegistry','Get-AMRLocalVendorAdapterCapabilities','ConvertTo-AMRLocalVendorCandidate','Get-AMRLocalManifestValue','Get-AMRLocalVendorManifestPath','Test-AMRLocalVendorProviderDefinition','Get-AMRLocalVendorProviderManifest','Save-AMRLocalVendorProviderManifest','Register-AMRLocalVendorProvider','Set-AMRLocalVendorProviderEnabled','Get-AMRGenericVendorManifestCandidates','Get-AMROfficialGraphicsVendorPortalCandidates','Invoke-AMRLocalVendorApi','Get-AMRDirectVendorPackageCandidates')
     } elseif ($Operation -eq 'VendorPackageAcquisition') {
-        @('Invoke-AMRVendorPackageAcquisition','Invoke-AMRLocalVendorApi')
+        @('Invoke-AMRVendorPackageAcquisition','Invoke-AMRLocalVendorApi','Test-AMRDriverWorkerCancel')
     } else { @() }
     $bundle = Get-AMRDriverWorkerFunctionBundle -FunctionNames $functionNames
     $generation = [int]$script:DriverOperationState.Generation + 1
@@ -17190,8 +19900,9 @@ function Start-AMRDriverManagedWorker {
                 $acquisition
             } catch {
                 $safeDevice=([string]$deviceData.DeviceId -replace '[^A-Za-z0-9._-]','_'); if($safeDevice.Length -gt 70){$safeDevice=$safeDevice.Substring(0,70)}
-                $failedFolder=Join-Path (Join-Path (Join-Path $downloadRoot 'Drivers') ('{0}_{1}_r0' -f $safeDevice,([string]$candidateData.CatalogUpdateId -replace '[^A-Fa-f0-9-]','')))
+                $failedFolder=Join-Path (Join-Path $downloadRoot 'Drivers') ('{0}_{1}_r0' -f $safeDevice,([string]$candidateData.CatalogUpdateId -replace '[^A-Fa-f0-9-]',''))
                 if(Test-Path -LiteralPath $failedFolder -PathType Container){Remove-Item -LiteralPath $failedFolder -Recurse -Force -ErrorAction SilentlyContinue}
+                if([string]$_.Exception.Message -eq 'AMR_USER_CANCELLED'){throw 'Download cancelled by the user. The partial package was removed.'}
                 throw
             }
         } elseif ($operationName -eq 'VendorDiscovery') {
@@ -17207,6 +19918,7 @@ function Start-AMRDriverManagedWorker {
                 $vendorAcquisition
             } catch {
                 if($candidateData.PackageFolder -and (Test-Path -LiteralPath ([string]$candidateData.PackageFolder) -PathType Container)){Remove-Item -LiteralPath ([string]$candidateData.PackageFolder) -Recurse -Force -ErrorAction SilentlyContinue}
+                if([string]$_.Exception.Message -eq 'AMR_USER_CANCELLED'){throw 'Download cancelled by the user. The partial package was removed.'}
                 throw
             }
         } elseif ($operationName -eq 'CatalogStaging') {
@@ -17346,7 +20058,7 @@ function Start-AMRDriverManagedWorker {
     $script:DriverManagedJob = $job
     $script:DriverManagedProgressFile=$progressPath
     $script:DriverManagedWorkerId=$workerId
-    $script:DriverOperationState = [pscustomobject]@{ Name=$Operation; State='Running'; StartedAt=(Get-Date); Generation=$generation; ScanGeneration=[int]$script:DriverScanGeneration; WorkerId=$workerId; DeviceId=$deviceInstanceId; CanCancel=($Operation -in @('CatalogDiscovery','RollbackCheck','VendorDiscovery')); Status=$(switch($Operation){'CatalogDiscovery'{'Searching Microsoft Update Catalog'} 'CatalogAcquisition'{'Downloading and verifying the selected driver package'} 'CatalogStaging'{'Revalidating and staging the verified driver package'} 'RollbackCheck'{'Checking rollback and recovery records'} 'RestorePoint'{'Creating and verifying a System Restore point'} 'VendorDiscovery'{'Searching registered official vendor providers'} 'VendorPackageAcquisition'{'Acquiring and verifying a package through the local vendor API'}}) }
+    $script:DriverOperationState = [pscustomobject]@{ Name=$Operation; State='Running'; StartedAt=(Get-Date); Generation=$generation; ScanGeneration=[int]$script:DriverScanGeneration; WorkerId=$workerId; DeviceId=$deviceInstanceId; CanCancel=($Operation -in @('CatalogDiscovery','RollbackCheck','VendorDiscovery','CatalogAcquisition','VendorPackageAcquisition')); Status=$(switch($Operation){'CatalogDiscovery'{'Searching Microsoft Update Catalog'} 'CatalogAcquisition'{'Downloading and verifying the selected driver package'} 'CatalogStaging'{'Revalidating and staging the verified driver package'} 'RollbackCheck'{'Checking rollback and recovery records'} 'RestorePoint'{'Creating and verifying a System Restore point'} 'VendorDiscovery'{'Searching registered official vendor providers'} 'VendorPackageAcquisition'{'Acquiring and verifying a package through the local vendor API'}}) }
     Register-AMRDriverManagedWatchdog -Operation $Operation -StartedAt ([datetime]$script:DriverOperationState.StartedAt) | Out-Null
     try {
         (C 'DriverActionStatus').Text = ([string]$script:DriverOperationState.Status + '…')
@@ -17379,6 +20091,14 @@ function Start-AMRDriverManagedWorker {
                 try {
                     $progress=Get-Content -LiteralPath $path -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
                     if($progress.Stage){(C 'DriverActionStatus').Text=[string]$progress.Stage}
+                    try {
+                        $tickOperation=[string]$script:DriverOperationState.Name
+                        if($tickOperation -in @('CatalogAcquisition','VendorPackageAcquisition')){
+                            $tickCancel=C 'DriverCancelManagedOperationBtn'
+                            $stillCancellable=(([string]$progress.Stage -match '^(Starting|Preparing|Retrieving|Downloading)') -and -not (Test-Path -LiteralPath ($path+'.cancel')))
+                            if($tickCancel){$tickCancel.Visibility=$(if($stillCancellable){'Visible'}else{'Collapsed'});$tickCancel.IsEnabled=[bool]$stillCancellable}
+                        }
+                    } catch {}
                     $bar=C 'DriverOperationProgress'
                     if($bar -and [int]$progress.Percent -ge 0){$bar.IsIndeterminate=$false;$bar.Value=[math]::Max(0,[math]::Min(100,[int]$progress.Percent))}elseif($bar){$bar.IsIndeterminate=$true}
                 } catch {}
@@ -17402,11 +20122,11 @@ function Stop-AMRDriverManagedWorker {
     $script:DriverManagedJob = $null
     if($script:DriverManagedTimer){try{$script:DriverManagedTimer.Stop()}catch{};$script:DriverManagedTimer=$null}
     if($script:DriverManagedProgressTimer){try{$script:DriverManagedProgressTimer.Stop()}catch{};$script:DriverManagedProgressTimer=$null}
-    if($script:DriverManagedProgressFile){try{Remove-Item -LiteralPath $script:DriverManagedProgressFile -Force -ErrorAction SilentlyContinue;Remove-Item -LiteralPath ($script:DriverManagedProgressFile+'.tmp') -Force -ErrorAction SilentlyContinue}catch{}}
+    if($script:DriverManagedProgressFile){try{Remove-Item -LiteralPath $script:DriverManagedProgressFile -Force -ErrorAction SilentlyContinue;Remove-Item -LiteralPath ($script:DriverManagedProgressFile+'.tmp') -Force -ErrorAction SilentlyContinue;Remove-Item -LiteralPath ($script:DriverManagedProgressFile+'.cancel') -Force -ErrorAction SilentlyContinue}catch{}}
     $script:DriverManagedProgressFile=$null; $script:DriverManagedWorkerId=$null
     $script:DriverManagedWatchdog=$null
     Release-AMRDriverOperationLock
-    $script:DriverOperationState = [pscustomobject]@{ Name='Idle'; State='Idle'; StartedAt=$null; Generation=[int]$script:DriverOperationState.Generation; CanCancel=$false; Status='Ready' }
+    $script:DriverOperationState = [pscustomobject]@{ Name='Idle'; State='Idle'; StartedAt=$null; Generation=[int]$script:DriverOperationState.Generation; CanCancel=$false; Status='Ready'; PartialShown=$false }
     try { (C 'DriverOperationProgress').IsIndeterminate=$false; (C 'DriverOperationProgress').Visibility='Collapsed'; $cancelButton=C 'DriverCancelManagedOperationBtn';if($cancelButton){$cancelButton.Visibility='Collapsed';$cancelButton.IsEnabled=$false} } catch {}
     Update-AMRDriverActionButtons
 }
@@ -17445,11 +20165,11 @@ function Complete-AMRDriverManagedWorker {
     $script:DriverManagedJob = $null
     $script:DriverManagedTimer=$null
     if($script:DriverManagedProgressTimer){try{$script:DriverManagedProgressTimer.Stop()}catch{};$script:DriverManagedProgressTimer=$null}
-    if($script:DriverManagedProgressFile){try{Remove-Item -LiteralPath $script:DriverManagedProgressFile -Force -ErrorAction SilentlyContinue;Remove-Item -LiteralPath ($script:DriverManagedProgressFile+'.tmp') -Force -ErrorAction SilentlyContinue}catch{}}
+    if($script:DriverManagedProgressFile){try{Remove-Item -LiteralPath $script:DriverManagedProgressFile -Force -ErrorAction SilentlyContinue;Remove-Item -LiteralPath ($script:DriverManagedProgressFile+'.tmp') -Force -ErrorAction SilentlyContinue;Remove-Item -LiteralPath ($script:DriverManagedProgressFile+'.cancel') -Force -ErrorAction SilentlyContinue}catch{}}
     $script:DriverManagedProgressFile=$null; $script:DriverManagedWorkerId=$null
     $script:DriverManagedWatchdog=$null
     Release-AMRDriverOperationLock
-    $script:DriverOperationState = [pscustomobject]@{ Name='Idle'; State='Idle'; StartedAt=$null; Generation=[int]$script:DriverOperationState.Generation; CanCancel=$false; Status='Ready' }
+    $script:DriverOperationState = [pscustomobject]@{ Name='Idle'; State='Idle'; StartedAt=$null; Generation=[int]$script:DriverOperationState.Generation; CanCancel=$false; Status='Ready'; PartialShown=$false }
     try { (C 'DriverOperationProgress').IsIndeterminate=$false; (C 'DriverOperationProgress').Visibility='Collapsed'; $cancelButton=C 'DriverCancelManagedOperationBtn';if($cancelButton){$cancelButton.Visibility='Collapsed';$cancelButton.IsEnabled=$false} } catch {}
     Update-AMRDriverActionButtons
     if ($receiveError) {
@@ -17724,6 +20444,7 @@ function Invoke-AMRCatalogPackageAcquisition {
         $index++; if(Get-Command Write-AMRDriverWorkerProgress -ErrorAction SilentlyContinue){Write-AMRDriverWorkerProgress -Path $script:DriverWorkerProgressPath -Stage ('Downloading package file {0} of {1}' -f $index,@($downloadInfo.Urls).Count)}; $leaf=[IO.Path]::GetFileName($uri.AbsolutePath); if(-not $leaf){$leaf=('CatalogPackage_{0}.cab' -f $index)}
         $leaf=[Uri]::UnescapeDataString($leaf) -replace '[^A-Za-z0-9._-]','_'; if($leaf.Length -gt 120){$leaf=$leaf.Substring($leaf.Length-120)}
         $dest=Join-Path $folder ('{0:D2}_{1}' -f $index,$leaf)
+        if(Test-AMRDriverWorkerCancel){throw 'AMR_USER_CANCELLED'}
         $downloaded=$false; $lastDownloadError=''
         for($attempt=1;$attempt -le 3;$attempt++) {
             $request=[System.Net.HttpWebRequest]::Create($uri)
@@ -17740,12 +20461,13 @@ function Invoke-AMRCatalogPackageAcquisition {
                 if([int64]$response.ContentLength -gt 4GB){throw 'Catalog package response exceeds the 4 GB safety limit.'}
                 $inputStream=$response.GetResponseStream(); $outputStream=[IO.File]::Open($dest,[IO.FileMode]::Create,[IO.FileAccess]::Write,[IO.FileShare]::None)
                 $buffer=New-Object byte[] 65536; $received=[int64]0; $lastProgressBytes=[int64]0
-                while(($read=$inputStream.Read($buffer,0,$buffer.Length)) -gt 0){$outputStream.Write($buffer,0,$read);$received+=$read;if($received -gt 4GB){throw 'Catalog package exceeded the 4 GB safety limit while downloading.'};if($response.ContentLength -gt 0 -and ($received-$lastProgressBytes -ge 1MB -or $received -eq [int64]$response.ContentLength) -and (Get-Command Write-AMRDriverWorkerProgress -ErrorAction SilentlyContinue)){$pct=[int][math]::Floor(($received/[double]$response.ContentLength)*100);Write-AMRDriverWorkerProgress -Path $script:DriverWorkerProgressPath -Stage ('Downloading {0}: {1:N0} / {2:N0} bytes' -f $leaf,$received,$response.ContentLength) -Percent $pct -BytesReceived $received -BytesTotal ([long]$response.ContentLength);$lastProgressBytes=$received}}
+                while(($read=$inputStream.Read($buffer,0,$buffer.Length)) -gt 0){$outputStream.Write($buffer,0,$read);$received+=$read;if(Test-AMRDriverWorkerCancel){throw 'AMR_USER_CANCELLED'};if($received -gt 4GB){throw 'Catalog package exceeded the 4 GB safety limit while downloading.'};if($response.ContentLength -gt 0 -and ($received-$lastProgressBytes -ge 1MB -or $received -eq [int64]$response.ContentLength) -and (Get-Command Write-AMRDriverWorkerProgress -ErrorAction SilentlyContinue)){$pct=[int][math]::Floor(($received/[double]$response.ContentLength)*100);Write-AMRDriverWorkerProgress -Path $script:DriverWorkerProgressPath -Stage ('Downloading {0}: {1:N0} / {2:N0} bytes' -f $leaf,$received,$response.ContentLength) -Percent $pct -BytesReceived $received -BytesTotal ([long]$response.ContentLength);$lastProgressBytes=$received}}
                 $outputStream.Flush()
                 if($received -le 0 -or ([int64]$response.ContentLength -gt 0 -and $received -ne [int64]$response.ContentLength)){throw 'Catalog package download was empty or its content length did not match the server response.'}
                 $downloaded=$true
                 break
             } catch {
+                if([string]$_.Exception.Message -eq 'AMR_USER_CANCELLED'){if(Test-Path -LiteralPath $dest){Remove-Item -LiteralPath $dest -Force -ErrorAction SilentlyContinue};throw}
                 $lastDownloadError=[string]$_.Exception.Message
                 if(Test-Path -LiteralPath $dest){Remove-Item -LiteralPath $dest -Force -ErrorAction SilentlyContinue}
                 if($attempt -lt 3){Start-Sleep -Seconds (2*$attempt)}
@@ -17802,6 +20524,7 @@ function Invoke-AMRCatalogPackageAcquisition {
     if($verifiedInfPaths.Count -eq 0){throw 'No downloaded INF passed all checks: exact device-ID match in an applicable model section, current architecture/OS section, referenced catalog file present, and valid Authenticode signature on the catalog.'}
     if(Get-Command Write-AMRDriverWorkerProgress -ErrorAction SilentlyContinue){Write-AMRDriverWorkerProgress -Path $script:DriverWorkerProgressPath -Stage 'Hashing extracted package files'}
     $expandedFiles=@(Get-ChildItem -LiteralPath $expanded -File -Recurse -ErrorAction Stop | ForEach-Object { [pscustomobject]@{RelativePath=$_.FullName.Substring($expanded.Length).TrimStart([char[]]@([char]92,[char]47));SizeBytes=[int64]$_.Length;SHA256=(Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256 -ErrorAction Stop).Hash} })
+    if(Test-AMRDriverWorkerCancel){throw 'AMR_USER_CANCELLED'}
     $manifest=[pscustomobject]@{Product='AMR Microsoft Update Catalog Driver Package';CreatedAt=(Get-Date).ToString('o');SourceAdapter='MicrosoftUpdateCatalog';CatalogUpdateId=$catalogId;UpdateId=$catalogId;Revision=0;DeviceInstanceId=[string]$Device.DeviceId;DeviceName=[string]$Device.DeviceName;HardwareIds=@($Device.HardwareIds);CompatibleIds=@($Device.CompatibleIds);Installable=$false;StagedByWindows=$false;VerificationState='Downloaded, extracted, INF matched, catalog signature valid; Windows staging validation pending';InstallableInfFiles=@($verifiedInfPaths.ToArray());CatalogAudits=@($infAudit.ToArray());CatalogFile=[string]$infAudit[0].Catalog;CatalogSigner=[string]$infAudit[0].Signer;CatalogSignerThumbprint=[string]$infAudit[0].Thumbprint;Files=@($savedFiles.ToArray());ExpandedFiles=$expandedFiles;ExpectedSHA1=[string]$downloadInfo.ExpectedSHA1;ExpectedSHA256=[string]$downloadInfo.ExpectedSHA256;DownloadUrls=@($downloadInfo.Urls);CatalogDetailsUrl=$(if($catalogDetails){[string]$catalogDetails.Url}else{''});CatalogDetailsRetrieved=[bool]$catalogDetails;CatalogDetailsText=$(if($catalogDetails){[string]$catalogDetails.Text}else{''});CatalogDetailsError=$catalogDetailsError;PackageFolder=$folder}
     if(Get-Command Write-AMRDriverWorkerProgress -ErrorAction SilentlyContinue){Write-AMRDriverWorkerProgress -Path $script:DriverWorkerProgressPath -Stage 'Writing verified package manifest'}
     $manifestPath=Join-Path $folder 'AMR_DriverPackage_Manifest.json'
@@ -17810,7 +20533,7 @@ function Invoke-AMRCatalogPackageAcquisition {
     $isStaged=$false; $stageMessage='Package verified offline. Windows staging validation has not been run.'
     if($admin -and -not $DeferWindowsStaging) {
         $stagePrompt="AMR downloaded and verified this Catalog package for:`n$($Device.DeviceName)`n`nMatching INF files: $($verifiedInfPaths.Count)`nCatalog signer: $($manifest.CatalogSigner)`n`nThe next step adds the verified driver package to the Windows Driver Store using PnPUtil WITHOUT /install. This stages the package but does not activate it on the device. Continue?"
-        if((Show-AMRMessage $stagePrompt 'Stage Verified Driver Package' YesNo Warning) -eq 'Yes') {
+        if((Show-AMRMessageGlass $stagePrompt 'Stage Verified Driver Package' YesNo Warning) -eq 'Yes') {
             $pnputil=Join-Path $env:WINDIR 'System32\pnputil.exe'; if(-not(Test-Path $pnputil)){throw 'PnPUtil is unavailable; Windows cannot validate/stage this package.'}
             $stageOutputs=@()
             foreach($relativeInf in $verifiedInfPaths) {
@@ -17892,7 +20615,7 @@ function Show-AMRProfessionalDiscoveryResults {
                         $stageMessage=[string]$acquired.Message
                         if([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent().IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)){
                             $prompt="AMR verified the downloaded Catalog package for:`n$($Device.DeviceName)`n`nMatching INF files: $($acquired.MatchingInfCount)`nCatalog signer: $($acquired.Signer)`n`nRecheck the package hashes, device identity and catalog signature, then add it to the Windows Driver Store using PnPUtil WITHOUT /install? This stages it only; it does not activate the driver."
-                            if((Show-AMRMessage $prompt 'Stage Verified Driver Package' YesNo Warning) -eq 'Yes'){
+                            if((Show-AMRMessageGlass $prompt 'Stage Verified Driver Package' YesNo Warning) -eq 'Yes'){
                                 $stageCandidate=[pscustomobject]@{CatalogUpdateId=[string]$selectedCandidate.CatalogUpdateId;PackageFolder=[string]$acquired.PackageFolder;ManifestPath=[string]$acquired.ManifestPath;InstallableInfFiles=@($acquired.InstallableInfFiles)}
                                 $null=Start-AMRDriverManagedWorker -Operation CatalogStaging -Device $Device -Candidate $stageCandidate
                                 $acquire.IsEnabled=$false
@@ -17917,11 +20640,11 @@ function Show-AMRProfessionalDiscoveryResults {
                                             $stageMessage='Windows accepted the reverified package into the Driver Store. It is staged, not installed.'
                                             Update-AMRDriverActionButtons
                                             (C 'DriverActionStatus').Text=$stageMessage
-                                            Show-AMRMessage ($stageMessage+"`n`nPackage folder: "+$stageResult.PackageFolder+"`nMatching INF files: "+@($stageResult.InstallableInfFiles).Count+"`nCatalog signer: "+$stageResult.Signer+"`nWindows staged: True") 'Catalog Package Verification' OK Information | Out-Null
+                                            Show-AMRMessageGlass ($stageMessage+"`n`nPackage folder: "+$stageResult.PackageFolder+"`nMatching INF files: "+@($stageResult.InstallableInfFiles).Count+"`nCatalog signer: "+$stageResult.Signer+"`nWindows staged: True") 'Catalog Package Verification' OK Information | Out-Null
                                             $dialog.Close()
                                         } catch {
                                             (C 'DriverActionStatus').Text='Windows Driver Store staging failed: '+[string]$_.Exception.Message
-                                            Show-AMRMessage ([string]$_.Exception.Message) 'Catalog Package Staging' OK Error | Out-Null
+                                            Show-AMRMessageGlass ([string]$_.Exception.Message) 'Catalog Package Staging' OK Error | Out-Null
                                             Write-AMRLog ('Catalog package staging failed: '+[string]$_.Exception.Message) ERROR Overview
                                         } finally {$acquire.IsEnabled=$true}
                                     }
@@ -17932,10 +20655,10 @@ function Show-AMRProfessionalDiscoveryResults {
                         } else { $stageMessage='Package verified and downloaded, but Windows Driver Store staging requires Administrator rights.' }
                         Update-AMRDriverActionButtons
                         (C 'DriverActionStatus').Text=$stageMessage
-                        Show-AMRMessage ($stageMessage + "`n`nPackage folder: " + $acquired.PackageFolder + "`nMatching INF files: " + $acquired.MatchingInfCount + "`nCatalog signer: " + $acquired.Signer + "`nWindows staged: " + $staged) 'Catalog Package Verification' OK Warning | Out-Null
+                        Show-AMRMessageGlass ($stageMessage + "`n`nPackage folder: " + $acquired.PackageFolder + "`nMatching INF files: " + $acquired.MatchingInfCount + "`nCatalog signer: " + $acquired.Signer + "`nWindows staged: " + $staged) 'Catalog Package Verification' OK Warning | Out-Null
                     } catch {
                         (C 'DriverActionStatus').Text='Catalog package verification/acquisition failed: '+[string]$_.Exception.Message
-                        Show-AMRMessage ([string]$_.Exception.Message) 'Catalog Package Verification' OK Error | Out-Null
+                        Show-AMRMessageGlass ([string]$_.Exception.Message) 'Catalog Package Verification' OK Error | Out-Null
                         Write-AMRLog ('Catalog package verification/acquisition failed: '+[string]$_.Exception.Message) ERROR Overview
                     } finally {if(-not $script:DriverManagedJob){$acquire.IsEnabled=$true}}
                 }
@@ -17944,7 +20667,7 @@ function Show-AMRProfessionalDiscoveryResults {
         } catch {
             $acquire.IsEnabled=$true
             (C 'DriverActionStatus').Text='Could not start package acquisition: '+[string]$_.Exception.Message
-            Show-AMRMessage ([string]$_.Exception.Message) 'Catalog Package Verification' OK Error | Out-Null
+            Show-AMRMessageGlass ([string]$_.Exception.Message) 'Catalog Package Verification' OK Error | Out-Null
         }
     }).GetNewClosure())
     [void]$bottom.Children.Add($acquire)
@@ -18049,13 +20772,13 @@ function Show-AMRProfessionalCandidateManager {
     $multiSourceSummary=Get-AMRDriverMultiSourceSummary -Device $Device
     $candidates = Get-AMRProfessionalCandidateComparison -Candidates (@($wuCandidates) + @($catalogCandidates) + @($directVendorCandidates) + @($vendorLeads))
     if ($candidates.Count -eq 0) {
-        Show-AMRMessage 'The current scan did not retain alternative candidates for this device. Run Scan Device again or use Driver Source Manager to investigate official sources.' 'Candidate Manager' OK Information | Out-Null
+        Show-AMRMessageGlass 'The current scan did not retain alternative candidates for this device. Run Scan Device again or use Driver Source Manager to investigate official sources.' 'Candidate Manager' OK Information | Out-Null
         return
     }
 
     $dialog = New-Object System.Windows.Window
     $dialog.Title = 'Professional Candidate Manager – ' + [string]$Device.DeviceName
-    $dialog.Width = 1240; $dialog.Height = 590; $dialog.MinWidth = 950; $dialog.MinHeight = 420
+    $dialog.Width = 1060; $dialog.Height = 500; $dialog.MinWidth = 900; $dialog.MinHeight = 400
     $dialog.WindowStartupLocation = 'CenterOwner'; $dialog.ResizeMode = 'CanResize'
     $dialog.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#182638')
     $dialog.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#E2E8F0')
@@ -18068,7 +20791,7 @@ function Show-AMRProfessionalCandidateManager {
     $heading = New-Object System.Windows.Controls.TextBlock
     $stagedCatalogCount=@($catalogCandidates | Where-Object { [bool]$_.IsInstallable }).Count
     $heading.Text = ('Multi-source comparison – {0} Windows Update + {1} Microsoft Catalog + {2} direct OEM package(s) + {3} official source lead(s); {4} Microsoft Catalog package(s) staged' -f $multiSourceSummary.WindowsUpdateCandidates,$multiSourceSummary.CatalogCandidates,$multiSourceSummary.DirectVendorPackageCandidates,$multiSourceSummary.OfficialVendorSourceLeads,$stagedCatalogCount)
-    $heading.FontSize = 16; $heading.FontWeight = 'SemiBold'; $heading.Foreground = [System.Windows.Media.Brushes]::White
+    $heading.FontSize = 16; $heading.FontWeight = 'SemiBold'; $heading.Foreground = [System.Windows.Media.Brushes]::White; $heading.TextWrapping = 'Wrap'
     [void]$top.Children.Add($heading)
     $note = New-Object System.Windows.Controls.TextBlock
     $note.Text = 'Overall rank is an evidence/readiness comparison aid, not an automatic installation decision. AMR merges device, OEM and component sources with Windows Update and Microsoft Catalog. HP HPIA individual SoftPaqs receive relevance ranking for the selected device, including biometric candidates on ZBook platforms; a platform/OS match is not treated as an exact INF match. Portal leads are not packages. Dell/HP/Lenovo packages still require extraction and INF/CAT validation. Newer version/date alone never proves a better driver.'
@@ -18081,7 +20804,7 @@ function Show-AMRProfessionalCandidateManager {
     $grid.Foreground = [System.Windows.Media.Brushes]::White; $grid.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#40546C')
     $view = New-Object System.Windows.Controls.GridView
     foreach ($column in @(
-        @('Overall rank',55,'ComparisonRank'),@('Score',55,'ComparisonScore'),@('Driver / package',220,'Title'),@('Version',75,'Version'),@('Date',75,'DriverDate'),@('Match',145,'MatchConfidence'),@('Provider',115,'Manufacturer'),@('Model',140,'Model'),@('Downloaded',75,'IsDownloaded'),@('Staged / Installable',90,'IsInstallable'),@('Source',145,'Source')
+        @('Overall rank',78,'ComparisonRank'),@('Score',50,'ComparisonScore'),@('Driver / package',160,'Title'),@('Version',64,'Version'),@('Date',70,'DriverDate'),@('Match',104,'MatchConfidence'),@('Provider',78,'Manufacturer'),@('Model',92,'Model'),@('Downloaded',82,'IsDownloaded'),@('Staged / Installable',112,'IsInstallable'),@('Source',100,'Source')
     )) {
         $col = New-Object System.Windows.Controls.GridViewColumn
         $col.Header = $column[0]; $col.Width = [double]$column[1]
@@ -18101,14 +20824,14 @@ function Show-AMRProfessionalCandidateManager {
     $openLead = New-Object System.Windows.Controls.Button; $openLead.Content = 'Open Official Source'; $openLead.Width = 150; $openLead.Height = 34; $openLead.Margin = [System.Windows.Thickness]::new(0,0,8,0); $openLead.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#245B46'); $openLead.Foreground = [System.Windows.Media.Brushes]::White
     $openLead.Add_Click(({
         if($grid.SelectedItem -and ([string]$grid.SelectedItem.SourceAdapter -eq 'OfficialVendorPortal' -or [string]$grid.SelectedItem.SourceAdapter -in @('DellDriverPackCatalog','HPDriverPackCatalog','LenovoCDRTDriverPackCatalog')) -and -not [string]::IsNullOrWhiteSpace([string]$(if($grid.SelectedItem.PackageUrl){$grid.SelectedItem.PackageUrl}else{$grid.SelectedItem.Url}))){
-            try{$targetUrl=if($grid.SelectedItem.PackageUrl){[string]$grid.SelectedItem.PackageUrl}else{[string]$grid.SelectedItem.Url};Start-Process -FilePath $targetUrl -ErrorAction Stop;Write-AMRLog ('Opened official vendor source {0} for device {1}.' -f $grid.SelectedItem.Source,$Device.DeviceName) INFO Overview}catch{Show-AMRMessage ('Could not open official source: '+[string]$_.Exception.Message) 'Vendor Source' OK Error | Out-Null}
+            try{$targetUrl=if($grid.SelectedItem.PackageUrl){[string]$grid.SelectedItem.PackageUrl}else{[string]$grid.SelectedItem.Url};Start-Process -FilePath $targetUrl -ErrorAction Stop;Write-AMRLog ('Opened official vendor source {0} for device {1}.' -f $grid.SelectedItem.Source,$Device.DeviceName) INFO Overview}catch{Show-AMRMessageGlass ('Could not open official source: '+[string]$_.Exception.Message) 'Vendor Source' OK Error | Out-Null}
         }
     }).GetNewClosure())
     [void]$buttons.Children.Add($openLead)
     $apply = New-Object System.Windows.Controls.Button; $apply.Content = 'Use Selected Candidate'; $apply.Width = 175; $apply.Height = 34; $apply.Margin = [System.Windows.Thickness]::new(0,0,8,0); $apply.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#245B46'); $apply.Foreground = [System.Windows.Media.Brushes]::White
     $apply.Add_Click(({
         if (-not $grid.SelectedItem) { return }
-        if ([string]$grid.SelectedItem.SourceAdapter -ne 'WindowsUpdateAgent' -and -not ([string]$grid.SelectedItem.SourceAdapter -eq 'MicrosoftUpdateCatalog' -and [bool]$grid.SelectedItem.IsInstallable -and -not [string]::IsNullOrWhiteSpace([string]$grid.SelectedItem.PackageFolder))) { Show-AMRMessage 'This result is a source lead or an unverified package, not an installable candidate. Official vendor portals must provide a real package that AMR can independently verify before it can be selected.' 'Candidate Not Installable' OK Warning | Out-Null; return }
+        if ([string]$grid.SelectedItem.SourceAdapter -ne 'WindowsUpdateAgent' -and -not ([string]$grid.SelectedItem.SourceAdapter -eq 'MicrosoftUpdateCatalog' -and [bool]$grid.SelectedItem.IsInstallable -and -not [string]::IsNullOrWhiteSpace([string]$grid.SelectedItem.PackageFolder))) { Show-AMRMessageGlass 'This result is a source lead or an unverified package, not an installable candidate. Official vendor portals must provide a real package that AMR can independently verify before it can be selected.' 'Candidate Not Installable' OK Warning | Out-Null; return }
         $dialog.Tag = $grid.SelectedItem
         $dialog.DialogResult = $true
     }).GetNewClosure())
@@ -18127,12 +20850,37 @@ function Show-AMRProfessionalCandidateManager {
         }
     }.GetNewClosure()
     $grid.Add_SelectionChanged($updateDetail)
-    $dialog.Content = $root
+    # A4: glass redesign (visual only). Any failure keeps the original window.
+    $glassContent = $null
+    try {
+        $glassContent = Set-AMRSourceManagerGlass -Dialog $dialog -Root $root -Top $top -Warning $note -Grid $grid -Title ([string]$dialog.Title) -ButtonSpecs @([pscustomobject]@{Button=$openLead;Role='Blue'},[pscustomobject]@{Button=$apply;Role='Blue'},[pscustomobject]@{Button=$close;Role='Red'})
+        try {
+            $detail.Foreground = New-AMRGlassBrush '#D5E1EE'; $detail.FontSize = 11; $detail.Margin = New-Object System.Windows.Thickness(0)
+            [void]$bottom.Children.Remove($detail)
+            $detailScroll = New-Object System.Windows.Controls.ScrollViewer
+            $detailScroll.VerticalScrollBarVisibility = 'Auto'; $detailScroll.MaxHeight = 72; $detailScroll.Content = $detail
+            $detailFrame = New-Object System.Windows.Controls.Border
+            $detailFrame.CornerRadius = New-Object System.Windows.CornerRadius(10)
+            $detailFrame.BorderThickness = New-Object System.Windows.Thickness(1)
+            $detailFrame.BorderBrush = New-AMRGlassBrush '#66E9D8B5'
+            $detailFrame.Background = New-AMRGlassBrush '#4010182A'
+            $detailFrame.Padding = New-Object System.Windows.Thickness(10,7,6,7)
+            $detailFrame.Margin = New-Object System.Windows.Thickness(0,0,0,10)
+            $detailFrame.Child = $detailScroll
+            $bottom.Children.Insert(0,$detailFrame)
+        } catch {
+            if (-not $detail.Parent) { $detail.Foreground = New-AMRGlassBrush '#D5E1EE'; $bottom.Children.Insert(0,$detail) }
+        }
+    } catch {
+        $glassContent = $null
+        try { Write-AMRDriverDiagnostic -Severity WARNING -Operation CandidateManager -Stage GlassFallback -Message ('Candidate Manager kept its original look: ' + $_.Exception.Message) -Source 'AMRCandidateManager' } catch {}
+    }
+    if ($glassContent) { $dialog.Content = $glassContent } else { $dialog.Content = $root }
     & $updateDetail
     if ($dialog.ShowDialog() -eq $true -and $dialog.Tag) {
         $choice = $dialog.Tag
         $confirm = "Apply this candidate to the selected device?`n`n$($choice.Title)`nVersion: $($choice.Version)`nMatch: $($choice.MatchConfidence)`nSource: $($choice.Source)`n`nThis changes the candidate used by the download/install actions. It does not start either action."
-        if ((Show-AMRMessage $confirm 'Confirm Candidate Selection' YesNo Warning) -ne 'Yes') { return }
+        if ((Show-AMRMessageGlass $confirm 'Confirm Candidate Selection' YesNo Warning) -ne 'Yes') { return }
         $isCatalogChoice = ([string]$choice.SourceAdapter -eq 'MicrosoftUpdateCatalog')
         $sameAsRecommendation = (-not $isCatalogChoice -and [string]$choice.UpdateId -eq [string]$Device.RecommendedUpdateId -and [int]$choice.UpdateRevision -eq [int]$Device.RecommendedUpdateRevision)
         $previousReadyState = [bool]$Device.UpdateReady
@@ -18167,6 +20915,356 @@ function Show-AMRProfessionalCandidateManager {
     }
 }
 
+# A4: shared pieces for the Candidate and Source manager windows (visual only).
+# Row template: deep blue glass hover that fades in and out over 220 ms with a thin gold edge; selection stays solid deep blue.
+function New-AMRGlassListRowStyle {
+    $rowXaml = @"
+<Style xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" TargetType="{x:Type ListViewItem}">
+  <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+  <Setter Property="Foreground" Value="#FFE2EAF3"/>
+  <Setter Property="Background" Value="#00000000"/>
+  <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+  <Setter Property="Template">
+    <Setter.Value>
+      <ControlTemplate TargetType="{x:Type ListViewItem}">
+        <Grid SnapsToDevicePixels="True">
+          <Border x:Name="RowBd" Background="{TemplateBinding Background}" BorderBrush="#22E9D8B5" BorderThickness="0,0,0,1"/>
+          <Border x:Name="HoverOv" Opacity="0" IsHitTestVisible="False" BorderBrush="#CCE9D8B5" BorderThickness="3,0,0,0">
+            <Border.Background>
+              <LinearGradientBrush StartPoint="0,0" EndPoint="1,0"><GradientStop Color="#802350B8" Offset="0"/><GradientStop Color="#40163A8A" Offset="1"/></LinearGradientBrush>
+            </Border.Background>
+          </Border>
+          <GridViewRowPresenter Margin="7,7,7,7" Content="{TemplateBinding Content}" Columns="{TemplateBinding GridView.ColumnCollection}" VerticalAlignment="Center"/>
+        </Grid>
+        <ControlTemplate.Triggers>
+          <Trigger Property="IsMouseOver" Value="True">
+            <Trigger.EnterActions><BeginStoryboard><Storyboard><DoubleAnimation Storyboard.TargetName="HoverOv" Storyboard.TargetProperty="Opacity" To="1" Duration="0:0:0.22"/></Storyboard></BeginStoryboard></Trigger.EnterActions>
+            <Trigger.ExitActions><BeginStoryboard><Storyboard><DoubleAnimation Storyboard.TargetName="HoverOv" Storyboard.TargetProperty="Opacity" To="0" Duration="0:0:0.22"/></Storyboard></BeginStoryboard></Trigger.ExitActions>
+          </Trigger>
+          <Trigger Property="IsSelected" Value="True"><Setter TargetName="RowBd" Property="Background" Value="#A02350B8"/><Setter Property="Foreground" Value="#FFFFFFFF"/></Trigger>
+        </ControlTemplate.Triggers>
+      </ControlTemplate>
+    </Setter.Value>
+  </Setter>
+</Style>
+"@
+    return [Windows.Markup.XamlReader]::Parse($rowXaml)
+}
+
+# Column header: dark glass with gold text and a deep blue hover (replaces WPF's pale default header).
+function New-AMRGlassHeaderStyle {
+    $headerXaml = @"
+<Style xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" TargetType="{x:Type GridViewColumnHeader}">
+  <Setter Property="Foreground" Value="#FFD8B56D"/>
+  <Setter Property="FontWeight" Value="SemiBold"/>
+  <Setter Property="FontSize" Value="10.5"/>
+  <Setter Property="HorizontalContentAlignment" Value="Left"/>
+  <Setter Property="Padding" Value="8,7,8,7"/>
+  <Setter Property="Template">
+    <Setter.Value>
+      <ControlTemplate TargetType="{x:Type GridViewColumnHeader}">
+        <Grid SnapsToDevicePixels="True">
+          <Border x:Name="HeaderBd" Background="#FF20334A" BorderBrush="#FF3B5068" BorderThickness="0,0,1,1">
+            <ContentPresenter Margin="{TemplateBinding Padding}" HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}" VerticalAlignment="Center" RecognizesAccessKey="True"/>
+          </Border>
+          <Thumb x:Name="PART_HeaderGripper" HorizontalAlignment="Right" Width="6" Margin="0,0,-3,0" Cursor="SizeWE">
+            <Thumb.Template><ControlTemplate TargetType="{x:Type Thumb}"><Border Background="Transparent"/></ControlTemplate></Thumb.Template>
+          </Thumb>
+        </Grid>
+        <ControlTemplate.Triggers>
+          <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="HeaderBd" Property="Background" Value="#FF2A4468"/></Trigger>
+        </ControlTemplate.Triggers>
+      </ControlTemplate>
+    </Setter.Value>
+  </Setter>
+</Style>
+"@
+    return [Windows.Markup.XamlReader]::Parse($headerXaml)
+}
+
+# Cell template: same text as the plain column binding, trimmed with "..." and the full text in a dark glass tooltip; soft gold hover on the cell.
+function New-AMRGlassCellTemplate {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    if ($Path -notmatch '^[A-Za-z_][A-Za-z0-9_]*$') { return $null }
+    $cellXaml = @"
+<DataTemplate xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <Border x:Name="CellBd" Padding="2,2,2,2" CornerRadius="5">
+    <Border.Background><SolidColorBrush x:Name="CellBrush" Color="#00E9D8B5"/></Border.Background>
+    <TextBlock Text="{Binding Path=$Path}" TextTrimming="CharacterEllipsis" VerticalAlignment="Center">
+      <TextBlock.ToolTip>
+        <ToolTip Background="#F2182638" BorderBrush="#66E9D8B5" Foreground="#FFE2EAF3" Padding="9,6,9,6">
+          <TextBlock Text="{Binding Path=PlacementTarget.Text, RelativeSource={RelativeSource AncestorType={x:Type ToolTip}}}" TextWrapping="Wrap" MaxWidth="440"/>
+        </ToolTip>
+      </TextBlock.ToolTip>
+    </TextBlock>
+  </Border>
+  <DataTemplate.Triggers>
+    <Trigger SourceName="CellBd" Property="IsMouseOver" Value="True">
+      <Trigger.EnterActions><BeginStoryboard><Storyboard><ColorAnimation Storyboard.TargetName="CellBrush" Storyboard.TargetProperty="Color" To="#33E9D8B5" Duration="0:0:0.22"/></Storyboard></BeginStoryboard></Trigger.EnterActions>
+      <Trigger.ExitActions><BeginStoryboard><Storyboard><ColorAnimation Storyboard.TargetName="CellBrush" Storyboard.TargetProperty="Color" To="#00E9D8B5" Duration="0:0:0.22"/></Storyboard></BeginStoryboard></Trigger.ExitActions>
+    </Trigger>
+  </DataTemplate.Triggers>
+</DataTemplate>
+"@
+    return [Windows.Markup.XamlReader]::Parse($cellXaml)
+}
+
+# Gives a dialog the app's blue-dot scrollbar (the global style lives in the main window resources, dialogs do not inherit it).
+# A6: touchpad scrolling for list grids. WPF does not handle the horizontal wheel message (WM_MOUSEHWHEEL, sent by two-finger
+# horizontal swipes) at all, so a window hook scrolls the grid under the pointer. Vertical wheel and Shift+wheel are handled on the grid itself.
+function Get-AMRGridScrollViewer {
+    param([Parameter(Mandatory = $true)]$Grid)
+    try { [void]$Grid.ApplyTemplate() } catch {}
+    $pending = New-Object System.Collections.Generic.Queue[object]
+    $pending.Enqueue($Grid)
+    while ($pending.Count -gt 0) {
+        $node = $pending.Dequeue()
+        if ($node -is [System.Windows.Controls.ScrollViewer]) { return $node }
+        $childCount = 0
+        try { $childCount = [System.Windows.Media.VisualTreeHelper]::GetChildrenCount($node) } catch {}
+        for ($i = 0; $i -lt $childCount; $i++) { $pending.Enqueue([System.Windows.Media.VisualTreeHelper]::GetChild($node,$i)) }
+    }
+    return $null
+}
+
+function Enable-AMRGridTouchScroll {
+    param(
+        [Parameter(Mandatory = $true)][System.Windows.Window]$Window,
+        [Parameter(Mandatory = $true)][System.Windows.Controls.ListView]$Grid,
+        [switch]$HorizontalOnly
+    )
+    if (-not $HorizontalOnly) {
+        $Grid.SetValue([System.Windows.Controls.ScrollViewer]::HorizontalScrollBarVisibilityProperty,[System.Windows.Controls.ScrollBarVisibility]::Auto)
+        $Grid.SetValue([System.Windows.Controls.ScrollViewer]::VerticalScrollBarVisibilityProperty,[System.Windows.Controls.ScrollBarVisibility]::Auto)
+        $Grid.SetValue([System.Windows.Controls.ScrollViewer]::PanningModeProperty,[System.Windows.Controls.PanningMode]::Both)
+        $wheelState = @{ Accum = 0.0 }
+        $Grid.Add_PreviewMouseWheel(({
+            param($sender,$e)
+            try {
+                $viewer = Get-AMRGridScrollViewer -Grid $sender
+                if (-not $viewer) { return }
+                if (([System.Windows.Input.Keyboard]::Modifiers -band [System.Windows.Input.ModifierKeys]::Shift) -ne 0) {
+                    if ($viewer.ScrollableWidth -le 0) { return }
+                    $viewer.ScrollToHorizontalOffset([math]::Max(0,[math]::Min($viewer.ScrollableWidth,$viewer.HorizontalOffset - ([double]$e.Delta * 0.4))))
+                    $e.Handled = $true
+                    return
+                }
+                if ($viewer.ScrollableHeight -le 0) { return }
+                $lines = [double][System.Windows.SystemParameters]::WheelScrollLines
+                if ($lines -le 0) { $lines = 3 }
+                $wheelState['Accum'] = [double]$wheelState['Accum'] + ((-[double]$e.Delta / 120.0) * $lines)
+                $whole = [math]::Truncate([double]$wheelState['Accum'])
+                if ($whole -ne 0) {
+                    $wheelState['Accum'] = [double]$wheelState['Accum'] - $whole
+                    $unit = 16.0; if ($viewer.CanContentScroll) { $unit = 1.0 }
+                    $viewer.ScrollToVerticalOffset([math]::Max(0,[math]::Min($viewer.ScrollableHeight,$viewer.VerticalOffset + ($whole * $unit))))
+                }
+                $e.Handled = $true
+            } catch {
+                try { Write-AMRDriverDiagnostic -Severity WARNING -Operation TouchScroll -Stage WheelFallback -Message ('Wheel handler: ' + $_.Exception.Message) -Source 'AMRTouchScroll' } catch {}
+            }
+        }).GetNewClosure())
+    }
+    $hookBlock = {
+        param([IntPtr]$hwnd,[int]$msg,[IntPtr]$wParam,[IntPtr]$lParam,[ref]$handled)
+        if ($msg -eq 0x020E) {
+            try {
+                if ($Grid.IsMouseOver) {
+                    $viewer = Get-AMRGridScrollViewer -Grid $Grid
+                    if ($viewer -and $viewer.ScrollableWidth -gt 0) {
+                        $high = ($wParam.ToInt64() -shr 16) -band 0xFFFF
+                        if ($high -ge 0x8000) { $high = $high - 0x10000 }
+                        $viewer.ScrollToHorizontalOffset([math]::Max(0,[math]::Min($viewer.ScrollableWidth,$viewer.HorizontalOffset + ([double]$high * 0.4))))
+                        $handled.Value = $true
+                    }
+                }
+            } catch {}
+        }
+        return [IntPtr]::Zero
+    }.GetNewClosure()
+    $hook = [System.Windows.Interop.HwndSourceHook]$hookBlock
+    $attachHook = {
+        param($targetWindow)
+        $source = [System.Windows.Interop.HwndSource]::FromHwnd((New-Object System.Windows.Interop.WindowInteropHelper($targetWindow)).Handle)
+        if ($source) { $source.AddHook($hook) }
+    }.GetNewClosure()
+    $existingHandle = (New-Object System.Windows.Interop.WindowInteropHelper($Window)).Handle
+    if ($existingHandle -ne [IntPtr]::Zero) { & $attachHook $Window }
+    else { $Window.Add_SourceInitialized(({ param($sender,$eventArgs) try { & $attachHook $sender } catch {} }).GetNewClosure()) }
+}
+
+function Add-AMRGlassScrollBarStyle {
+    param([Parameter(Mandatory = $true)][System.Windows.FrameworkElement]$Element)
+    try {
+        $scrollStyle = $null
+        if ($script:Window) { $scrollStyle = $script:Window.TryFindResource([System.Windows.Controls.Primitives.ScrollBar]) }
+        if ($scrollStyle -is [System.Windows.Style]) { $Element.Resources[[System.Windows.Controls.Primitives.ScrollBar]] = $scrollStyle; return $true }
+    } catch {}
+    try { Write-AMRDriverDiagnostic -Severity WARNING -Operation SourceManager -Stage ScrollBarFallback -Message 'Dialog kept the default scrollbar.' -Source 'AMRSourceManager' } catch {}
+    return $false
+}
+
+# A13f: visual-only glass redesign of the Professional Multi-Source Manager window.
+# Every control, handler, text and value stays exactly as built by Show-AMRProfessionalSourceManager.
+# Returns the new window content (glass chrome around $Root), or $null so the caller keeps the original look.
+function Set-AMRSourceManagerGlass {
+    param(
+        [Parameter(Mandatory = $true)][System.Windows.Window]$Dialog,
+        [Parameter(Mandatory = $true)][System.Windows.Controls.Panel]$Root,
+        [Parameter(Mandatory = $true)][System.Windows.Controls.Panel]$Top,
+        [Parameter(Mandatory = $true)][System.Windows.Controls.TextBlock]$Warning,
+        [Parameter(Mandatory = $true)][System.Windows.Controls.ListView]$Grid,
+        [System.Windows.Controls.TextBox]$Terms = $null,
+        [Parameter(Mandatory = $true)][object[]]$ButtonSpecs,
+        [string]$Title = ''
+    )
+    $tierA = $true
+    try { if (([int]([System.Windows.Media.RenderCapability]::Tier -shr 16)) -lt 2) { $tierA = $false } } catch {}
+    $edgeGold = New-AMRGlassBrush '#66E9D8B5'
+    # 1. Buttons: deep blue glass (Close is the soft red), with a clear disabled look.
+    foreach ($spec in $ButtonSpecs) {
+        $btn = $spec.Button
+        try {
+            $style = New-AMRGlassButtonStyle -Role ([string]$spec.Role) -Animated
+            $disabled = New-Object System.Windows.Trigger
+            $disabled.Property = [System.Windows.UIElement]::IsEnabledProperty
+            $disabled.Value = $false
+            [void]$disabled.Setters.Add((New-Object System.Windows.Setter([System.Windows.UIElement]::OpacityProperty, [double]0.42)))
+            [void]$style.Triggers.Add($disabled)
+            $btn.Style = $style
+            $btn.ClearValue([System.Windows.Controls.Control]::BackgroundProperty)
+            $btn.ClearValue([System.Windows.Controls.Control]::BorderBrushProperty)
+            $btn.ClearValue([System.Windows.Controls.Control]::BorderThicknessProperty)
+            $btn.ClearValue([System.Windows.Controls.Control]::ForegroundProperty)
+            $btn.ClearValue([System.Windows.FrameworkElement]::WidthProperty)
+            $btn.MinWidth = 96; $btn.Height = 34; $btn.Cursor = [System.Windows.Input.Cursors]::Hand
+        } catch {
+            try { Write-AMRDriverDiagnostic -Severity WARNING -Operation SourceManager -Stage ButtonFallback -Message ('Button kept its original look: ' + $_.Exception.Message) -Source 'AMRSourceManager' } catch {}
+        }
+    }
+    # 2. Rows: own template so the default light hover/selection colors never show (A4: animated deep blue hover).
+    $rowStyle = $null
+    try { $rowStyle = New-AMRGlassListRowStyle } catch {
+        try { Write-AMRDriverDiagnostic -Severity WARNING -Operation SourceManager -Stage RowStyleFallback -Message ('Row style kept: ' + $_.Exception.Message) -Source 'AMRSourceManager' } catch {}
+    }
+    if ($rowStyle) { $Grid.ItemContainerStyle = $rowStyle }
+    # A6: header always uses the app's dark glass style (the caller's plain style left WPF's white default hover); grid scrolls both ways with touchpad.
+    try { $Grid.Resources[[System.Windows.Controls.GridViewColumnHeader]] = (New-AMRGlassHeaderStyle) } catch {
+        try { Write-AMRDriverDiagnostic -Severity WARNING -Operation SourceManager -Stage HeaderStyleFallback -Message ('Header style kept: ' + $_.Exception.Message) -Source 'AMRSourceManager' } catch {}
+    }
+    try { Enable-AMRGridTouchScroll -Window $Dialog -Grid $Grid } catch {
+        try { Write-AMRDriverDiagnostic -Severity WARNING -Operation SourceManager -Stage TouchScrollFallback -Message ('Touch scrolling not enabled: ' + $_.Exception.Message) -Source 'AMRTouchScroll' } catch {}
+    }
+    try {
+        foreach ($gridColumn in @($Grid.View.Columns)) {
+            $columnPath = ''
+            try { $columnPath = [string]$gridColumn.DisplayMemberBinding.Path.Path } catch {}
+            if ([string]::IsNullOrWhiteSpace($columnPath)) { continue }
+            $cellTemplate = New-AMRGlassCellTemplate -Path $columnPath
+            if ($cellTemplate) { $gridColumn.DisplayMemberBinding = $null; $gridColumn.CellTemplate = $cellTemplate }
+        }
+    } catch {
+        try { Write-AMRDriverDiagnostic -Severity WARNING -Operation SourceManager -Stage CellStyleFallback -Message ('Cells kept: ' + $_.Exception.Message) -Source 'AMRSourceManager' } catch {}
+    }
+    $Grid.Background = New-AMRGlassBrush '#3314202E'
+    $Grid.BorderBrush = $edgeGold
+    $Grid.BorderThickness = New-Object System.Windows.Thickness(1)
+    $Grid.Padding = New-Object System.Windows.Thickness(2)
+    # 3. Text colors in the app palette. Texts are untouched.
+    $heading = $null
+    foreach ($child in @($Top.Children)) { if ($child -is [System.Windows.Controls.TextBlock] -and -not [object]::ReferenceEquals($child, $Warning) -and -not $heading) { $heading = $child } }
+    if ($heading) { $heading.Foreground = New-AMRGlassBrush '#E9D8B5'; $heading.FontSize = 15 }
+    if ($Terms) {
+        $Terms.Background = New-AMRGlassBrush '#4010182A'
+        $Terms.BorderBrush = $edgeGold
+        $Terms.Foreground = New-AMRGlassBrush '#D5E1EE'
+        $Terms.Height = 52
+    }
+    # 4. The long explanation stays word for word, inside a small scroll frame.
+    [void]$Top.Children.Remove($Warning)
+    $Warning.Margin = New-Object System.Windows.Thickness(0)
+    $Warning.Foreground = New-AMRGlassBrush '#E3CB9B'
+    $warnScroll = New-Object System.Windows.Controls.ScrollViewer
+    $warnScroll.VerticalScrollBarVisibility = 'Auto'; $warnScroll.MaxHeight = 64
+    $warnScroll.Content = $Warning
+    $warnFrame = New-Object System.Windows.Controls.Border
+    $warnFrame.CornerRadius = New-Object System.Windows.CornerRadius(10)
+    $warnFrame.BorderThickness = New-Object System.Windows.Thickness(1)
+    $warnFrame.BorderBrush = New-AMRGlassBrush '#55D8B56D'
+    $warnFrame.Background = New-AMRGlassBrush '#2AD8B56D'
+    $warnFrame.Padding = New-Object System.Windows.Thickness(10,7,6,7)
+    $warnFrame.Margin = New-Object System.Windows.Thickness(0,0,0,10)
+    $warnFrame.Child = $warnScroll
+    [void]$Top.Children.Add($warnFrame)
+    # 5. Glass chrome with its own title bar.
+    $chrome = New-Object System.Windows.Controls.Border
+    $chrome.CornerRadius = New-Object System.Windows.CornerRadius(14)
+    $chrome.BorderThickness = New-Object System.Windows.Thickness(1)
+    if ($tierA) {
+        $gradient = New-Object System.Windows.Media.LinearGradientBrush
+        $gradient.StartPoint = New-Object System.Windows.Point(0,0); $gradient.EndPoint = New-Object System.Windows.Point(1,1)
+        [void]$gradient.GradientStops.Add((New-Object System.Windows.Media.GradientStop((New-AMRGlassBrush '#F2202B3A').Color, 0.0)))
+        [void]$gradient.GradientStops.Add((New-Object System.Windows.Media.GradientStop((New-AMRGlassBrush '#F2111823').Color, 1.0)))
+        $chrome.Background = $gradient
+        $chrome.BorderBrush = $edgeGold
+        $chrome.Margin = New-Object System.Windows.Thickness(6)
+    } else {
+        $chrome.Background = New-AMRGlassBrush '#FF18212E'
+        $chrome.BorderBrush = New-AMRGlassBrush '#88E9D8B5'
+    }
+    $outer = New-Object System.Windows.Controls.Grid
+    $r0 = New-Object System.Windows.Controls.RowDefinition; $r0.Height = [System.Windows.GridLength]::Auto
+    $r1 = New-Object System.Windows.Controls.RowDefinition; $r1.Height = New-Object System.Windows.GridLength(1,[System.Windows.GridUnitType]::Star)
+    [void]$outer.RowDefinitions.Add($r0); [void]$outer.RowDefinitions.Add($r1)
+    $titleGrid = New-Object System.Windows.Controls.Grid
+    $tc0 = New-Object System.Windows.Controls.ColumnDefinition; $tc0.Width = New-Object System.Windows.GridLength(1,[System.Windows.GridUnitType]::Star)
+    $tc1 = New-Object System.Windows.Controls.ColumnDefinition; $tc1.Width = [System.Windows.GridLength]::Auto
+    [void]$titleGrid.ColumnDefinitions.Add($tc0); [void]$titleGrid.ColumnDefinitions.Add($tc1)
+    $titleGrid.Margin = New-Object System.Windows.Thickness(18,12,10,4)
+    $titleGrid.Background = [System.Windows.Media.Brushes]::Transparent
+    $titleText = New-Object System.Windows.Controls.TextBlock
+    $titleText.Text = $Title; $titleText.FontSize = 14; $titleText.FontWeight = 'Bold'; $titleText.Foreground = New-AMRGlassBrush '#E9D8B5'; $titleText.VerticalAlignment = 'Center'; $titleText.TextTrimming = 'CharacterEllipsis'
+    [System.Windows.Controls.Grid]::SetColumn($titleText,0)
+    $closeX = New-Object System.Windows.Controls.Button
+    $closeX.Content = [string][char]0x2715; $closeX.Width = 28; $closeX.Height = 28; $closeX.Background = [System.Windows.Media.Brushes]::Transparent
+    $closeX.Foreground = New-AMRGlassBrush '#CBD5E1'; $closeX.BorderThickness = New-Object System.Windows.Thickness(0); $closeX.Cursor = [System.Windows.Input.Cursors]::Hand; $closeX.FocusVisualStyle = $null
+    try {
+        $closeTemplateXaml = @"
+<ControlTemplate xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" TargetType="{x:Type Button}">
+  <Grid>
+    <Border x:Name="CloseFace" CornerRadius="14" Background="#00000000" BorderBrush="#00000000" BorderThickness="1">
+      <ContentPresenter x:Name="CloseGlyph" HorizontalAlignment="Center" VerticalAlignment="Center" TextElement.Foreground="#FFCBD5E1"/>
+    </Border>
+  </Grid>
+  <ControlTemplate.Triggers>
+    <Trigger Property="IsMouseOver" Value="True">
+      <Setter TargetName="CloseFace" Property="Background" Value="#55E5646B"/>
+      <Setter TargetName="CloseFace" Property="BorderBrush" Value="#99E5646B"/>
+      <Setter TargetName="CloseGlyph" Property="TextElement.Foreground" Value="#FFFFD9DC"/>
+    </Trigger>
+    <Trigger Property="IsPressed" Value="True"><Setter TargetName="CloseFace" Property="Background" Value="#88B52A38"/></Trigger>
+  </ControlTemplate.Triggers>
+</ControlTemplate>
+"@
+        $closeX.Template = [Windows.Markup.XamlReader]::Parse($closeTemplateXaml)
+    } catch {}
+    [System.Windows.Controls.Grid]::SetColumn($closeX,1)
+    $closeX.Add_Click(({ try { $Dialog.Close() } catch {} }).GetNewClosure())
+    [void]$titleGrid.Children.Add($titleText); [void]$titleGrid.Children.Add($closeX)
+    $titleGrid.Add_MouseLeftButtonDown(({ param($s,$e) try { $Dialog.DragMove() } catch {} }).GetNewClosure())
+    [System.Windows.Controls.Grid]::SetRow($titleGrid,0)
+    [System.Windows.Controls.Grid]::SetRow($Root,1)
+    # All visuals above are ready; only now is the window itself changed.
+    $Dialog.WindowStyle = 'None'
+    if ($tierA) { $Dialog.AllowsTransparency = $true; $Dialog.Background = [System.Windows.Media.Brushes]::Transparent } else { $Dialog.Background = New-AMRGlassBrush '#FF141B27' }
+    $Dialog.ResizeMode = 'CanResizeWithGrip'
+    $Root.Margin = New-Object System.Windows.Thickness(18,4,18,16)
+    [void]$outer.Children.Add($titleGrid); [void]$outer.Children.Add($Root)
+    $chrome.Child = $outer
+    [void](Add-AMRGlassScrollBarStyle -Element $chrome)
+    return $chrome
+}
+
 function Show-AMRProfessionalSourceManager {
     param([Parameter(Mandatory = $true)][object]$Device)
     $leads=@($Device.VendorSourceCandidates)
@@ -18178,7 +21276,7 @@ function Show-AMRProfessionalSourceManager {
         [pscustomobject]@{Name='Microsoft Windows Update';Type='Live candidate source';Url='';Role='Live Windows Update Agent candidates retained by the scan. AMR ranks exact Hardware ID matches and retains alternatives.';SearchTerms=$primaryQuery;MatchReason='Installed Windows Update Agent inventory';Priority=0},
         [pscustomobject]@{Name='Microsoft Update Catalog';Type='Live discovery adapter';Url=$catalogUrl;Role='AMR can search Catalog, acquire official payloads, verify INF applicability, OS/architecture, signature and hashes, then stage through Windows before installation.';SearchTerms=$primaryQuery;MatchReason='Hardware ID / Compatible ID query';Priority=0}
     ) + @($leads | ForEach-Object {[pscustomobject]@{Name=$_.Name;Type=$_.Mode;Url=$_.Url;Role=$_.Role;SearchTerms=$_.SearchTerms;MatchReason=$_.MatchReason;Priority=$_.Priority}})
-    $dialog=New-Object System.Windows.Window;$dialog.Title='Professional Multi-Source Manager – '+[string]$Device.DeviceName;$dialog.Width=1040;$dialog.Height=610;$dialog.MinWidth=820;$dialog.MinHeight=440;$dialog.WindowStartupLocation='CenterOwner';$dialog.ResizeMode='CanResize';$dialog.Background=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#182638');$dialog.Foreground=[System.Windows.Media.Brushes]::White
+    $dialog=New-Object System.Windows.Window;$dialog.Title='Professional Multi-Source Manager – '+[string]$Device.DeviceName;$dialog.Width=900;$dialog.Height=560;$dialog.MinWidth=780;$dialog.MinHeight=440;$dialog.WindowStartupLocation='CenterOwner';$dialog.ResizeMode='CanResize';$dialog.Background=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#182638');$dialog.Foreground=[System.Windows.Media.Brushes]::White
     if($script:Window -and $script:Window.IsVisible){$dialog.Owner=$script:Window}
     $root=New-Object System.Windows.Controls.DockPanel;$root.Margin=[System.Windows.Thickness]::new(18)
     $top=New-Object System.Windows.Controls.StackPanel;[System.Windows.Controls.DockPanel]::SetDock($top,'Top')
@@ -18208,7 +21306,7 @@ function Show-AMRProfessionalSourceManager {
     [void]$selectedTrigger.Setters.Add([System.Windows.Setter]::new([System.Windows.Controls.Control]::ForegroundProperty,[System.Windows.Media.BrushConverter]::new().ConvertFromString('#FFF3D7')))
     [void]$rowStyle.Triggers.Add($hoverTrigger);[void]$rowStyle.Triggers.Add($selectedTrigger);$grid.ItemContainerStyle=$rowStyle
     $view=New-Object System.Windows.Controls.GridView
-    foreach($def in @(@('Source',175,'Name'),@('Adapter / role',185,'Type'),@('Match reason',230,'MatchReason'),@('Purpose / coverage',350,'Role'))){$col=New-Object System.Windows.Controls.GridViewColumn;$col.Header=$def[0];$col.Width=[double]$def[1];$col.DisplayMemberBinding=[System.Windows.Data.Binding]::new([string]$def[2]);[void]$view.Columns.Add($col)}
+    foreach($def in @(@('Source',150,'Name'),@('Adapter / role',150,'Type'),@('Match reason',200,'MatchReason'),@('Purpose / coverage',332,'Role'))){$col=New-Object System.Windows.Controls.GridViewColumn;$col.Header=$def[0];$col.Width=[double]$def[1];$col.DisplayMemberBinding=[System.Windows.Data.Binding]::new([string]$def[2]);[void]$view.Columns.Add($col)}
     $grid.View=$view
     $bottom=New-Object System.Windows.Controls.StackPanel;$bottom.Orientation='Vertical';$bottom.Margin=[System.Windows.Thickness]::new(0,10,0,0);[System.Windows.Controls.DockPanel]::SetDock($bottom,'Bottom')
     $terms=New-Object System.Windows.Controls.TextBox;$terms.IsReadOnly=$true;$terms.TextWrapping='Wrap';$terms.AcceptsReturn=$true;$terms.VerticalScrollBarVisibility='Auto';$terms.Height=56;$terms.Margin=[System.Windows.Thickness]::new(0,0,0,8);$terms.Background=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#0F1A28');$terms.Foreground=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#C7D8EA');$terms.BorderBrush=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#3B5068');$terms.Padding=[System.Windows.Thickness]::new(9,7,9,7);[void]$bottom.Children.Add($terms)
@@ -18218,29 +21316,32 @@ function Show-AMRProfessionalSourceManager {
         if($script:DriverManagedJob -or $script:DriverActionJob -or $script:DriverScanJob){return}
         try{$null=Start-AMRDriverManagedWorker -Operation CatalogDiscovery -Device $Device;$discover.IsEnabled=$false;(C 'DriverActionStatus').Text='Multi-source Catalog discovery is running in the background.';$poll=New-Object System.Windows.Threading.DispatcherTimer;$poll.Interval=[TimeSpan]::FromMilliseconds(450);$poll.Add_Tick(({
             if(-not $script:DriverManagedJob){$poll.Stop();$discover.IsEnabled=$true;return}
-            if($script:DriverManagedJob.State -in @('Completed','Failed','Stopped')){$poll.Stop();try{$found=Complete-AMRDriverManagedWorker;if(-not $found){throw 'Catalog discovery returned no result.'};$Device|Add-Member -NotePropertyName ProfessionalDiscoveredCandidates -NotePropertyValue @($found.Results) -Force;(C 'DriverActionStatus').Text=('Catalog discovery completed: {0} Catalog result(s).' -f @($found.Results).Count);if(@($found.Errors).Count -gt 0){Write-AMRLog ('Catalog discovery warnings: '+($found.Errors -join ' | ')) WARNING Overview};$discover.IsEnabled=$true;Show-AMRProfessionalDiscoveryResults -Device $Device -Discovery $found;if(@($found.Results).Count -gt 0){Show-AMRProfessionalCandidateManager -Device $Device}}catch{(C 'DriverActionStatus').Text='Catalog discovery failed: '+[string]$_.Exception.Message;Show-AMRMessage ([string]$_.Exception.Message) 'Catalog Discovery' OK Warning | Out-Null;$discover.IsEnabled=$true}}
-        }).GetNewClosure());$script:DriverManagedTimer=$poll;$poll.Start()}catch{$discover.IsEnabled=$true;Show-AMRMessage ('Could not start Catalog discovery: '+[string]$_.Exception.Message) 'Catalog Discovery' OK Warning | Out-Null}
+            if($script:DriverManagedJob.State -in @('Completed','Failed','Stopped')){$poll.Stop();try{$found=Complete-AMRDriverManagedWorker;if(-not $found){throw 'Catalog discovery returned no result.'};$Device|Add-Member -NotePropertyName ProfessionalDiscoveredCandidates -NotePropertyValue @($found.Results) -Force;(C 'DriverActionStatus').Text=('Catalog discovery completed: {0} Catalog result(s).' -f @($found.Results).Count);if(@($found.Errors).Count -gt 0){Write-AMRLog ('Catalog discovery warnings: '+($found.Errors -join ' | ')) WARNING Overview};$discover.IsEnabled=$true;Show-AMRProfessionalDiscoveryResults -Device $Device -Discovery $found;if(@($found.Results).Count -gt 0){Show-AMRProfessionalCandidateManager -Device $Device}}catch{(C 'DriverActionStatus').Text='Catalog discovery failed: '+[string]$_.Exception.Message;Show-AMRMessageGlass ([string]$_.Exception.Message) 'Catalog Discovery' OK Warning | Out-Null;$discover.IsEnabled=$true}}
+        }).GetNewClosure());$script:DriverManagedTimer=$poll;$poll.Start()}catch{$discover.IsEnabled=$true;Show-AMRMessageGlass ('Could not start Catalog discovery: '+[string]$_.Exception.Message) 'Catalog Discovery' OK Warning | Out-Null}
     }).GetNewClosure());[void]$buttons.Children.Add($discover)
     $vendorDiscover=New-Object System.Windows.Controls.Button;$vendorDiscover.Content='Discover All Vendor Sources';$vendorDiscover.Width=220;$vendorDiscover.Height=34;$vendorDiscover.Margin=[System.Windows.Thickness]::new(0,0,8,0);$vendorDiscover.Background=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#34445A');$vendorDiscover.Foreground=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#E8EDF4');$vendorDiscover.BorderBrush=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#69798C');$vendorDiscover.BorderThickness=[System.Windows.Thickness]::new(1)
     $vendorDiscover.Add_Click(({
         if($script:DriverManagedJob -or $script:DriverActionJob -or $script:DriverScanJob){return}
         try{$null=Start-AMRDriverManagedWorker -Operation VendorDiscovery -Device $Device -Candidate $script:DriverOEMModelProfile;$vendorDiscover.IsEnabled=$false;(C 'DriverActionStatus').Text='Searching registered official vendor providers in the background.';$poll=New-Object System.Windows.Threading.DispatcherTimer;$poll.Interval=[TimeSpan]::FromMilliseconds(450);$poll.Add_Tick(({
             if(-not $script:DriverManagedJob){$poll.Stop();$vendorDiscover.IsEnabled=$true;return}
-            if($script:DriverManagedJob.State -in @('Completed','Failed','Stopped')){$poll.Stop();try{$found=Complete-AMRDriverManagedWorker;if(-not $found){throw 'Vendor discovery returned no result.'};$Device|Add-Member -NotePropertyName VendorPackageCandidates -NotePropertyValue @($found.Results) -Force;$Device|Add-Member -NotePropertyName VendorPackageDiscoveryErrors -NotePropertyValue @($found.Errors) -Force;(C 'DriverActionStatus').Text=('Vendor discovery completed: {0} package candidate(s) and/or official support lead(s).' -f @($found.Results).Count);if(@($found.Errors).Count -gt 0){Write-AMRLog ('Vendor adapter warnings: '+($found.Errors -join ' | ')) WARNING Overview};$vendorDiscover.IsEnabled=$true;if(@($found.Results).Count -gt 0){Show-AMRVendorPackageResults -Device $Device -Candidates @($found.Results);Show-AMRProfessionalCandidateManager -Device $Device}else{$msg='No downloadable OEM driver pack was found. Check the matched official vendor support-portal leads and the Windows Update / Microsoft Catalog candidates.';if(@($found.Errors).Count -gt 0){$msg+='`n`n'+($found.Errors -join "`n")};Show-AMRMessage $msg 'Direct Vendor Discovery' OK Information | Out-Null}}catch{$vendorDiscover.IsEnabled=$true;(C 'DriverActionStatus').Text='Direct vendor discovery failed: '+[string]$_.Exception.Message;Show-AMRMessage ([string]$_.Exception.Message) 'Direct Vendor Discovery' OK Warning | Out-Null}}
-        }).GetNewClosure());$script:DriverManagedTimer=$poll;$poll.Start()}catch{$vendorDiscover.IsEnabled=$true;Show-AMRMessage ('Could not start direct vendor discovery: '+[string]$_.Exception.Message) 'Direct Vendor Discovery' OK Warning | Out-Null}
+            if($script:DriverManagedJob.State -in @('Completed','Failed','Stopped')){$poll.Stop();try{$found=Complete-AMRDriverManagedWorker;if(-not $found){throw 'Vendor discovery returned no result.'};$Device|Add-Member -NotePropertyName VendorPackageCandidates -NotePropertyValue @($found.Results) -Force;$Device|Add-Member -NotePropertyName VendorPackageDiscoveryErrors -NotePropertyValue @($found.Errors) -Force;(C 'DriverActionStatus').Text=('Vendor discovery completed: {0} package candidate(s) and/or official support lead(s).' -f @($found.Results).Count);if(@($found.Errors).Count -gt 0){Write-AMRLog ('Vendor adapter warnings: '+($found.Errors -join ' | ')) WARNING Overview};$vendorDiscover.IsEnabled=$true;if(@($found.Results).Count -gt 0){Show-AMRVendorPackageResults -Device $Device -Candidates @($found.Results);Show-AMRProfessionalCandidateManager -Device $Device}else{$msg='No downloadable OEM driver pack was found. Check the matched official vendor support-portal leads and the Windows Update / Microsoft Catalog candidates.';if(@($found.Errors).Count -gt 0){$msg+='`n`n'+($found.Errors -join "`n")};Show-AMRMessageGlass $msg 'Direct Vendor Discovery' OK Information | Out-Null}}catch{$vendorDiscover.IsEnabled=$true;(C 'DriverActionStatus').Text='Direct vendor discovery failed: '+[string]$_.Exception.Message;Show-AMRMessageGlass ([string]$_.Exception.Message) 'Direct Vendor Discovery' OK Warning | Out-Null}}
+        }).GetNewClosure());$script:DriverManagedTimer=$poll;$poll.Start()}catch{$vendorDiscover.IsEnabled=$true;Show-AMRMessageGlass ('Could not start direct vendor discovery: '+[string]$_.Exception.Message) 'Direct Vendor Discovery' OK Warning | Out-Null}
     }).GetNewClosure());[void]$buttons.Children.Add($vendorDiscover)
     $open=New-Object System.Windows.Controls.Button;$open.Content='Open Selected Official Source';$open.Width=185;$open.Height=34;$open.Margin=[System.Windows.Thickness]::new(0,0,8,0);$open.Background=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#245B46');$open.Foreground=[System.Windows.Media.Brushes]::White
     $open.Add_Click(({
         if(-not $grid.SelectedItem){return};$item=$grid.SelectedItem
-        if([string]::IsNullOrWhiteSpace([string]$item.Url)){Show-AMRMessage ([string]$item.Role) 'Source Information' OK Information | Out-Null;return}
-        try{Start-Process -FilePath ([string]$item.Url) -ErrorAction Stop;Write-AMRLog ('Opened source {0} for device {1}.' -f $item.Name,$Device.DeviceName) INFO Overview}catch{Show-AMRMessage ('Could not open source: '+[string]$_.Exception.Message) 'Source Manager' OK Error | Out-Null}
+        if([string]::IsNullOrWhiteSpace([string]$item.Url)){Show-AMRMessageGlass ([string]$item.Role) 'Source Information' OK Information | Out-Null;return}
+        try{Start-Process -FilePath ([string]$item.Url) -ErrorAction Stop;Write-AMRLog ('Opened source {0} for device {1}.' -f $item.Name,$Device.DeviceName) INFO Overview}catch{Show-AMRMessageGlass ('Could not open source: '+[string]$_.Exception.Message) 'Source Manager' OK Error | Out-Null}
     }).GetNewClosure());[void]$buttons.Children.Add($open)
     $copy=New-Object System.Windows.Controls.Button;$copy.Content='Copy Search Context';$copy.Width=145;$copy.Height=34;$copy.Margin=[System.Windows.Thickness]::new(0,0,8,0);$copy.Background=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#293B52');$copy.Foreground=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#E7EEF7');$copy.BorderBrush=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#526B86');$copy.BorderThickness=[System.Windows.Thickness]::new(1)
-    $copy.Add_Click(({if($grid.SelectedItem -and $grid.SelectedItem.SearchTerms){try{[System.Windows.Clipboard]::SetText([string]$grid.SelectedItem.SearchTerms);Show-AMRMessage 'Exact model, OS and hardware search context copied.' 'Search Context' OK Information | Out-Null}catch{Show-AMRMessage ('Could not copy search context: '+[string]$_.Exception.Message) 'Search Context' OK Warning | Out-Null}}}).GetNewClosure());[void]$buttons.Children.Add($copy)
+    $copy.Add_Click(({if($grid.SelectedItem -and $grid.SelectedItem.SearchTerms){try{[System.Windows.Clipboard]::SetText([string]$grid.SelectedItem.SearchTerms);Show-AMRMessageGlass 'Exact model, OS and hardware search context copied.' 'Search Context' OK Information | Out-Null}catch{Show-AMRMessageGlass ('Could not copy search context: '+[string]$_.Exception.Message) 'Search Context' OK Warning | Out-Null}}}).GetNewClosure());[void]$buttons.Children.Add($copy)
     $close=New-Object System.Windows.Controls.Button;$close.Content='Close';$close.Width=90;$close.Height=34;$close.Background=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#303846');$close.Foreground=[System.Windows.Media.Brushes]::White;$close.Add_Click(({ $dialog.Close() }).GetNewClosure());[void]$buttons.Children.Add($close)
     [void]$bottom.Children.Add($buttons);[void]$root.Children.Add($bottom);[void]$root.Children.Add($grid)
     $refreshTerms={if($grid.SelectedItem){$item=$grid.SelectedItem;$terms.Text=('Search context: '+[string]$item.SearchTerms+[Environment]::NewLine+'URL: '+[string]$item.Url+[Environment]::NewLine+'Adapter: '+[string]$item.Type);$open.IsEnabled=(-not [string]::IsNullOrWhiteSpace([string]$item.Url));$copy.IsEnabled=(-not [string]::IsNullOrWhiteSpace([string]$item.SearchTerms))}}.GetNewClosure()
-    $grid.Add_SelectionChanged($refreshTerms);$dialog.Content=$root;&$refreshTerms;[void]$dialog.ShowDialog()
+    $grid.Add_SelectionChanged($refreshTerms);$glassContent=$null
+    try{$glassContent=Set-AMRSourceManagerGlass -Dialog $dialog -Root $root -Top $top -Warning $warning -Grid $grid -Terms $terms -Title ([string]$dialog.Title) -ButtonSpecs @([pscustomobject]@{Button=$discover;Role='Blue'},[pscustomobject]@{Button=$vendorDiscover;Role='Blue'},[pscustomobject]@{Button=$open;Role='Blue'},[pscustomobject]@{Button=$copy;Role='Blue'},[pscustomobject]@{Button=$close;Role='Red'})}catch{$glassContent=$null;try{Write-AMRDriverDiagnostic -Severity WARNING -Operation SourceManager -Stage GlassFallback -Message ('Source Manager kept its original look: '+$_.Exception.Message) -Source 'AMRSourceManager'}catch{}}
+    if($glassContent){$dialog.Content=$glassContent}else{$dialog.Content=$root}
+    &$refreshTerms;[void]$dialog.ShowDialog()
 }
 
 function Show-AMRDriverCatalogSearchPicker {
@@ -18404,7 +21505,7 @@ function Show-AMRDriverCatalogSearchPicker {
         (C 'DriverActionStatus').Text = ('Opened Microsoft Update Catalog using {0}. Verify product, OS, architecture and driver version before downloading.' -f $searchChoice.MatchType)
         Write-AMRLog ("Opened Microsoft Update Catalog for device='{0}', match='{1}', query='{2}'." -f $selected.DeviceName, $searchChoice.MatchType, $searchChoice.Query) INFO Overview
     } catch {
-        Show-AMRMessage ('Could not open Microsoft Update Catalog: ' + $_.Exception.Message) 'Driver Center' OK Error | Out-Null
+        Show-AMRMessageGlass ('Could not open Microsoft Update Catalog: ' + $_.Exception.Message) 'Driver Center' OK Error | Out-Null
         Write-AMRLog ('Microsoft Update Catalog search failed: ' + $_.Exception.Message) ERROR Overview
     }
 })
@@ -18427,7 +21528,7 @@ function Show-AMRDriverCatalogSearchPicker {
             Write-AMRLog ('Opened official driver support source: {0}; model search terms: {1}' -f $supportToOpen.Name,$searchTerms) INFO Overview
         } catch {
             Write-AMRLog ('Could not open official support page: ' + $_.Exception.Message) ERROR Overview
-            Show-AMRMessage ('Could not open official support page: ' + $_.Exception.Message) 'Driver Center' OK Error | Out-Null
+            Show-AMRMessageGlass ('Could not open official support page: ' + $_.Exception.Message) 'Driver Center' OK Error | Out-Null
         }
     }
 })
@@ -18841,7 +21942,40 @@ function Get-AMRUniversalInstalledInventory {
     # AppX/MSIX: current-user packages only. AllUsers staged registrations are not
     # represented as installed apps and must not be removed on behalf of other users.
     try {
-        foreach ($pkg in @(Get-AppxPackage -ErrorAction SilentlyContinue)) {
+        # Reuse the all-users list collected moments ago by Update-AMRInstalledCatalogState when it
+        # carries per-user install state for every package; otherwise (or if no package is registered
+        # for the current user in it) run the original current-user query exactly as before.
+        $currentUserAppxPackages = $null
+        $appxDiagSource = 'Get-AppxPackage (current user)'
+        $appxDiagReason = 'no AllUsers snapshot was stored in this worker run'
+        $appxDiagSnapshotCount = -1
+        $appxDiagDerivedCount = -1
+        $allUsersAppxVariable = Get-Variable -Name 'AMRAppxAllUsersSnapshot' -Scope Script -ErrorAction SilentlyContinue
+        if ($allUsersAppxVariable -and $null -ne $allUsersAppxVariable.Value) {
+            try { $appxDiagSnapshotCount = @($allUsersAppxVariable.Value).Count } catch {}
+            try {
+                $currentUserSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+                $derivedAppxPackages = New-Object 'System.Collections.Generic.List[object]'
+                $canDeriveAppx = $true
+                foreach ($candidatePackage in @($allUsersAppxVariable.Value)) {
+                    $userInfoProperty = $candidatePackage.PSObject.Properties['PackageUserInformation']
+                    if (-not $userInfoProperty -or $null -eq $userInfoProperty.Value) { $canDeriveAppx = $false; break }
+                    foreach ($userInfo in @($userInfoProperty.Value)) {
+                        if ([string]$userInfo.UserSecurityId.Sid -eq $currentUserSid -and [string]$userInfo.InstallState -eq 'Installed') {
+                            [void]$derivedAppxPackages.Add($candidatePackage)
+                            break
+                        }
+                    }
+                }
+                $appxDiagDerivedCount = $derivedAppxPackages.Count
+                if ($canDeriveAppx -and $derivedAppxPackages.Count -gt 0) { $currentUserAppxPackages = @($derivedAppxPackages.ToArray()); $appxDiagSource = 'derived from the AllUsers snapshot'; $appxDiagReason = '' }
+                elseif (-not $canDeriveAppx) { $appxDiagReason = 'a snapshot package had no PackageUserInformation, so the original query was used' }
+                else { $appxDiagReason = 'no snapshot package was Installed for the current user SID, so the original query was used' }
+            } catch { $currentUserAppxPackages = $null; try { $appxDiagReason = 'derivation threw ' + $_.Exception.GetType().FullName + ': ' + $_.Exception.Message } catch {} }
+        }
+        if ($null -eq $currentUserAppxPackages) { $currentUserAppxPackages = @(Get-AppxPackage -ErrorAction SilentlyContinue) }
+        try { Write-AMRLog ('AppX current-user package list | Source={0} | Packages={1} | AllUsersSnapshotPackages={2} | DerivedPackages={3} | FallbackReason={4}' -f $appxDiagSource,@($currentUserAppxPackages).Count,$appxDiagSnapshotCount,$appxDiagDerivedCount,$(if ($appxDiagReason) { $appxDiagReason } else { 'none' })) INFO Software } catch {}
+        foreach ($pkg in $currentUserAppxPackages) {
             if ([string]::IsNullOrWhiteSpace([string]$pkg.PackageFullName)) { continue }
             $appxFramework = & $readProperty $pkg 'IsFramework'
             $appxResource = & $readProperty $pkg 'IsResourcePackage'
@@ -18946,7 +22080,7 @@ function Get-AMRUniversalInstalledInventory {
             if($seen.Add($rec.IdentityKey)){[void]$records.Add($rec)}
         } catch {}
     }
-    $deduplicatedRecords = @(Remove-AMRDuplicateInstalledInventoryRecords -Records @($records))
+    $deduplicatedRecords = @(Remove-AMRDuplicateInstalledInventoryRecords -Records $records.ToArray())
 
     # Restore catalog categories for installed records. Registry display names often
     # include architecture/year/vendor text (e.g. Firefox 64, AutoCAD 2024); match
@@ -19124,8 +22258,20 @@ function Update-AMRInstalledCatalogState {
     $appxPackageCount = 0
     try {
         $appxPackages = @(Get-AppxPackage -AllUsers -ErrorAction Stop)
+        # Kept for Get-AMRUniversalInstalledInventory in the same worker run, which needs the
+        # current-user subset of this same list instead of a second Get-AppxPackage call.
+        $script:AMRAppxAllUsersSnapshot = $appxPackages
+        try {
+            $appxSnapshotWithUserInfo = 0
+            foreach ($appxSnapshotPackage in $appxPackages) {
+                $appxSnapshotUserInfo = $appxSnapshotPackage.PSObject.Properties['PackageUserInformation']
+                if ($appxSnapshotUserInfo -and $null -ne $appxSnapshotUserInfo.Value) { $appxSnapshotWithUserInfo++ }
+            }
+            Write-AMRLog ('AppX AllUsers snapshot stored | Packages={0} | WithPackageUserInformation={1}' -f @($appxPackages).Count,$appxSnapshotWithUserInfo) INFO Software
+        } catch {}
     } catch {
         Write-AMRLog "All-user AppX inventory was unavailable; falling back to the current user: $($_.Exception.Message)" WARNING Software
+        try { Write-AMRLog ('AppX AllUsers query failed | ExceptionType={0} | Line={1}' -f $_.Exception.GetType().FullName,[string]$_.InvocationInfo.ScriptLineNumber) WARNING Software } catch {}
         try { $appxPackages = @(Get-AppxPackage -ErrorAction SilentlyContinue) } catch { $appxPackages = @() }
     }
     foreach ($package in $appxPackages) {
@@ -19163,9 +22309,9 @@ function Update-AMRInstalledCatalogState {
             $wingetExitCode = -1
             try {
                 $wingetProcess = Start-Process -FilePath $winget.Source -ArgumentList 'list --disable-interactivity --accept-source-agreements' -PassThru -WindowStyle Hidden -RedirectStandardOutput $wingetStdoutPath -RedirectStandardError $wingetStderrPath -ErrorAction Stop
-                if (-not $wingetProcess.WaitForExit(10000)) {
+                if (-not $wingetProcess.WaitForExit(15000)) {
                     try { Stop-Process -Id $wingetProcess.Id -Force -ErrorAction SilentlyContinue } catch {}
-                    throw 'WinGet installed-package inventory timed out after 10 seconds.'
+                    throw 'WinGet installed-package inventory timed out after 15 seconds.'
                 }
                 $wingetProcess.WaitForExit()
                 $wingetExitCode = [int]$wingetProcess.ExitCode
@@ -19390,62 +22536,201 @@ $script:AMRLocalIconWorkerState = @{
     PowerShell = $null
     Async = $null
     Timer = $null
-    RecordMap = @{}
-    PendingEntries = @()
-    NextEntryIndex = 0
+    # A6: decoded (frozen) icons are published by the worker into ReadyQueue, exactly like the
+    # catalog icon worker, and kept in Store (keyed by the stable installed AppId) for the whole
+    # session so any later visit, restore-from-memory or rebuilt inventory can reuse them.
+    ReadyQueue = (New-Object 'System.Collections.Concurrent.ConcurrentQueue[object]')
+    Store = @{}
+    Attempted = @{}
+    SubmittedIds = @()
+    WorkerOk = $false
+    Rerun = $false
+    VisitCount = 0
+    RunDelivered = 0
+    RunApplied = 0
+    RunAvailable = 0
+    Index = @{}
+    IndexInventory = $null
+    IndexCount = -1
+}
+$script:AMRInstalledIconProofPending = $false
+$script:AMRInstalledIconProofSource = ''
+
+# Map every record of the CURRENT Installed inventory by its stable AppId (a rebuilt inventory
+# or a restored view is picked up automatically because the map follows the live collection).
+function Get-AMRInstalledIconRecordIndex {
+    $State = $script:AMRLocalIconWorkerState
+    $Inventory = $script:InstalledAppsInventory
+    if ($null -ne $State.IndexInventory -and [object]::ReferenceEquals($State.IndexInventory,$Inventory) -and $State.IndexCount -eq $Inventory.Count) {
+        return $State.Index
+    }
+    $Index = @{}
+    foreach ($Record in $Inventory) {
+        $SafeId = ''
+        try { $SafeId = [string](Get-AMRShowInstalledSafeId -Record $Record) } catch { $SafeId = '' }
+        if ([string]::IsNullOrWhiteSpace($SafeId)) { continue }
+        if (-not $Index.ContainsKey($SafeId)) { $Index[$SafeId] = New-Object 'System.Collections.Generic.List[object]' }
+        $Index[$SafeId].Add($Record)
+    }
+    $State.Index = $Index
+    $State.IndexInventory = $Inventory
+    $State.IndexCount = $Inventory.Count
+    return $Index
+}
+
+# Put a ready (frozen) icon on every current record with that AppId that still has none.
+function Set-AMRInstalledRecordIcon {
+    param([string]$AppId,[object]$Source)
+    $Applied = 0
+    $Index = Get-AMRInstalledIconRecordIndex
+    if (-not $Index.ContainsKey($AppId)) { return 0 }
+    foreach ($Record in $Index[$AppId]) {
+        try {
+            if ($null -eq $Record.Icon) {
+                $Record.Icon = $Source
+                $Applied++
+                if ($script:ShowInstalledOnly) { [void](Sync-AMRRealizedSoftwareIconItem -Item $Record) }
+            }
+        } catch {
+            Write-AMRLog "Could not apply stored installed icon for '$AppId': $($_.Exception.Message)" WARNING Software
+        }
+    }
+    return $Applied
+}
+
+# Re-apply everything already decoded this session to the current inventory (restore, re-entry, rebuild).
+function Restore-AMRInstalledIconsFromStore {
+    $State = $script:AMRLocalIconWorkerState
+    $Applied = 0
+    if ($State.Store.Count -gt 0) {
+        $Index = Get-AMRInstalledIconRecordIndex
+        foreach ($AppId in @($Index.Keys)) {
+            if ($State.Store.ContainsKey($AppId)) {
+                $Applied += [int](Set-AMRInstalledRecordIcon -AppId $AppId -Source $State.Store[$AppId])
+            }
+        }
+    }
+    if ($Applied -gt 0 -and $script:ShowInstalledOnly) { [void](Queue-AMRSoftwareIconSync) }
+    return $Applied
+}
+
+function Get-AMRInstalledIconStats {
+    $State = $script:AMRLocalIconWorkerState
+    $Total = 0; $With = 0; $NoIcon = 0
+    $Index = $null
+    try { $Index = Get-AMRInstalledIconRecordIndex } catch {}
+    foreach ($Record in $script:InstalledAppsInventory) {
+        try {
+            if (-not ($Record.IsUserFacing -and $Record.CanUninstall)) { continue }
+            $Total++
+            if ($null -ne $Record.Icon) { $With++ }
+            else {
+                $SafeId = [string](Get-AMRShowInstalledSafeId -Record $Record)
+                if ($State.Attempted.ContainsKey($SafeId)) { $NoIcon++ }
+            }
+        } catch {}
+    }
+    return [pscustomobject]@{ Total = $Total; With = $With; NoIcon = $NoIcon; Pending = ($Total - $With - $NoIcon) }
+}
+
+# UI-level proof for the log: once the Installed grid is idle, count the realized cards that
+# actually show an image, and the cards whose record has an icon but the card does not show it.
+function Write-AMRInstalledIconUiProof {
+    param([string]$Source)
+    if ($script:AMRInstalledIconProofPending) { return }
+    $script:AMRInstalledIconProofPending = $true
+    $script:AMRInstalledIconProofSource = $Source
+    try {
+        $null = $script:Window.Dispatcher.BeginInvoke([Action]{
+            $script:AMRInstalledIconProofPending = $false
+            try {
+                if (-not $script:ShowInstalledOnly) { return }
+                $grid = C 'SoftwareGrid'
+                $realized = 0; $shown = 0; $missingUi = 0; $noIcon = 0
+                $limit = [Math]::Min([int]$grid.Items.Count,200)
+                for ($i = 0; $i -lt $limit; $i++) {
+                    $container = $grid.ItemContainerGenerator.ContainerFromIndex($i)
+                    if ($null -eq $container) { continue }
+                    $item = $grid.Items[$i]
+                    $elements = Find-AMRSoftwareIconElements -Parent $container
+                    $realized++
+                    $recordIcon = $null
+                    if ($null -ne $item -and $item.PSObject.Properties['Icon']) { $recordIcon = $item.Icon }
+                    if ($null -ne $elements.Image -and $null -ne $elements.Image.Source) { $shown++ }
+                    elseif ($null -ne $recordIcon) { $missingUi++ }
+                    else { $noIcon++ }
+                }
+                $stats = Get-AMRInstalledIconStats
+                Write-AMRLog ("Installed icons UI check ({0}): realizedCards={1}; showingIcon={2}; recordHasIconButCardEmpty={3}; cardsWithoutLocalIcon={4}; records={5}; recordsWithIcon={6}; safetySyncQueued={7}." -f $script:AMRInstalledIconProofSource,$realized,$shown,$missingUi,$noIcon,$stats.Total,$stats.With,[bool]($missingUi -gt 0)) INFO Software
+                if ($missingUi -gt 0) { [void](Queue-AMRSoftwareIconSync) }
+            } catch {
+                Write-AMRLog "Installed icons UI check failed: $($_.Exception.Message)" WARNING Software
+            }
+        }, [System.Windows.Threading.DispatcherPriority]::ApplicationIdle)
+    } catch { $script:AMRInstalledIconProofPending = $false }
 }
 
 function Start-AMRInstalledLocalIconRefresh {
+    param([string]$Source = 'build')
 
-    if ($script:AMRLocalIconWorkerState.Started) {
+    $State = $script:AMRLocalIconWorkerState
+    if ($Source -ne 'rerun') { $State.VisitCount++ }
+    $Visit = [int]$State.VisitCount
+
+    # 1) Everything decoded earlier this session is re-applied immediately, whatever the entry path was.
+    $FromStore = 0
+    try { $FromStore = [int](Restore-AMRInstalledIconsFromStore) }
+    catch { Write-AMRLog "Installed icon store re-apply failed: $($_.Exception.Message)" WARNING Software }
+
+    # 2) A worker is already preparing icons: it is never cancelled when the user leaves Installed.
+    #    Ask it to run once more when it finishes so records added meanwhile are covered too.
+    if ($State.Started) {
+        $State.Rerun = $true
+        $Stats = Get-AMRInstalledIconStats
+        Write-AMRLog ("Installed icon visit #{0} ({1}): records={2}; withIcon={3}; appliedFromStore={4}; pendingDiscovery={5}; engine=already running (follow-up pass queued)." -f $Visit,$Source,$Stats.Total,$Stats.With,$FromStore,$Stats.Pending) INFO Software
         return
     }
 
-    if (-not $script:ShowInstalledOnly) {
-        return
-    }
-
-    $script:AMRLocalIconWorkerState.Started = $true
+    $State.Started = $true
 
     try {
         $Candidates = @(
             foreach ($Record in $script:InstalledAppsInventory) {
                 if ($Record.IsUserFacing -and $Record.CanUninstall -and $null -eq $Record.Icon) {
-                    $Record
+                    $SafeId = [string](Get-AMRShowInstalledSafeId -Record $Record)
+                    if (-not [string]::IsNullOrWhiteSpace($SafeId) -and -not $State.Attempted.ContainsKey($SafeId)) {
+                        $Record
+                    }
                 }
             }
         )
 
         if ($Candidates.Count -eq 0) {
-            $script:AMRLocalIconWorkerState.Started = $false
-            Write-AMRLog 'Local icon engine: no installed records require local icons.' INFO Software
+            $State.Started = $false
+            $Stats = Get-AMRInstalledIconStats
+            Write-AMRLog ("Installed icon visit #{0} ({1}): records={2}; withIcon={3}; appliedFromStore={4}; noLocalIcon={5}; engine=idle (nothing left to discover)." -f $Visit,$Source,$Stats.Total,$Stats.With,$FromStore,$Stats.NoIcon) INFO Software
+            if ($script:ShowInstalledOnly) { Write-AMRInstalledIconUiProof -Source $Source }
             return
         }
 
         $Apps = @(ConvertTo-AMRShowInstalledApp -Inventory $Candidates)
 
-        $RecordMap = @{}
-
+        $KnownIds = @{}
         foreach ($Record in $Candidates) {
             $SafeId = Get-AMRShowInstalledSafeId -Record $Record
-
-            if (-not [string]::IsNullOrWhiteSpace($SafeId)) {
-                if (-not $RecordMap.ContainsKey($SafeId)) {
-                    $RecordMap[$SafeId] = $Record
-                }
-            }
+            if (-not [string]::IsNullOrWhiteSpace($SafeId)) { $KnownIds[$SafeId] = $true }
         }
 
         $Apps = @(
             foreach ($App in $Apps) {
-                if ($RecordMap.ContainsKey([string]$App.AppId)) {
+                if ($KnownIds.ContainsKey([string]$App.AppId)) {
                     $App
                 }
             }
         )
 
         if ($Apps.Count -eq 0) {
-            $script:AMRLocalIconWorkerState.Started = $false
+            $State.Started = $false
             Write-AMRLog 'Local icon engine: adapter returned no eligible records.' INFO Software
             return
         }
@@ -19453,13 +22738,16 @@ function Start-AMRInstalledLocalIconRefresh {
         $CachePath = Join-Path $script:IconDir 'LocalInstalled'
         $CatalogPath = Join-Path $CachePath 'UnifiedIconCatalog.json'
 
+        # Discovery AND image decoding both run in the background runspace. Decoded images are frozen
+        # (cross-thread safe) and published to ReadyQueue; the UI thread only assigns them.
         $Worker = {
             param(
                 [object[]]$WorkerApps,
                 [string]$WorkerCachePath,
                 [string]$WorkerCatalogPath,
                 [string]$CollectorSource,
-                [string]$MergerSource
+                [string]$MergerSource,
+                [object]$ReadyQueue
             )
 
             . ([scriptblock]::Create($CollectorSource))
@@ -19475,6 +22763,29 @@ function Start-AMRInstalledLocalIconRefresh {
                 -Apps $WorkerApps `
                 -CollectionResults $Collection `
                 -OutputPath $WorkerCatalogPath
+
+            try { Add-Type -AssemblyName PresentationCore -ErrorAction Stop } catch {}
+
+            foreach ($Entry in @($Catalog.Entries)) {
+                if ($Entry.Status -ne 'Available' -or $Entry.SelectedSource -ne 'LocalInstalledApp') { continue }
+                $IconPath = [string]$Entry.IconPath
+                if ([string]::IsNullOrWhiteSpace($IconPath)) { continue }
+                try {
+                    $FileStream = [System.IO.File]::Open([System.IO.Path]::GetFullPath($IconPath),[System.IO.FileMode]::Open,[System.IO.FileAccess]::Read,[System.IO.FileShare]::ReadWrite)
+                    try {
+                        $Decoder = [System.Windows.Media.Imaging.BitmapDecoder]::Create(
+                            $FileStream,
+                            [System.Windows.Media.Imaging.BitmapCreateOptions]::IgnoreImageCache,
+                            [System.Windows.Media.Imaging.BitmapCacheOption]::OnLoad
+                        )
+                        if ($null -ne $Decoder -and $Decoder.Frames.Count -ge 1) {
+                            $Frame = $Decoder.Frames[0]
+                            if ($Frame.CanFreeze) { $Frame.Freeze() }
+                            $ReadyQueue.Enqueue([pscustomobject]@{ AppId = [string]$Entry.AppId; Source = $Frame })
+                        }
+                    } finally { $FileStream.Dispose() }
+                } catch {}
+            }
 
             return @($Catalog.Entries)
         }
@@ -19493,57 +22804,63 @@ function Start-AMRInstalledLocalIconRefresh {
         [void]$PowerShell.AddArgument($CatalogPath)
         [void]$PowerShell.AddArgument($script:AMRLocalCollectorSource)
         [void]$PowerShell.AddArgument($script:AMRLocalMergerSource)
+        [void]$PowerShell.AddArgument($State.ReadyQueue)
 
+        $State.SubmittedIds = @($KnownIds.Keys)
+        $State.WorkerOk = $false
+        $State.RunDelivered = 0
+        $State.RunApplied = 0
+        $State.RunAvailable = 0
         $Async = $PowerShell.BeginInvoke()
 
-        $script:AMRLocalIconWorkerState.Runspace = $Runspace
-        $script:AMRLocalIconWorkerState.PowerShell = $PowerShell
-        $script:AMRLocalIconWorkerState.Async = $Async
-        $script:AMRLocalIconWorkerState.RecordMap = $RecordMap
+        $State.Runspace = $Runspace
+        $State.PowerShell = $PowerShell
+        $State.Async = $Async
 
-        # Apply local icons gradually on the UI dispatcher. The worker still
-        # discovers local files in the background, but decoding/binding is
-        # deliberately limited to three cards per low-priority tick to keep hydration smooth.
+        # Delivery timer: it keeps running until the worker has finished AND every decoded icon was
+        # delivered, no matter which surface is showing. It never cancels because the user left Installed.
         $Timer = [System.Windows.Threading.DispatcherTimer]::new([System.Windows.Threading.DispatcherPriority]::Background)
         $Timer.Interval = [TimeSpan]::FromMilliseconds(50)
 
         $Timer.Add_Tick({
             $State = $script:AMRLocalIconWorkerState
 
-            if (-not $script:ShowInstalledOnly -and -not $State.Async) {
-                try { $State.Timer.Stop() } catch {}
-                $State.PendingEntries = @()
-                $State.NextEntryIndex = 0
-                $State.Timer = $null
-                $State.Started = $false
-                return
+            # Small steady batches of ready frozen images (same shape as the catalog icon delivery).
+            $perfDeliverStart = Get-AMRPerfNow
+            for ($delivery = 0; $delivery -lt 4; $delivery++) {
+                $Ready = $null
+                if (-not $State.ReadyQueue.TryDequeue([ref]$Ready)) { break }
+                if ($null -eq $Ready) { continue }
+                $ReadyId = [string]$Ready.AppId
+                $State.Store[$ReadyId] = $Ready.Source
+                $State.RunDelivered++
+                $perfItemStart = Get-AMRPerfNow
+                try { $State.RunApplied += [int](Set-AMRInstalledRecordIcon -AppId $ReadyId -Source $Ready.Source) }
+                catch { Write-AMRLog "Could not apply local icon for '$ReadyId': $($_.Exception.Message)" WARNING Software }
+                Add-AMRPerfSince -Key 'icons.installedApplyItem' -Start $perfItemStart
+                Set-AMRPerfMark 'installedIcon'
             }
+            if ($perfDeliverStart -ne 0) { Add-AMRPerfSince -Key 'icons.installedDeliverTick' -Start $perfDeliverStart }
 
-            # First wait for the background discovery worker, then transfer its
-            # lightweight path records to a small UI-thread application queue.
             if ($State.Async) {
                 if (-not $State.Async.IsCompleted) { return }
                 try {
                     $Entries = @($State.PowerShell.EndInvoke($State.Async))
-                    $State.PendingEntries = @(
+                    $State.RunAvailable = @(
                         $Entries | Where-Object {
                             $_.Status -eq 'Available' -and
                             $_.SelectedSource -eq 'LocalInstalledApp' -and
-                            -not [string]::IsNullOrWhiteSpace([string]$_.IconPath) -and
-                            $State.RecordMap.ContainsKey([string]$_.AppId)
+                            -not [string]::IsNullOrWhiteSpace([string]$_.IconPath)
                         }
-                    )
-                    $State.NextEntryIndex = 0
-                    $AvailableCount = $State.PendingEntries.Count
+                    ).Count
+                    $State.WorkerOk = $true
                     Write-AMRLog (
-                        'Local icon discovery completed. Records: {0}; queued local icons: {1}. Icons will be applied progressively.' -f
-                        $Entries.Count,$AvailableCount
+                        'Local icon discovery completed. Records: {0}; icons available: {1}. Frozen icons are delivered progressively and kept for later visits.' -f
+                        $Entries.Count,$State.RunAvailable
                     ) INFO Software
                 }
                 catch {
                     Write-AMRLog "Local icon worker completion failed: $($_.Exception.Message)" WARNING Software
-                    $State.PendingEntries = @()
-                    $State.NextEntryIndex = 0
                 }
                 finally {
                     try { $State.PowerShell.Dispose() } catch {}
@@ -19555,65 +22872,48 @@ function Start-AMRInstalledLocalIconRefresh {
                 }
             }
 
-            # If the user returned to Show All while discovery was running,
-            # allow EndInvoke/worker cleanup to finish but do not touch installed cards.
-            if (-not $script:ShowInstalledOnly) {
-                $State.PendingEntries = @()
-                $State.NextEntryIndex = 0
+            if ($State.ReadyQueue.IsEmpty) {
                 try { $State.Timer.Stop() } catch {}
                 $State.Timer = $null
                 $State.Started = $false
-                return
-            }
-
-            # Keep each dispatcher turn short: at most two local icon decodes at Background priority.
-            $processed = 0
-            while ($State.NextEntryIndex -lt $State.PendingEntries.Count -and $processed -lt 2) {
-                $Entry = $State.PendingEntries[$State.NextEntryIndex]
-                $State.NextEntryIndex++
-                $processed++
-
-                $AppId = [string]$Entry.AppId
-                if (-not $State.RecordMap.ContainsKey($AppId)) { continue }
-                $Record = $State.RecordMap[$AppId]
-                if ($null -eq $Record -or $null -ne $Record.Icon) { continue }
-
-                try {
-                    $ImageSource = Get-AMRIconImageSource -Path ([string]$Entry.IconPath)
-                    if ($null -ne $ImageSource -and $null -eq $Record.Icon) {
-                        $Record.Icon = $ImageSource
-                        Sync-AMRRealizedSoftwareIconItem -Item $Record
+                if ($State.WorkerOk) {
+                    foreach ($SubmittedId in @($State.SubmittedIds)) {
+                        if (-not $State.Store.ContainsKey($SubmittedId)) { $State.Attempted[$SubmittedId] = $true }
                     }
-                } catch {
-                    Write-AMRLog "Could not apply local icon for '$AppId': $($_.Exception.Message)" WARNING Software
                 }
-            }
-
-            if (-not $State.Async -and $State.NextEntryIndex -ge $State.PendingEntries.Count) {
-                try { $State.Timer.Stop() } catch {}
-                $State.PendingEntries = @()
-                $State.NextEntryIndex = 0
-                $State.Timer = $null
-                $State.Started = $false
-                Write-AMRLog 'Progressive local icon application completed.' INFO Software
+                $State.SubmittedIds = @()
+                $Stats = Get-AMRInstalledIconStats
+                Write-AMRLog (
+                    'Progressive local icon application completed. Delivered={0}; appliedToRecords={1}; records={2}; withIcon={3}; noLocalIcon={4}; onInstalledSurface={5}.' -f
+                    $State.RunDelivered,$State.RunApplied,$Stats.Total,$Stats.With,$Stats.NoIcon,[bool]$script:ShowInstalledOnly
+                ) INFO Software
+                if ($script:ShowInstalledOnly) { Write-AMRInstalledIconUiProof -Source 'engine-completed' }
+                if ($State.Rerun) {
+                    $State.Rerun = $false
+                    Start-AMRInstalledLocalIconRefresh -Source 'rerun'
+                }
             }
         })
 
-        $script:AMRLocalIconWorkerState.Timer = $Timer
+        $State.Timer = $Timer
         $Timer.Start()
 
+        $Stats = Get-AMRInstalledIconStats
         Write-AMRLog (
-            'Local icon engine started in background for {0} installed record(s).' -f $Apps.Count
+            'Local icon engine started in background for {0} installed record(s). Visit #{1} ({2}); records={3}; withIcon={4}; appliedFromStore={5}.' -f
+            $Apps.Count,$Visit,$Source,$Stats.Total,$Stats.With,$FromStore
         ) INFO Software
     }
     catch {
-        $script:AMRLocalIconWorkerState.Started = $false
+        $State.Started = $false
         Write-AMRLog "Could not start local icon engine: $($_.Exception.Message)" WARNING Software
     }
 }
 
 # Initialize software icon synchronization state before any dispatcher callback can use it.
 $script:SoftwareIconScrollSyncPending = $false
+$script:AMRLastSoftwareScrollTicks = [long]0
+$script:AMRScanDeferStartTicks = [long]0
 $script:SoftwareIconSyncQueued = $false
 
 # Show Installed: lively, non-blocking feedback while the inventory worker scans.
@@ -20218,7 +23518,7 @@ function Complete-AMRInstalledGridPageBuildBatch {
                     $script:SuppressSoftwareCategorySelectionChanged = $false
                 }
 
-                Start-AMRInstalledLocalIconRefresh
+                Start-AMRInstalledLocalIconRefresh -Source 'build'
                 $button = C 'ShowInstalledBtn'
                 $button.Content = "Show All ($($state.InstalledCount))"
                 $button.ToolTip = 'Return to the full software catalog.'
@@ -20250,7 +23550,7 @@ function Complete-AMRInstalledGridPageBuildBatch {
         }
         $diagnosticDetails = Get-AMRShowInstalledDiagnosticDetails -ErrorRecord $_ -Stage 'Installed card/page preparation'
         Write-AMRLog "Could not prepare the Show Installed cards:`n$diagnosticDetails" ERROR Software
-        Show-AMRMessage "Could not prepare the installed-applications cards:`n`n$diagnosticDetails" 'Installed Apps' OK Error | Out-Null
+        Show-AMRMessageGlass "Could not prepare the installed-applications cards:`n`n$diagnosticDetails" 'Installed Apps' OK Error | Out-Null
         $script:InstalledGridPageBuildState = $null
     }
 }
@@ -20445,12 +23745,28 @@ function Set-AMRInstalledViewVisible {
                     try { (C 'SoftwareScrollViewer').ScrollToVerticalOffset($restoreOffset) } catch {}
                 }, [System.Windows.Threading.DispatcherPriority]::Loaded)
             }
+            # A6: a restore must also guarantee icons (re-apply the stored frozen icons, resume discovery for the rest).
+            try { Start-AMRInstalledLocalIconRefresh -Source 'memory-restore' }
+            catch { Write-AMRLog "Installed icon pass after restore failed: $($_.Exception.Message)" WARNING Software }
+            Write-AMRLog ('Installed entry: path=restore; generation={0}; cards={1}.' -f [int]$script:InstalledInventoryGeneration,@($script:InstalledAppsInventory).Count) INFO Software
             Write-AMRLog 'Restored the existing Installed card collection from memory; inventory mapping and card ordering were skipped.' INFO Software
             return
         } catch {
             Write-AMRLog ("Installed view cache restore failed; rebuilding safely: " + $_.Exception.Message) WARNING Software
-            $script:InstalledViewCache = $null
+            Clear-AMRInstalledViewCache -Reason 'restore-failed'
         }
+    }
+
+    if (-not $PreserveCurrentView) {
+        $entryReason = 'unknown'
+        if ($null -eq $savedInstalledView) {
+            $entryReason = $(if ([string]$script:AMRInstalledViewCacheClearReason) { 'saved view was cleared: ' + [string]$script:AMRInstalledViewCacheClearReason } else { 'no completed Installed view saved yet' })
+        } elseif ([int]$savedInstalledView.InventoryGeneration -ne [int]$script:InstalledInventoryGeneration) {
+            $entryReason = ('inventory generation differs (saved={0}; current={1})' -f [int]$savedInstalledView.InventoryGeneration,[int]$script:InstalledInventoryGeneration)
+        } elseif ([string]$savedInstalledView.SearchText -cne [string](C 'SearchBox').Text) {
+            $entryReason = 'search text differs'
+        } else { $entryReason = 'restore failed' }
+        Write-AMRLog ('Installed entry: path=build; reason={0}.' -f $entryReason) INFO Software
     }
 
     # Use one loading path for both cached and freshly scanned inventory.
@@ -20604,13 +23920,107 @@ function Set-AMRInstalledViewVisible {
             }
             $diagnosticDetails = Get-AMRShowInstalledDiagnosticDetails -ErrorRecord $_ -Stage 'Installed view preparation'
             Write-AMRLog "Could not prepare the Show Installed view:`n$diagnosticDetails" ERROR Software
-            Show-AMRMessage "Could not prepare the installed-applications view:`n`n$diagnosticDetails" 'Installed Apps' OK Error | Out-Null
+            Show-AMRMessageGlass "Could not prepare the installed-applications view:`n`n$diagnosticDetails" 'Installed Apps' OK Error | Out-Null
         }
     }.GetNewClosure())
 
     $timer.Start()
 }
 
+
+# A7: the Installed inventory is compared by application identity + version (+ the two flags that decide
+# whether a card exists). Display-only fields (name text, publisher, source, uninstall method) no longer
+# invalidate the cached Installed view; a real install, uninstall or version change still does.
+function Get-AMRInstalledInventorySignature {
+    param([object]$Record)
+    $identity = [string](Get-AMRShowInstalledProperty $Record 'IdentityKey')
+    if ([string]::IsNullOrWhiteSpace($identity)) { $identity = [string](Get-AMRShowInstalledProperty $Record 'Id') }
+    if ([string]::IsNullOrWhiteSpace($identity)) { $identity = [string](Get-AMRShowInstalledProperty $Record 'Name') }
+    return ('{0}|{1}|{2}|{3}' -f $identity,[string](Get-AMRShowInstalledProperty $Record 'DisplayVersion'),[bool](Get-AMRShowInstalledProperty $Record 'CanUninstall'),[bool](Get-AMRShowInstalledProperty $Record 'IsUserFacing'))
+}
+
+# A7: every place that discards the saved Installed view records why, so the next entry can log the reason.
+$script:AMRInstalledViewCacheClearReason = ''
+function Clear-AMRInstalledViewCache {
+    param([string]$Reason)
+    $script:InstalledViewCache = $null
+    $script:AMRInstalledViewCacheClearReason = $Reason
+}
+
+# A8 (measurement only): every helper below swallows its own errors and never changes behavior.
+function Get-AMRPerfNow { try { return [long][AMR.PerfStats]::Now() } catch { return [long]0 } }
+function Add-AMRPerfSince {
+    param([string]$Key,[long]$Start)
+    if ($Start -eq 0) { return }
+    try { [AMR.PerfStats]::Add($Key,[AMR.PerfStats]::Now() - $Start) } catch {}
+}
+# A11 (measurement only): readable tab names. A TabItem whose Header is not a plain string (for example the Driver Center tab) was logged as 'System.Windows.Controls.TextBlock'.
+function Get-AMRPerfTabHeader {
+    param($Item)
+    try {
+        if ($null -eq $Item) { return '' }
+        $perfHeader = $Item.Header
+        if ($perfHeader -is [string] -and -not [string]::IsNullOrWhiteSpace($perfHeader)) { return [string]$perfHeader }
+        $perfName = ''
+        try { $perfName = [string]$Item.Name } catch {}
+        if (-not [string]::IsNullOrWhiteSpace($perfName)) { return $perfName }
+        if ($perfHeader -is [System.Windows.Controls.TextBlock]) { return [string]$perfHeader.Text }
+        return [string]$perfHeader
+    } catch { return '' }
+}
+function Get-AMRPerfTabContext {
+    try {
+        $perfMain = C 'MainNavigationTabs'
+        $perfText = ''
+        if ($perfMain -and $perfMain.SelectedItem) { $perfText = Get-AMRPerfTabHeader $perfMain.SelectedItem }
+        $perfSub = C 'OverviewSubTabs'
+        if ($perfText -eq 'System' -and $perfSub -and $perfSub.SelectedItem) { $perfText += '/' + (Get-AMRPerfTabHeader $perfSub.SelectedItem) }
+        return $perfText
+    } catch { return '' }
+}
+$script:AMRPerfMarks = New-Object 'System.Collections.Generic.List[string]'
+function Set-AMRPerfMark {
+    param([string]$Name)
+    try {
+        $markStamp = [int](([Environment]::TickCount -band 0x7FFFFFFF) % 100000)
+        $script:AMRPerfMarks.Add(('{0}@{1}' -f $Name,$markStamp))
+        if ($script:AMRPerfMarks.Count -gt 10) { $script:AMRPerfMarks.RemoveAt(0) }
+    } catch {}
+}
+# UI-thread stall detector: a normal-priority timer that should fire every 100 ms. If it fires much later,
+# the UI thread was busy; the log then lists the most recent named activities (marks) to attribute it.
+$script:AMRStallLastTicks = [long]0
+$script:AMRStallLogged = 0
+# A9: this variable is read (if ($script:AMRStallTimer)) before it is ever assigned. Under StrictMode that read throws and the
+# surrounding catch hid it, so the stall timer never started in A8. Initialize it.
+$script:AMRStallTimer = $null
+function Start-AMRUiStallWatch {
+    try {
+        if ($script:AMRStallTimer) { return }
+        $script:AMRStallTimer = New-Object System.Windows.Threading.DispatcherTimer
+        $script:AMRStallTimer.Interval = [TimeSpan]::FromMilliseconds(100)
+        $script:AMRStallLastTicks = [DateTime]::UtcNow.Ticks
+        $script:AMRStallTimer.Add_Tick({
+            try {
+                $nowTicks = [DateTime]::UtcNow.Ticks
+                $lateMs = [int](($nowTicks - $script:AMRStallLastTicks) / 10000) - 100
+                $script:AMRStallLastTicks = $nowTicks
+                if ($lateMs -ge 90 -and $lateMs -lt 20000) {
+                    try { [AMR.PerfStats]::Count('ui.stallsOver90ms',1) } catch {}
+                    try { [AMR.PerfStats]::Add('ui.stallMs',[long]($lateMs * [System.Diagnostics.Stopwatch]::Frequency / 1000)) } catch {}
+                    if ($script:AMRStallLogged -lt 150) {
+                        $script:AMRStallLogged++
+                        $softwareActive = $false
+                        try { $softwareActive = [bool]((C 'SoftwareGrid').IsVisible) } catch {}
+                        Write-AMRLog ('UI stall: the UI thread was busy about {0} ms (softwareGridVisible={1}; installedOnly={2}; tab={4}; recent={3}).' -f $lateMs,$softwareActive,[bool]$script:ShowInstalledOnly,($script:AMRPerfMarks -join ','),(Get-AMRPerfTabContext)) INFO Software
+                    }
+                }
+            } catch {}
+        })
+        $script:AMRStallTimer.Start()
+    } catch {}
+}
+$script:AMRSearchStartTicks = [long]0
 
 function Complete-AMRInstalledCatalogScan {
     param($JobState)
@@ -20620,13 +24030,32 @@ function Complete-AMRInstalledCatalogScan {
 
     $outputItems = @()
     $workerError = ''
+    $workerDiagEndInvoke = ''
+    $workerDiagStreams = ''
+    $workerDiagStage = ''
+    $workerDiagStreamErrorCount = 0
     try {
         $outputItems = @($job.PowerShell.EndInvoke($job.AsyncResult))
     } catch {
+        # Diagnostics only: keep the full exception (type, inner exceptions, stack) for the failure log below.
+        try { $workerDiagEndInvoke = Get-AMRShowInstalledDiagnosticDetails -ErrorRecord $_ -Stage 'Inventory worker EndInvoke' } catch {}
         $workerError = $_.Exception.Message
     }
+    try { $workerDiagStage = [string]$job.Diag['Stage'] } catch {}
+    try { $workerDiagStreamErrorCount = [int]$job.PowerShell.Streams.Error.Count } catch {}
 
     if (-not $workerError -and $job.PowerShell.Streams.Error.Count -gt 0) {
+        # Diagnostics only: describe each non-terminating error record (first 5), including the failing line and stack.
+        try {
+            $streamDetailParts = New-Object 'System.Collections.Generic.List[string]'
+            $streamDetailIndex = 0
+            foreach ($streamRecord in @($job.PowerShell.Streams.Error)) {
+                $streamDetailIndex++
+                if ($streamDetailIndex -gt 5) { break }
+                $streamDetailParts.Add(('--- Error record {0} ---{1}{2}' -f $streamDetailIndex,[Environment]::NewLine,(Get-AMRShowInstalledDiagnosticDetails -ErrorRecord $streamRecord -Stage 'Inventory worker error stream')))
+            }
+            $workerDiagStreams = ($streamDetailParts -join [Environment]::NewLine)
+        } catch {}
         $workerError = (($job.PowerShell.Streams.Error | ForEach-Object { $_.ToString() }) -join "`n")
     }
 
@@ -20649,8 +24078,13 @@ function Complete-AMRInstalledCatalogScan {
         if ($flags.Count -ne $script:SoftwareCatalog.Count) {
             $workerError = "Inventory result size mismatch. Expected $($script:SoftwareCatalog.Count), received $($flags.Count)."
         } else {
+            $changedInstalledCards = New-Object 'System.Collections.Generic.HashSet[string]'
             for ($index = 0; $index -lt $script:SoftwareCatalog.Count; $index++) {
-                $script:SoftwareCatalog[$index].IsInstalled = [bool]$flags[$index]
+                $catalogCard = $script:SoftwareCatalog[$index]
+                $previousInstalled = $catalogCard.IsInstalled
+                $newInstalled = [bool]$flags[$index]
+                if ($null -eq $previousInstalled -or [bool]$previousInstalled -ne $newInstalled) { [void]$changedInstalledCards.Add([string]$catalogCard.Id) }
+                $catalogCard.IsInstalled = $newInstalled
             }
 
             # Catalog cards use PSCustomObject records, so refresh the visible
@@ -20664,9 +24098,29 @@ function Complete-AMRInstalledCatalogScan {
                     $script:AppsView.Refresh()
                     $visibleCards = $script:SoftwareGridPageItems
                     for ($cardIndex = 0; $cardIndex -lt $visibleCards.Count; $cardIndex++) {
-                        $visibleCards[$cardIndex] = $visibleCards[$cardIndex]
+                        # Re-notify only cards whose installed state actually changed.
+                        # Category spacer/header rows are PSCustomObjects without an Id property.
+                        $visibleCard = $visibleCards[$cardIndex]
+                        if ($null -eq $visibleCard -or $null -eq $visibleCard.PSObject.Properties['Id']) { continue }
+                        if ($changedInstalledCards.Contains([string]$visibleCard.Id)) {
+                            $visibleCards[$cardIndex] = $visibleCard
+                        }
                     }
                 } catch {
+                    # Diagnostics only (file log, never the in-app Logs tab).
+                    try {
+                        $diagOuterError = $_
+                        $diagItemType = '<n/a>'; $diagItemProps = ''
+                        try {
+                            if ($null -ne $visibleCards -and $cardIndex -ge 0 -and $cardIndex -lt $visibleCards.Count) {
+                                $diagItem = $visibleCards[$cardIndex]
+                                if ($null -eq $diagItem) { $diagItemType = '<null>' } else { $diagItemType = $diagItem.GetType().FullName; $diagItemProps = (($diagItem.PSObject.Properties | Select-Object -First 12 | ForEach-Object { $_.Name }) -join ',') }
+                            }
+                        } catch { $diagItemType = '<inspect failed: ' + $_.Exception.Message + '>' }
+                        $diagCount = $(if ($null -ne $visibleCards) { [string]$visibleCards.Count } else { '<null>' })
+                        $diagCollType = $(if ($null -ne $visibleCards) { $visibleCards.GetType().FullName } else { '<null>' })
+                        Write-AMRDiagnostic -Severity 'WARNING' -Area 'Software' -Operation 'InstalledIndicatorRefreshFailure' -Message ("Indicator refresh failed | CardIndex={0} | PageItems={1} | CollectionType={2} | ItemType={3} | ItemProperties={4} | ChangedCards={5} | AppsViewNull={6}" -f $cardIndex,$diagCount,$diagCollType,$diagItemType,$diagItemProps,$changedInstalledCards.Count,($null -eq $script:AppsView)) -ErrorRecord $diagOuterError
+                    } catch { }
                     Write-AMRLog "Could not refresh installed indicators in the software catalog: $($_.Exception.Message)" WARNING Software
                 }
             }
@@ -20674,40 +24128,65 @@ function Complete-AMRInstalledCatalogScan {
             $previousInventory = $JobState.Inventory
             $freshInventory = $payload.Inventory
             $inventoryChanged = $true
-            if ($JobState.Ready -and $previousInventory.Count -eq $freshInventory.Count) {
+            $wasReadyBeforeScan = [bool]$JobState.Ready
+            $compareAdded = -1
+            $compareRemoved = -1
+            $compareSample = ''
+            if ($JobState.Ready) {
                 try {
-                    # Compare as a multiset in linear time. The former pipeline
-                    # created two sorted arrays on the UI thread and could stall
-                    # the Installed transition after a background scan completed.
+                    # Multiset comparison in linear time (no sorting on the UI thread).
                     $previousCounts = [System.Collections.Generic.Dictionary[string,int]]::new([System.StringComparer]::OrdinalIgnoreCase)
                     foreach ($record in $previousInventory) {
-                        $signature = '{0}|{1}|{2}|{3}|{4}|{5}|{6}|{7}|{8}' -f [string]$record.Name,[string]$record.Id,[string]$record.DisplayVersion,[string]$record.Publisher,[string]$record.Source,[bool]$record.CanUninstall,[bool]$record.IsUserFacing,[string]$record.DisplayName,[string]$record.UninstallMethod
+                        $signature = Get-AMRInstalledInventorySignature -Record $record
                         if ($previousCounts.ContainsKey($signature)) { $previousCounts[$signature] = [int]$previousCounts[$signature] + 1 }
                         else { $previousCounts[$signature] = 1 }
                     }
-                    $inventoryChanged = $false
+                    $freshCounts = [System.Collections.Generic.Dictionary[string,int]]::new([System.StringComparer]::OrdinalIgnoreCase)
                     foreach ($record in $freshInventory) {
-                        $signature = '{0}|{1}|{2}|{3}|{4}|{5}|{6}|{7}|{8}' -f [string]$record.Name,[string]$record.Id,[string]$record.DisplayVersion,[string]$record.Publisher,[string]$record.Source,[bool]$record.CanUninstall,[bool]$record.IsUserFacing,[string]$record.DisplayName,[string]$record.UninstallMethod
-                        if (-not $previousCounts.ContainsKey($signature) -or $previousCounts[$signature] -le 0) {
-                            $inventoryChanged = $true
-                            break
-                        }
-                        $previousCounts[$signature] = [int]$previousCounts[$signature] - 1
+                        $signature = Get-AMRInstalledInventorySignature -Record $record
+                        if ($freshCounts.ContainsKey($signature)) { $freshCounts[$signature] = [int]$freshCounts[$signature] + 1 }
+                        else { $freshCounts[$signature] = 1 }
                     }
-                    if (-not $inventoryChanged) {
-                        foreach ($remaining in $previousCounts.Values) {
-                            if ($remaining -ne 0) { $inventoryChanged = $true; break }
+                    $compareAdded = 0
+                    $compareRemoved = 0
+                    foreach ($pair in $freshCounts.GetEnumerator()) {
+                        $before = 0
+                        [void]$previousCounts.TryGetValue($pair.Key,[ref]$before)
+                        if ([int]$pair.Value -gt $before) {
+                            $compareAdded += ([int]$pair.Value - $before)
+                            if (-not $compareSample) { $compareSample = 'added ' + $pair.Key }
                         }
                     }
-                } catch { $inventoryChanged = $true }
+                    foreach ($pair in $previousCounts.GetEnumerator()) {
+                        $after = 0
+                        [void]$freshCounts.TryGetValue($pair.Key,[ref]$after)
+                        if ([int]$pair.Value -gt $after) {
+                            $compareRemoved += ([int]$pair.Value - $after)
+                            if (-not $compareSample) { $compareSample = 'removed ' + $pair.Key }
+                        }
+                    }
+                    $inventoryChanged = ($compareAdded -gt 0 -or $compareRemoved -gt 0)
+                } catch {
+                    $inventoryChanged = $true
+                    $compareSample = 'compare failed: ' + $_.Exception.Message
+                }
             }
+            Write-AMRLog ('Installed scan compare: changed={0}; added={1}; removed={2}; records={3}; firstDifference={4}.' -f $inventoryChanged,$compareAdded,$compareRemoved,@($freshInventory).Count,$(if ($compareSample) { $compareSample } else { 'none' })) INFO Software
 
             $JobState.Ready = $true
             $JobState.Count = [int](@($freshInventory | Where-Object { $_.IsUserFacing -and $_.CanUninstall }).Count)
             $JobState.Inventory = $freshInventory
             if ($inventoryChanged) {
-                $script:InstalledInventoryGeneration = [int]$script:InstalledInventoryGeneration + 1
-                $script:InstalledViewCache = $null
+                # A7: the very first scan of a session has nothing built from an older inventory, so it must not
+                # invalidate anything (that was the cold-start false generation change).
+                $hasStaleDerivedState = [bool]($script:InstalledViewCache -or $script:InstalledAppsView -or $script:InstalledViewPreparationState -or $script:InstalledGridPageBuildState)
+                if ($wasReadyBeforeScan -or $hasStaleDerivedState) {
+                    $script:InstalledInventoryGeneration = [int]$script:InstalledInventoryGeneration + 1
+                    Clear-AMRInstalledViewCache -Reason $(if ($wasReadyBeforeScan) { 'inventory-content-changed' } else { 'first-scan-with-existing-view' })
+                    Write-AMRLog ('Installed inventory generation is now {0}.' -f [int]$script:InstalledInventoryGeneration) INFO Software
+                } else {
+                    Write-AMRLog 'First Installed scan of this session: generation kept (nothing was built from an older inventory).' INFO Software
+                }
             }
             $JobState.Error = ''
             [void](Save-AMRInstalledInventoryCache)
@@ -20738,13 +24217,33 @@ function Complete-AMRInstalledCatalogScan {
         # A first-run failure still leaves Ready=false and reports the error normally.
         $JobState.Error = $workerError
         Write-AMRLog "Background installed-app scan failed: $workerError" ERROR Software
+        # Diagnostics only (no behavior change): explain where and why the worker failed.
+        try {
+            $diagFlagCount = -1; $diagInventoryCount = -1; $diagPayloadLogCount = -1
+            if ($payload) {
+                try { $diagFlagCount = @($payload.InstalledFlags).Count } catch {}
+                try { $diagInventoryCount = @($payload.Inventory).Count } catch {}
+                try { $diagPayloadLogCount = @($payload.Logs).Count } catch {}
+            }
+            Write-AMRLog ('Inventory worker failure diagnostics | LastWorkerStage={0} | PayloadReturned={1} | InstalledFlags={2} | InventoryRecords={3} | WorkerLogEntries={4} | StreamErrorRecords={5} | OutputItems={6}' -f $workerDiagStage,[bool]$payload,$diagFlagCount,$diagInventoryCount,$diagPayloadLogCount,$workerDiagStreamErrorCount,@($outputItems).Count) WARNING Software
+            if ($workerDiagEndInvoke) { Write-AMRLog ("Inventory worker EndInvoke exception:`n" + $workerDiagEndInvoke) WARNING Software }
+            if ($workerDiagStreams) { Write-AMRLog ("Inventory worker error stream:`n" + $workerDiagStreams) WARNING Software }
+            if ($payload) {
+                # The worker's own log lines are normally dropped when the scan is reported as failed.
+                $diagLogShown = 0
+                foreach ($entry in @($payload.Logs)) {
+                    if ($diagLogShown -ge 60) { break }
+                    if ($entry -and $entry.Message) { $diagLogShown++; Write-AMRLog ('Inventory worker log (scan reported failed) [{0}] {1}' -f [string]$entry.Level,[string]$entry.Message) INFO Software }
+                }
+            }
+        } catch {}
         if ($JobState.PendingShow) {
             Resume-AMRSoftwareCatalogPaging -DelayMilliseconds 600
             Set-AMRShowInstalledButtonBusy -Busy $false -Label 'Show Installed'
             $JobState.PendingShow = $false
             $script:SoftwareGridTransitionPending = $true
             Invoke-AMRSoftwareGridViewTransition
-            Show-AMRMessage "Could not finish the installed-app scan:`n`n$workerError" 'Installed Apps Scan' OK Error | Out-Null
+            Show-AMRMessageGlass "Could not finish the installed-app scan:`n`n$workerError" 'Installed Apps Scan' OK Error | Out-Null
         }
     }
 
@@ -20812,10 +24311,17 @@ function Start-AMRInstalledCatalogScan {
         $presentationNameFunctionBody = $presentationNameCommand.ScriptBlock.ToString()
         $cardShortNameCommand = Get-Command Get-AMRInstalledCardShortName -ErrorAction Stop
         $cardShortNameFunctionBody = $cardShortNameCommand.ScriptBlock.ToString()
+        # Get-AMRUniversalInstalledInventory calls these two functions, so the worker runspace needs them too.
+        $canonicalKeyCommand = Get-Command Get-AMRInstalledCanonicalNameKey -ErrorAction Stop
+        $canonicalKeyFunctionBody = $canonicalKeyCommand.ScriptBlock.ToString()
+        $dedupeCommand = Get-Command Remove-AMRDuplicateInstalledInventoryRecords -ErrorAction Stop
+        $dedupeFunctionBody = $dedupeCommand.ScriptBlock.ToString()
 
         $workerScript = @'
-param($CatalogSnapshot, $InventoryFunctionBody, $MatchFunctionBody, $UniversalFunctionBody, $RecordFunctionBody, $PresentationFunctionBody, $PresentationNameFunctionBody, $CardShortNameFunctionBody)
+param($CatalogSnapshot, $InventoryFunctionBody, $MatchFunctionBody, $UniversalFunctionBody, $RecordFunctionBody, $PresentationFunctionBody, $PresentationNameFunctionBody, $CardShortNameFunctionBody, $CanonicalKeyFunctionBody, $DedupeFunctionBody)
 $ErrorActionPreference = 'Continue'
+function Set-AMRWorkerStage { param([string]$Name) try { $global:AMRWorkerDiag['Stage'] = $Name } catch {} }
+$script:AMRWorkerWatch = [System.Diagnostics.Stopwatch]::StartNew()
 $script:SoftwareCatalog = @($CatalogSnapshot)
 $script:InventoryLogs = New-Object 'System.Collections.Generic.List[object]'
 function Write-AMRLog {
@@ -20840,12 +24346,21 @@ $cardShortNameDefinition = "function Get-AMRInstalledCardShortName {`r`n" + $Car
 Invoke-Expression $cardShortNameDefinition
 $presentationDefinition = "function Set-AMRInstalledAppPresentation {`r`n" + $PresentationFunctionBody + "`r`n}"
 Invoke-Expression $presentationDefinition
+$canonicalKeyDefinition = "function Get-AMRInstalledCanonicalNameKey {`r`n" + $CanonicalKeyFunctionBody + "`r`n}"
+Invoke-Expression $canonicalKeyDefinition
+$dedupeDefinition = "function Remove-AMRDuplicateInstalledInventoryRecords {`r`n" + $DedupeFunctionBody + "`r`n}"
+Invoke-Expression $dedupeDefinition
 $universalDefinition = "function Get-AMRUniversalInstalledInventory {`r`n" + $UniversalFunctionBody + "`r`n}"
 Invoke-Expression $universalDefinition
+Set-AMRWorkerStage 'Update-AMRInstalledCatalogState'
 $scanResult = Update-AMRInstalledCatalogState
+try { Write-AMRLog ('Inventory worker stage done: Update-AMRInstalledCatalogState at {0} ms (Count={1}, WingetRawOutputLength={2}).' -f $script:AMRWorkerWatch.ElapsedMilliseconds,$scanResult.Count,([string]$scanResult.WingetRawOutput).Length) INFO Software } catch {}
 $flags = @($script:SoftwareCatalog | ForEach-Object { [bool]$_.IsInstalled })
 # Reuse the WinGet output collected above; do not launch a second WinGet CLI scan.
+Set-AMRWorkerStage 'Get-AMRUniversalInstalledInventory'
 $inventory = @(Get-AMRUniversalInstalledInventory -WingetRawOutput ([string]$scanResult.WingetRawOutput) -SkipWingetScan)
+try { Write-AMRLog ('Inventory worker stage done: Get-AMRUniversalInstalledInventory at {0} ms ({1} record(s)).' -f $script:AMRWorkerWatch.ElapsedMilliseconds,$inventory.Count) INFO Software } catch {}
+Set-AMRWorkerStage 'returning-result'
 [pscustomobject]@{
     Count = [int]$scanResult.Count
     InstalledFlags = $flags
@@ -20856,6 +24371,8 @@ $inventory = @(Get-AMRUniversalInstalledInventory -WingetRawOutput ([string]$sca
 
         $runspace = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace()
         $runspace.Open()
+        $workerDiag = [hashtable]::Synchronized(@{ Stage = 'queued' })
+        try { $runspace.SessionStateProxy.SetVariable('AMRWorkerDiag', $workerDiag) } catch {}
         $powerShell = [PowerShell]::Create()
         $powerShell.Runspace = $runspace
         [void]$powerShell.AddScript($workerScript)
@@ -20867,6 +24384,8 @@ $inventory = @(Get-AMRUniversalInstalledInventory -WingetRawOutput ([string]$sca
         [void]$powerShell.AddArgument($presentationFunctionBody)
         [void]$powerShell.AddArgument($presentationNameFunctionBody)
         [void]$powerShell.AddArgument($cardShortNameFunctionBody)
+        [void]$powerShell.AddArgument($canonicalKeyFunctionBody)
+        [void]$powerShell.AddArgument($dedupeFunctionBody)
         $asyncResult = $powerShell.BeginInvoke()
 
         $timer = New-Object System.Windows.Threading.DispatcherTimer
@@ -20877,6 +24396,7 @@ $inventory = @(Get-AMRUniversalInstalledInventory -WingetRawOutput ([string]$sca
             Runspace = $runspace
             AsyncResult = $asyncResult
             Timer = $timer
+            Diag = $workerDiag
         }
         $state.Current = $job
 
@@ -20887,6 +24407,21 @@ $inventory = @(Get-AMRUniversalInstalledInventory -WingetRawOutput ([string]$sca
                 return
             }
             if (-not $activeJob.AsyncResult.IsCompleted) { return }
+            # A7: while the user is actively scrolling, applying the scan result waits until the scroll
+            # has been quiet for 400 ms (never longer than 8 s, and never when the user is waiting for it).
+            $deferredMs = 0
+            try {
+                if (-not $jobState.PendingShow) {
+                    $nowTicks = [DateTime]::UtcNow.Ticks
+                    if (($nowTicks - $script:AMRLastSoftwareScrollTicks) -lt 4000000) {
+                        if ($script:AMRScanDeferStartTicks -eq 0) { $script:AMRScanDeferStartTicks = $nowTicks }
+                        if (($nowTicks - $script:AMRScanDeferStartTicks) -lt 80000000) { return }
+                    }
+                }
+                if ($script:AMRScanDeferStartTicks -ne 0) { $deferredMs = [int](([DateTime]::UtcNow.Ticks - $script:AMRScanDeferStartTicks) / 10000) }
+            } catch {}
+            $script:AMRScanDeferStartTicks = 0
+            if ($deferredMs -gt 0) { Write-AMRLog ('Installed scan result applied after scrolling settled (waited {0} ms).' -f $deferredMs) INFO Software }
             $timer.Stop()
             Complete-AMRInstalledCatalogScan -JobState $jobState
         }.GetNewClosure())
@@ -20904,7 +24439,7 @@ $inventory = @(Get-AMRUniversalInstalledInventory -WingetRawOutput ([string]$sca
         Write-AMRLog "Could not start the background installed-app scan: $($_.Exception.Message)" ERROR Software
         if ($state.PendingShow) {
             $state.PendingShow = $false
-            Show-AMRMessage "Could not start the installed-app scan:`n`n$($_.Exception.Message)" 'Installed Apps Scan' OK Error | Out-Null
+            Show-AMRMessageGlass "Could not start the installed-app scan:`n`n$($_.Exception.Message)" 'Installed Apps Scan' OK Error | Out-Null
         }
     }
 }
@@ -21229,6 +24764,11 @@ function Get-AMRSoftwareVisualElements {
     return ,$foundElements
 }
 
+# A9: plain variable initialization only. These flags are tested with -not before they are ever assigned; under StrictMode that
+# read threw and the surrounding try/catch logged a warning and skipped the feature (entrance animation, whole-card selection).
+$script:SoftwareConsoleEntrancePlayed = $false
+$script:SoftwareCategoriesEntrancePlayed = $false
+$script:SoftwareCardSelectionHandlerAttached = $false
 function Invoke-AMRSoftwarePremiumEntrance {
     # One-time, low-cost entrance only. Never animate individual software cards
     # or traverse the catalog visual tree; tab navigation and catalog refreshes
@@ -21374,7 +24914,9 @@ function Start-AMRCatalogGridPageBuild {
 
     $state = [pscustomobject]@{
         View = $View
-        ViewEnumerator = $View.GetEnumerator()
+        # A7: enumerate a snapshot of the view (same items, same order). A background scan result calls
+        # AppsView.Refresh(); a live enumerator then threw 'Collection was modified' in the middle of the build.
+        ViewEnumerator = ([object[]]@($View)).GetEnumerator()
         CategoryNames = $categoryNames
         Groups = $groups
         CategoryOrdinals = $categoryOrdinals
@@ -21589,7 +25131,15 @@ function Complete-AMRCatalogGridPageBuildBatch {
                 }
                 Start-AMRSoftwareGridWarmup
                 $script:CatalogGridPageBuildState = $null
-                Write-AMRLog ('Software catalog page source prepared incrementally: ' + [string]$script:SoftwareGridPageSource.Count + ' item(s).') INFO Software
+                $searchElapsedText = ''
+                try {
+                    if ($script:AMRSearchStartTicks -ne 0) {
+                        $searchElapsedMs = [int](([DateTime]::UtcNow.Ticks - $script:AMRSearchStartTicks) / 10000)
+                        if ($searchElapsedMs -lt 30000) { $searchElapsedText = (' Elapsed since the last search apply: {0} ms.' -f $searchElapsedMs) }
+                        $script:AMRSearchStartTicks = 0
+                    }
+                } catch {}
+                Write-AMRLog ('Software catalog page source prepared incrementally: ' + [string]$script:SoftwareGridPageSource.Count + ' item(s).' + $searchElapsedText) INFO Software
                 return
             }
         }
@@ -21606,7 +25156,7 @@ function Reset-AMRSoftwareGridPages {
 
     # A filter/search/refresh rebuild invalidates cached catalog snapshots.
     $script:SoftwareCatalogViewCache = $null
-    if ($script:ShowInstalledOnly) { $script:InstalledViewCache = $null }
+    if ($script:ShowInstalledOnly) { Clear-AMRInstalledViewCache -Reason 'grid-reset-on-installed' }
 
     if ($script:SoftwareGridWarmupTimer) {
         try { $script:SoftwareGridWarmupTimer.Stop() } catch {}
@@ -21646,7 +25196,7 @@ function Reset-AMRSoftwareGridPages {
         $categoryContainer = $categoryList.ItemContainerGenerator.ContainerFromItem($selected)
         Invoke-AMRNavigationTilePressAnimation -Element $categoryContainer
         $script:SelectedSoftwareCategory = [string]$selected.Name
-        $script:InstalledViewCache = $null
+        Clear-AMRInstalledViewCache -Reason 'category-selected'
         if ($script:ShowInstalledOnly -and $script:InstalledAppsView) {
             $script:InstalledAppsView.Refresh()
             Reset-AMRSoftwareGridPages -View $script:InstalledAppsView
@@ -21657,16 +25207,46 @@ function Reset-AMRSoftwareGridPages {
     }
 })
 
-(C 'SearchBox').Add_TextChanged({
-    $script:InstalledViewCache = $null
-    $script:SoftwareCatalogViewCache = $null
-    if ($script:ShowInstalledOnly -and $script:InstalledAppsView) {
-        $script:InstalledAppsView.Refresh()
-        Reset-AMRSoftwareGridPages -View $script:InstalledAppsView
-    } else {
-        $script:AppsView.Refresh()
-        Reset-AMRSoftwareGridPages -View $script:AppsView
+# Search is applied 200 ms after the last keystroke instead of once per keystroke.
+# The view caches are still cleared immediately; the filter reads the live SearchBox text.
+$script:SoftwareSearchDebounceTimer = New-Object System.Windows.Threading.DispatcherTimer
+$script:SoftwareSearchDebounceTimer.Interval = [TimeSpan]::FromMilliseconds(200)
+$script:SoftwareSearchDebounceTimer.Add_Tick({
+    $script:SoftwareSearchDebounceTimer.Stop()
+    try {
+        Clear-AMRInstalledViewCache -Reason 'search-applied'
+        $script:SoftwareCatalogViewCache = $null
+        $searchStart = Get-AMRPerfNow
+        $script:AMRSearchStartTicks = [DateTime]::UtcNow.Ticks
+        Set-AMRPerfMark 'searchApply'
+        if ($script:ShowInstalledOnly -and $script:InstalledAppsView) {
+            $script:InstalledAppsView.Refresh()
+            $searchRefreshed = Get-AMRPerfNow
+            Reset-AMRSoftwareGridPages -View $script:InstalledAppsView
+        } else {
+            $script:AppsView.Refresh()
+            $searchRefreshed = Get-AMRPerfNow
+            Reset-AMRSoftwareGridPages -View $script:AppsView
+        }
+        if ($searchStart -ne 0) {
+            Add-AMRPerfSince -Key 'search.viewRefresh' -Start $searchStart
+            Add-AMRPerfSince -Key 'search.resetPages' -Start $searchRefreshed
+            $searchRefreshMs = 0.0; $searchResetMs = 0.0
+            try {
+                $searchRefreshMs = [math]::Round(($searchRefreshed - $searchStart) * 1000.0 / [System.Diagnostics.Stopwatch]::Frequency,1)
+                $searchResetMs = [math]::Round(((Get-AMRPerfNow) - $searchRefreshed) * 1000.0 / [System.Diagnostics.Stopwatch]::Frequency,1)
+            } catch {}
+            Write-AMRLog ('Software search applied: textLength={0}; installedOnly={1}; viewRefreshMs={2}; resetPagesMs={3}.' -f ([string](C 'SearchBox').Text).Length,[bool]$script:ShowInstalledOnly,$searchRefreshMs,$searchResetMs) INFO Software
+        }
+    } catch {
+        Write-AMRLog "Software search refresh failed: $($_.Exception.Message)" WARNING Software
     }
+})
+(C 'SearchBox').Add_TextChanged({
+    Clear-AMRInstalledViewCache -Reason 'search-typing'
+    $script:SoftwareCatalogViewCache = $null
+    $script:SoftwareSearchDebounceTimer.Stop()
+    $script:SoftwareSearchDebounceTimer.Start()
 })
 (C 'ShowInstalledBtn').Add_Click({
     if (-not $script:ShowInstalledOnly) {
@@ -21853,7 +25433,7 @@ function Reset-AMRSoftwareGridPages {
     if ($null -eq $copyButton -or [string]$copyButton.Name -ne 'InstalledCopyPathBtn') { return }
     $pathToCopy = [string]$copyButton.Tag
     if ([string]::IsNullOrWhiteSpace($pathToCopy) -or $pathToCopy -eq 'Not recorded by Windows') { return }
-    try { [System.Windows.Clipboard]::SetText($pathToCopy) } catch { Show-AMRMessage ('Could not copy installation path: ' + [string]$_.Exception.Message) 'Copy Install Path' OK Warning | Out-Null }
+    try { [System.Windows.Clipboard]::SetText($pathToCopy) } catch { Show-AMRMessageGlass ('Could not copy installation path: ' + [string]$_.Exception.Message) 'Copy Install Path' OK Warning | Out-Null }
 }, $true)
 # Explicitly control the installed details panel on the UI thread. PSCustomObject
 # inventory rows do not implement INotifyPropertyChanged, so XAML-only triggers
@@ -21876,6 +25456,8 @@ function Reset-AMRSoftwareGridPages {
         # Popup is hosted in its own WPF window, so it renders above every
         # neighboring item container without changing the card/grid layout.
         $popup.IsOpen = $isExpanded
+        # The popup body is a lazy Control template (built on first open): realize it now so the copy button exists.
+        try { if ($isExpanded -and $popup.Child -is [System.Windows.FrameworkElement]) { [void]$popup.Child.ApplyTemplate() } } catch {}
         $copyButton = Find-AMRNamedVisualChild -Parent $popup.Child -Name 'InstalledCopyPathBtn'
         if ($null -ne $copyButton -and $copyButton.Uid -ne 'AMR_COPY_HANDLER_ATTACHED') {
             $copyButton.Uid = 'AMR_COPY_HANDLER_ATTACHED'
@@ -21883,7 +25465,7 @@ function Reset-AMRSoftwareGridPages {
                 param($copySender, $copyEvent)
                 $pathToCopy = [string]$copySender.Tag
                 if ([string]::IsNullOrWhiteSpace($pathToCopy) -or $pathToCopy -eq 'Not recorded by Windows') { return }
-                try { [System.Windows.Clipboard]::SetText($pathToCopy) } catch { Show-AMRMessage ('Could not copy installation path: ' + [string]$_.Exception.Message) 'Copy Install Path' OK Warning | Out-Null }
+                try { [System.Windows.Clipboard]::SetText($pathToCopy) } catch { Show-AMRMessageGlass ('Could not copy installation path: ' + [string]$_.Exception.Message) 'Copy Install Path' OK Warning | Out-Null }
             }, $true)
         }
         $toggle.Content = if ($isExpanded) { '⌃' } else { '⌄' }
@@ -21982,6 +25564,7 @@ function Write-AMRSoftwareVirtualizationRuntimeAudit {
     }
 }
 
+Add-AMRStartupMark 'L22261 before-SoftwareVirtualizationAudit'
 $script:SoftwareVirtualizationAuditHandler = {
     param($sender,$eventArgs)
     try {
@@ -22011,6 +25594,31 @@ function Find-AMRNamedVisualChild {
     return $null
 }
 
+# Single walk that finds both named icon elements of a card (the image and the initials
+# placeholder) instead of two separate recursive searches.
+function Find-AMRSoftwareIconElements {
+    param([System.Windows.DependencyObject]$Parent)
+    $result = @{ Image = $null; Initials = $null }
+    $stack = New-Object 'System.Collections.Generic.Stack[System.Windows.DependencyObject]'
+    if ($null -ne $Parent) { $stack.Push($Parent) }
+    try {
+        while ($stack.Count -gt 0) {
+            $node = $stack.Pop()
+            if ($node -is [System.Windows.FrameworkElement]) {
+                $nodeName = $node.Name
+                if ($null -eq $result.Image -and $nodeName -eq 'SoftwareIconImage') { $result.Image = $node }
+                elseif ($null -eq $result.Initials -and $nodeName -eq 'SoftwareIconInitials') { $result.Initials = $node }
+                if ($null -ne $result.Image -and $null -ne $result.Initials) { break }
+            }
+            $childCount = [System.Windows.Media.VisualTreeHelper]::GetChildrenCount($node)
+            for ($childIndex = $childCount - 1; $childIndex -ge 0; $childIndex--) {
+                $stack.Push([System.Windows.Media.VisualTreeHelper]::GetChild($node,$childIndex))
+            }
+        }
+    } catch {}
+    return $result
+}
+
 function Set-AMRSoftwareIconImageSource {
     param(
         [Parameter(Mandatory=$true)][System.Windows.Controls.Image]$Image,
@@ -22020,7 +25628,8 @@ function Set-AMRSoftwareIconImageSource {
         $oldSource = $Image.Source
         if ([object]::ReferenceEquals($oldSource,$Source)) { return }
         $Image.BeginAnimation([System.Windows.UIElement]::OpacityProperty,$null)
-        $Image.Source = $Source
+        # SetCurrentValue keeps the template binding, so a recycled card re-binds to its new item.
+        $Image.SetCurrentValue([System.Windows.Controls.Image]::SourceProperty,$Source)
         if ($null -ne $Source) {
             $Image.Opacity = 0.0
             $fade = [System.Windows.Media.Animation.DoubleAnimation]::new()
@@ -22034,27 +25643,57 @@ function Set-AMRSoftwareIconImageSource {
             $Image.Opacity = 1.0
         }
     } catch {
-        try { $Image.Source = $Source; $Image.Opacity = 1.0 } catch {}
+        try { $Image.SetCurrentValue([System.Windows.Controls.Image]::SourceProperty,$Source); $Image.Opacity = 1.0 } catch {}
     }
 }
 
 function Sync-AMRRealizedSoftwareIcons {
+    $perfStart = [long]0
+    try { $perfStart = [AMR.PerfStats]::Now() } catch {}
     try {
         $grid = C 'SoftwareGrid'
         if ($null -eq $grid) { return }
         $generator = $grid.ItemContainerGenerator
-        for ($i = 0; $i -lt $grid.Items.Count; $i++) {
+
+        # Virtualized grid: visit only the cards that actually exist (about 30-60), never all
+        # catalog items. The panel is looked up once per grid and cached.
+        $panel = $null
+        if ($null -ne $script:SoftwareIconSyncPanelGrid -and [object]::ReferenceEquals($script:SoftwareIconSyncPanelGrid,$grid)) { $panel = $script:SoftwareIconSyncPanel }
+        if ($null -eq $panel) {
+            try { $panel = Find-AMRVisualChildByType -Parent $grid -ChildType ([AMR.SoftwareVirtualizingUniformGridPanel]) } catch { $panel = $null }
+            if ($null -ne $panel) { $script:SoftwareIconSyncPanel = $panel; $script:SoftwareIconSyncPanelGrid = $grid }
+        }
+
+        if ($null -ne $panel) {
+            $indexes = $panel.GetRealizedItemIndexes()
+        } else {
+            $indexes = 0..($grid.Items.Count - 1)
+        }
+        foreach ($i in $indexes) {
             $container = $generator.ContainerFromIndex($i)
             if ($null -eq $container) { continue }
             $item = $grid.Items[$i]
-            $image = Find-AMRNamedVisualChild -Parent $container -Name 'SoftwareIconImage'
-            $initials = Find-AMRNamedVisualChild -Parent $container -Name 'SoftwareIconInitials'
+            # Containers are recycled, so their template elements never change: walk each container's
+            # visual tree once and reuse the result (the walk is what made every pass cost tens of ms).
+            $iconElements = $script:SoftwareIconElementCache[$container]
+            if ($null -eq $iconElements) {
+                $iconElements = Find-AMRSoftwareIconElements -Parent $container
+                if ($null -ne $iconElements.Image -and $null -ne $iconElements.Initials) {
+                    if ($script:SoftwareIconElementCache.Count -gt 400) { $script:SoftwareIconElementCache.Clear() }
+                    $script:SoftwareIconElementCache[$container] = $iconElements
+                }
+            }
+            $image = $iconElements.Image
+            $initials = $iconElements.Initials
             if ($null -ne $image) { Set-AMRSoftwareIconImageSource -Image $image -Source $item.Icon }
             if ($null -ne $initials) {
-                $initials.Visibility = if ($null -eq $item.Icon) { [System.Windows.Visibility]::Visible } else { [System.Windows.Visibility]::Collapsed }
+                $initials.SetCurrentValue([System.Windows.UIElement]::VisibilityProperty,$(if ($null -eq $item.Icon) { [System.Windows.Visibility]::Visible } else { [System.Windows.Visibility]::Collapsed }))
             }
         }
-    } catch {}
+        try { [AMR.PerfStats]::Count('icons.syncCardsVisited', @($indexes).Count) } catch {}
+    } catch {} finally {
+        if ($perfStart -ne 0) { try { [AMR.PerfStats]::Add('icons.syncAll', [AMR.PerfStats]::Now() - $perfStart) } catch {} }
+    }
 }
 
 # Update only the realized card whose model changed; do not walk every card for
@@ -22064,21 +25703,31 @@ function Queue-AMRSoftwareIconSync {
     $script:SoftwareIconSyncQueued = $true
 
     try {
+        # One pass when the UI is idle. A7: if the user scrolled in the last 250 ms the pass waits 300 ms
+        # (once) so it never lands in the middle of a scroll; it is still always executed.
         $null = $script:Window.Dispatcher.BeginInvoke([Action]{
+            $waitMs = 0
             try {
-                Sync-AMRRealizedSoftwareIcons
-
-                $null = $script:Window.Dispatcher.BeginInvoke([Action]{
-                    try {
-                        Sync-AMRRealizedSoftwareIcons
-                    } finally {
-                        $script:SoftwareIconSyncQueued = $false
-                    }
-                }, [System.Windows.Threading.DispatcherPriority]::ApplicationIdle)
-            } catch {
-                $script:SoftwareIconSyncQueued = $false
+                if ((([DateTime]::UtcNow.Ticks - $script:AMRLastSoftwareScrollTicks) / 10000) -lt 250) { $waitMs = 300 }
+            } catch {}
+            if ($waitMs -gt 0) {
+                try {
+                    $syncTimer = New-Object System.Windows.Threading.DispatcherTimer
+                    $syncTimer.Interval = [TimeSpan]::FromMilliseconds($waitMs)
+                    $syncTimer.Add_Tick({
+                        $syncTimer.Stop()
+                        try { Sync-AMRRealizedSoftwareIcons }
+                        finally { $script:SoftwareIconSyncQueued = $false }
+                    }.GetNewClosure())
+                    $syncTimer.Start()
+                } catch {
+                    try { Sync-AMRRealizedSoftwareIcons } finally { $script:SoftwareIconSyncQueued = $false }
+                }
+            } else {
+                try { Sync-AMRRealizedSoftwareIcons }
+                finally { $script:SoftwareIconSyncQueued = $false }
             }
-        }, [System.Windows.Threading.DispatcherPriority]::Background)
+        }, [System.Windows.Threading.DispatcherPriority]::ApplicationIdle)
     } catch {
         $script:SoftwareIconSyncQueued = $false
     }
@@ -22103,9 +25752,8 @@ function Sync-AMRRealizedSoftwareIconItem {
             # An icon may arrive for a catalog item that has not been added to
             # the current paged ItemsSource yet. Its model retains the decoded
             # icon, and the DataTemplate binding applies it when the card is added.
-            if ($grid.Items.Contains($Item)) {
-                Queue-AMRSoftwareIconSync
-            }
+            # Under virtualization an unrealized card needs nothing here: the template binding
+            # reads the item's current Icon at the moment the card is realized.
             return
         }
 
@@ -22117,19 +25765,23 @@ function Sync-AMRRealizedSoftwareIconItem {
         }
 
         if ($null -ne $initials) {
-            $initials.Visibility = if ($null -eq $Item.Icon) {
+            $initials.SetCurrentValue([System.Windows.UIElement]::VisibilityProperty,$(if ($null -eq $Item.Icon) {
                 [System.Windows.Visibility]::Visible
             } else {
                 [System.Windows.Visibility]::Collapsed
-            }
+            }))
         }
     } catch {}
 }
 
 try {
     $softwareScroll = C 'SoftwareScrollViewer'
+    Start-AMRUiStallWatch
     $softwareScroll.Add_ScrollChanged({
         param($sender, $eventArgs)
+        if ($eventArgs.VerticalChange -ne 0) { $script:AMRLastSoftwareScrollTicks = [DateTime]::UtcNow.Ticks }
+        $perfScrollStart = [long]0
+        try { $perfScrollStart = [AMR.PerfStats]::Now() } catch {}
         # Do not walk the whole ItemsControl on every scroll event. In this
         # non-virtualized UniformGrid that would repeatedly inspect every card.
         # Icons are synchronized after a page is created and when an individual
@@ -22138,12 +25790,72 @@ try {
             # Queue at most one page append; avoid a burst of duplicate dispatcher work.
             $script:SoftwareGridPageDispatchPending = $true
             $null = $script:Window.Dispatcher.BeginInvoke([Action]{
+                $perfPageStart = [long]0
+                try { $perfPageStart = [AMR.PerfStats]::Now() } catch {}
                 try { Add-AMRSoftwareGridPage }
-                finally { $script:SoftwareGridPageDispatchPending = $false }
+                finally {
+                    $script:SoftwareGridPageDispatchPending = $false
+                    if ($perfPageStart -ne 0) { try { [AMR.PerfStats]::Add('ps.addGridPage', [AMR.PerfStats]::Now() - $perfPageStart) } catch {} }
+                }
             }, [System.Windows.Threading.DispatcherPriority]::Background)
         }
+        if ($perfScrollStart -ne 0) { try { [AMR.PerfStats]::Add('ps.scrollChangedHandler', [AMR.PerfStats]::Now() - $perfScrollStart) } catch {} }
     })
 } catch { Write-AMRLog ("Could not attach progressive Software paging: $($_.Exception.Message)") WARNING Software }
+
+# Diagnostics only (file-only, no UI change). Timing is folded in memory by AMR.PerfStats and
+# written to the diagnostics file by one 5 s Background timer, only when something was recorded.
+try {
+    $script:Window.AddHandler([System.Windows.UIElement]::PreviewMouseLeftButtonDownEvent, [System.Windows.Input.MouseButtonEventHandler]{
+        try { $script:PerfLastClickTicks = [AMR.PerfStats]::Now() } catch {}
+    }, $true)
+    $script:Window.AddHandler([System.Windows.Controls.Primitives.Selector]::SelectionChangedEvent, [System.Windows.Controls.SelectionChangedEventHandler]{
+        param($sender, $e)
+        try {
+            $source = $e.OriginalSource
+            if ($source -isnot [System.Windows.Controls.TabControl]) { return }
+            $nowTicks = [AMR.PerfStats]::Now()
+            $name = [string]$source.Name
+            $header = ''
+            try { $header = Get-AMRPerfTabHeader $source.SelectedItem } catch {}
+            $key = 'tab:' + $name + '->' + $header
+            $clickTicks = [long]$script:PerfLastClickTicks
+            if ($clickTicks -gt 0 -and ($nowTicks - $clickTicks) -lt ([System.Diagnostics.Stopwatch]::Frequency * 2)) {
+                [AMR.PerfStats]::Add($key + '.clickToHandlersDone', $nowTicks - $clickTicks)
+                $startTicks = $clickTicks
+            } else { $startTicks = $nowTicks }
+            # Dispatcher callbacks do not see this handler's locals (StrictMode would throw), so pass state via a script-scope queue.
+            $script:PerfIdleQueue.Enqueue(@($key, [long]$startTicks))
+            $script:PerfLoadedQueue.Enqueue(@($key, [long]$startTicks))
+            $null = $script:Window.Dispatcher.BeginInvoke([Action]{
+                try {
+                    if ($script:PerfLoadedQueue.Count -gt 0) {
+                        $pendingLoaded = $script:PerfLoadedQueue.Dequeue()
+                        [AMR.PerfStats]::Add([string]$pendingLoaded[0] + '.toLoaded', [AMR.PerfStats]::Now() - [long]$pendingLoaded[1])
+                    }
+                } catch {}
+            }, [System.Windows.Threading.DispatcherPriority]::Loaded)
+            $null = $script:Window.Dispatcher.BeginInvoke([Action]{
+                try {
+                    if ($script:PerfIdleQueue.Count -gt 0) {
+                        $pendingIdle = $script:PerfIdleQueue.Dequeue()
+                        [AMR.PerfStats]::Add([string]$pendingIdle[0] + '.toIdle', [AMR.PerfStats]::Now() - [long]$pendingIdle[1])
+                    }
+                } catch {}
+            }, [System.Windows.Threading.DispatcherPriority]::ApplicationIdle)
+        } catch {}
+    }, $true)
+    $script:PerfFlushTimer = New-Object System.Windows.Threading.DispatcherTimer([System.Windows.Threading.DispatcherPriority]::Background)
+    $script:PerfFlushTimer.Interval = [TimeSpan]::FromSeconds(5)
+    $script:PerfFlushTimer.Add_Tick({
+        try {
+            $line = [AMR.PerfStats]::Take()
+            if ($null -ne $line) { Write-AMRDiagnostic -Severity 'INFO' -Area 'PerfStats' -Operation 'Window5s' -Message $line }
+        } catch {}
+    })
+    $script:PerfFlushTimer.Start()
+    try { Write-AMRDiagnostic -Severity 'INFO' -Area 'PerfStats' -Operation 'BuildLabel' -Message 'Build variant: A6 (built on A5; touchpad scroll, Source Manager header hover; driver download cancel, Rollback Check cancel fixes, glass MessageBoxes; Candidate Manager glass redesign, Source Manager hover/scrollbar/button animation) | previous A3 (built on A2; reasons for disabled driver buttons) | previous A2 (built on A1 and A13h; problem card open-in-Driver-Update button, softer Driver Downloads and Diagnose hover) | previous A1 (built on A13h; Driver Center layout: scan summary and diagnosis note in driver log, equal tab panes, Driver Downloads/Diagnose buttons) | previous A13e (A13d + Scan PartialShown fix after restore point, glass tabs with sliding pill, cheaper tab switch, app-palette problem cards, Scan blocked diagnostics and stale restore state repair)' } catch {}
+} catch { }
 
 $script:UpdateSoftwareGridColumns = {
     $uniformGrid = Find-AMRVisualChildByType -Parent (C 'SoftwareGrid') -ChildType ([System.Windows.Controls.Primitives.UniformGrid])
@@ -22163,6 +25875,7 @@ $script:UpdateSoftwareGridColumns = {
     }
 }
 $script:SoftwareResizeUpdatePending = $false
+try { Enable-AMRGridTouchScroll -Window $script:Window -Grid (C 'DriverDeviceList') -HorizontalOnly } catch { try { Write-AMRDriverDiagnostic -Severity WARNING -Operation TouchScroll -Stage HookFallback -Message ('Horizontal touchpad scroll not enabled: ' + $_.Exception.Message) -Source 'AMRTouchScroll' } catch {} }
 $script:Window.Add_Loaded({ & $script:UpdateSoftwareGridColumns })
 $script:Window.Add_StateChanged({
     # Let WPF finish the maximize/restore frame before changing the grid. Coalesce
@@ -22208,6 +25921,7 @@ $script:Window.Add_StateChanged({
 })
 
 # Shared engine state
+Add-AMRStartupMark 'L22513 before-InstallEngineState'
 $script:InstallRunning = $false
 $script:InstallPowerShell = $null
 $script:InstallRunspace = $null
@@ -23388,13 +27102,17 @@ function Write-AMRInstallLogBatch {
         Write-AMRDiagnostic -Severity 'ERROR' -Area 'Software' -Operation 'AppendInstallLogBatch' -Message 'Could not persist a batch of installer log lines.' -ErrorRecord $_ -Target $script:LogFile
     }
 
-    foreach ($key in @('All','Software')) {
-        $control = $script:LogControls[$key]
-        if (-not $control) { continue }
-        $wasAtBottom = ($control.GetLastVisibleLineIndex() -ge ($control.LineCount - 2))
-        $control.AppendText(($displayLines -join "`r`n") + "`r`n")
-        Trim-AMRLogTextBox -Control $control -MaxChars $script:LogUIRetentionChars
-        if ($wasAtBottom) { $control.ScrollToEnd() }
+    # Installer progress lines go through the same bounded UI queue (shown in the summary view).
+    foreach ($installDisplayLine in $displayLines) {
+        try {
+            [void]$script:LogUIQueue.Enqueue([pscustomobject]@{
+                Line = [string]$installDisplayLine
+                Area = 'Software'
+                Level = 'INFO'
+                Message = [string]$installDisplayLine
+                Major = $true
+            })
+        } catch {}
     }
     if ($latest) {
         if ($script:Status) { $script:Status.Text = $latest }
@@ -23444,12 +27162,12 @@ function Complete-AMRInstallQueue {
         $script:ProgressBar.Value = 0
         $script:ProgressText.Text = "Installation failed with error."
         Write-AMRLog "Installation worker failed: $ErrorText" ERROR Software
-        Show-AMRMessage "The installation worker stopped unexpectedly:`n`n$ErrorText" "Engine Error" OK Error | Out-Null
+        Show-AMRMessageGlass "The installation worker stopped unexpectedly:`n`n$ErrorText" "Engine Error" OK Error | Out-Null
         return
     }
 
     if (-not $Result) {
-        Show-AMRMessage "The operation finished without returning a result." "Engine Warning" OK Warning | Out-Null
+        Show-AMRMessageGlass "The operation finished without returning a result." "Engine Warning" OK Warning | Out-Null
         return
     }
 
@@ -23479,7 +27197,7 @@ function Complete-AMRInstallQueue {
     $script:ProgressBar.Value = 100
     $script:ProgressText.Text = "Finished: $($Result.SuccessCount) Verified, $($Result.UnverifiedCount) Unverified, $($Result.CancelledCount) Cancelled, $($Result.SkippedCount) Skipped, $($Result.FailedCount) Failed."
     Write-AMRLog "Queue finished. Verified: $($Result.SuccessCount), Unverified: $($Result.UnverifiedCount), Cancelled: $($Result.CancelledCount), Skipped: $($Result.SkippedCount), Failed: $($Result.FailedCount)." SUCCESS Software
-    Show-AMRMessage $summary "Operation Summary" OK Information | Out-Null
+    Show-AMRMessageGlass $summary "Operation Summary" OK Information | Out-Null
 }
 
 function Execute-SmartMultiTierInstallAsync {
@@ -23496,7 +27214,7 @@ function Execute-SmartMultiTierInstallAsync {
     }
 
     if ($ActionCommand -notin @('install','upgrade','repair')) {
-        Show-AMRMessage "Unsupported software action: $ActionCommand" "Invalid Action" OK Error | Out-Null
+        Show-AMRMessageGlass "Unsupported software action: $ActionCommand" "Invalid Action" OK Error | Out-Null
         return
     }
 
@@ -23524,8 +27242,68 @@ function Execute-SmartMultiTierInstallAsync {
         }
     )
 
+    # A13h: in Show Installed mode the cards are records of $script:InstalledAppsInventory, not catalog items.
+    # Update and Repair read the checked installed records there. Install actions and catalog mode are unchanged.
+    if ($ActionCommand -in @('upgrade','repair') -and $script:ShowInstalledOnly) {
+        try {
+            $installedSelectedSnapshot = New-Object 'System.Collections.Generic.List[object]'
+            $installedSeenNames = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+            foreach ($installedRecord in @($script:InstalledAppsInventory | Where-Object { $_.IsSelected -eq $true -and $_.IsInstalled -eq $true })) {
+                $installedName = [string]$installedRecord.Name
+                if ([string]::IsNullOrWhiteSpace($installedName) -or -not $installedSeenNames.Add($installedName)) { continue }
+                $catalogMatch = $null
+                if ($installedRecord.IsCatalogApp -eq $true -and -not [string]::IsNullOrWhiteSpace([string]$installedRecord.CatalogId)) {
+                    $catalogMatch = $script:SoftwareCatalog | Where-Object { [string]$_.Id -eq [string]$installedRecord.CatalogId } | Select-Object -First 1
+                }
+                if ($catalogMatch) {
+                    $installedSelectedSnapshot.Add([pscustomobject]@{
+                        Name       = [string]$catalogMatch.Name
+                        Category   = [string]$catalogMatch.Category
+                        Id         = [string]$catalogMatch.Id
+                        ChocoId    = [string]$catalogMatch.ChocoId
+                        DirectUrl  = [string]$catalogMatch.DirectUrl
+                        DirectArgs = [string]$catalogMatch.DirectArgs
+                        Publisher  = [string]$catalogMatch.Publisher
+                        BrowserUrl = [string]$catalogMatch.BrowserUrl
+                        CatalogUrl = [string]$catalogMatch.CatalogUrl
+                        GoogleUrl  = [string]$catalogMatch.GoogleUrl
+                        Sha256     = [string]$catalogMatch.Sha256
+                        InstallerType = [string]$catalogMatch.InstallerType
+                        InteractiveArgs = [string]$catalogMatch.InteractiveArgs
+                        AllowedHosts = @($catalogMatch.AllowedHosts)
+                        InstallTimeoutSeconds = if ($catalogMatch.InstallTimeoutSeconds) { [int]$catalogMatch.InstallTimeoutSeconds } else { 1800 }
+                    })
+                } else {
+                    $installedSelectedSnapshot.Add([pscustomobject]@{
+                        Name       = $installedName
+                        Category   = [string]$installedRecord.Category
+                        Id         = [string]$installedRecord.WingetId
+                        ChocoId    = [string]$installedRecord.ChocoId
+                        DirectUrl  = ''
+                        DirectArgs = ''
+                        Publisher  = [string]$installedRecord.Publisher
+                        BrowserUrl = ''
+                        CatalogUrl = ''
+                        GoogleUrl  = ''
+                        Sha256     = ''
+                        InstallerType = ''
+                        InteractiveArgs = ''
+                        AllowedHosts = @()
+                        InstallTimeoutSeconds = 1800
+                    })
+                }
+            }
+            if ($installedSelectedSnapshot.Count -gt 0) {
+                $selectedSnapshot = @($installedSelectedSnapshot.ToArray())
+                Write-AMRLog "Software $ActionName uses $($selectedSnapshot.Count) selected installed app(s) in Show Installed mode." INFO Software
+            }
+        } catch {
+            Write-AMRLog "Installed-mode selection read failed: $($_.Exception.Message)" WARNING Software
+        }
+    }
+
     if ($selectedSnapshot.Count -eq 0) {
-        Show-AMRMessage "Please select at least one application." "Selection Required" OK Warning | Out-Null
+        Show-AMRMessageGlass "Please select at least one application." "Selection Required" OK Warning | Out-Null
         return
     }
 
@@ -23655,6 +27433,7 @@ function Execute-SmartMultiTierInstallAsync {
     }
 }
 
+Add-AMRStartupMark 'L23960 before-SafeUninstallEngine'
 # --- SAFE SOFTWARE UNINSTALL ENGINE ---
 function Show-AMRUninstallChoice {
     param([string[]]$ApplicationNames)
@@ -24171,7 +27950,7 @@ function Invoke-AMRInventoryExactUninstall {
                 if(-not $allowed -or -not $root -or -not $exe.StartsWith(($root+'\'),[StringComparison]::OrdinalIgnoreCase) -or -not (Test-Path -LiteralPath $exe -PathType Leaf)){return [pscustomobject]@{Success=$false;Detail='Portable app root failed exact path safety checks; no files were removed.'}}
                 $rootItem=Get-Item -LiteralPath $root -Force -ErrorAction Stop
                 if(($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0){return [pscustomobject]@{Success=$false;Detail='Portable app folder is a reparse point/junction; deletion is blocked.'}}
-                $confirmPortable=Show-AMRMessage ("This portable app is stored in its own folder. AMR will permanently delete only this exact folder and its contents:`n`n$root`n`nShortcuts outside the folder and other user files will not be removed. Continue?") 'Confirm Portable App Removal' YesNo Warning
+                $confirmPortable=Show-AMRMessageGlass ("This portable app is stored in its own folder. AMR will permanently delete only this exact folder and its contents:`n`n$root`n`nShortcuts outside the folder and other user files will not be removed. Continue?") 'Confirm Portable App Removal' YesNo Warning
                 if($confirmPortable -ne [System.Windows.MessageBoxResult]::Yes){return [pscustomobject]@{Success=$false;Detail='Portable app removal was cancelled.'}}
                 Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction Stop
                 Start-Sleep -Milliseconds 500
@@ -24190,21 +27969,21 @@ function Invoke-AMRInventoryExactUninstall {
 }
 
 function Invoke-AMRSelectedUninstall {
-    if ($script:InstallRunning) { Show-AMRMessage 'Another software operation is currently running.' 'AMR Uninstall' OK Warning | Out-Null; return }
-    if (-not $script:ShowInstalledOnly) { Show-AMRMessage 'Switch to Show Installed before using Uninstall.' 'AMR Uninstall' OK Warning | Out-Null; return }
+    if ($script:InstallRunning) { Show-AMRMessageGlass 'Another software operation is currently running.' 'AMR Uninstall' OK Warning | Out-Null; return }
+    if (-not $script:ShowInstalledOnly) { Show-AMRMessageGlass 'Switch to Show Installed before using Uninstall.' 'AMR Uninstall' OK Warning | Out-Null; return }
     $selected = @($script:InstalledAppsInventory | Where-Object { $_.IsSelected -eq $true -and $_.IsInstalled -eq $true })
-    if ($selected.Count -eq 0) { Show-AMRMessage 'Select one or more detected installed applications first.' 'Selection Required' OK Warning | Out-Null; return }
+    if ($selected.Count -eq 0) { Show-AMRMessageGlass 'Select one or more detected installed applications first.' 'Selection Required' OK Warning | Out-Null; return }
     $unsupported = @($selected | Where-Object { -not $_.CanUninstall })
     if ($unsupported.Count -gt 0) {
         $unsupportedNames = @($unsupported | ForEach-Object { '• ' + $_.Name + ': ' + $_.UninstallReason }) -join "`n"
-        Show-AMRMessage ("These selected items do not have a verified uninstall method and will be skipped:`n`n$unsupportedNames") 'Uninstall Not Available' OK Warning | Out-Null
+        Show-AMRMessageGlass ("These selected items do not have a verified uninstall method and will be skipped:`n`n$unsupportedNames") 'Uninstall Not Available' OK Warning | Out-Null
         $selected = @($selected | Where-Object { $_.CanUninstall })
         if ($selected.Count -eq 0) { return }
     }
     $portableSelected = @($selected | Where-Object { $_.IsPortable -and $_.CanUninstall })
     if ($portableSelected.Count -gt 0) {
         $portableNames = @($portableSelected | ForEach-Object { '• ' + $_.Name + ' — ' + $_.PortableRootFolder }) -join "`n"
-        $portableAck = Show-AMRMessage ("Portable applications are files rather than registered installations. Removing them deletes their exact app folder even when Keep Data is selected. Each folder will be shown for a separate confirmation:`n`n$portableNames`n`nContinue?") 'Portable Apps Selected' YesNo Warning
+        $portableAck = Show-AMRMessageGlass ("Portable applications are files rather than registered installations. Removing them deletes their exact app folder even when Keep Data is selected. Each folder will be shown for a separate confirmation:`n`n$portableNames`n`nContinue?") 'Portable Apps Selected' YesNo Warning
         if ($portableAck -ne [System.Windows.MessageBoxResult]::Yes) { return }
     }
     $choice = Show-AMRUninstallChoice -ApplicationNames @($selected | ForEach-Object { [string]$_.Name })
@@ -24212,10 +27991,10 @@ function Invoke-AMRSelectedUninstall {
 
     if ($choice -eq 'Complete') {
         $preview = "AMR will run the selected application's exact native uninstall method. In this build, AMR will not independently delete folders, user profiles, settings, shared data, or registry metadata. Any cleanup performed by the vendor's own uninstaller is controlled by that uninstaller. Continue?"
-        $confirm = Show-AMRMessage $preview 'Confirm Complete Uninstall' YesNo Warning
+        $confirm = Show-AMRMessageGlass $preview 'Confirm Complete Uninstall' YesNo Warning
         if ($confirm -ne [System.Windows.MessageBoxResult]::Yes) { return }
     } else {
-        $confirm = Show-AMRMessage ("Uninstall the following application(s)? Registered apps use their native uninstaller. Portable apps are removed by deleting only their confirmed PortableApps folder, even in this mode.`n`n" + (($selected | ForEach-Object { '• ' + $_.Name }) -join "`n")) 'Confirm Uninstall' YesNo Warning
+        $confirm = Show-AMRMessageGlass ("Uninstall the following application(s)? Registered apps use their native uninstaller. Portable apps are removed by deleting only their confirmed PortableApps folder, even in this mode.`n`n" + (($selected | ForEach-Object { '• ' + $_.Name }) -join "`n")) 'Confirm Uninstall' YesNo Warning
         if ($confirm -ne [System.Windows.MessageBoxResult]::Yes) { return }
     }
 
@@ -24254,7 +28033,7 @@ function Invoke-AMRSelectedUninstall {
     $script:ProgressBar.IsIndeterminate = $false
     $script:ProgressBar.Value = 100
     $script:ProgressText.Text = "Uninstall finished: $success succeeded, $failed failed."
-    Show-AMRMessage ("Uninstall summary`n`nSucceeded: $success`nFailed or unsupported: $failed`nAMR extra folders removed: 0 (safety mode)`n`nSome uninstallers may request a restart.") 'AMR Uninstall Summary' OK Information | Out-Null
+    Show-AMRMessageGlass ("Uninstall summary`n`nSucceeded: $success`nFailed or unsupported: $failed`nAMR extra folders removed: 0 (safety mode)`n`nSome uninstallers may request a restart.") 'AMR Uninstall Summary' OK Information | Out-Null
 }
 
 # BUTTON BINDINGS
@@ -24276,6 +28055,7 @@ function Invoke-AMRSelectedUninstall {
 
 (C 'UninstallSelectedBtn').Add_Click({ Invoke-AMRSelectedUninstall })
 
+Add-AMRStartupMark 'L24581 before-MegaCustomizeEngine'
 # --- 8. MEGA CUSTOMIZE EXECUTION ENGINE (37 CUSTOMIZATION OPTIONS) ---
 (C 'ApplyCustomizeBtn').Add_Click({
     Write-AMRLog "Applying selected Windows customizations..." INFO Customize
@@ -24499,9 +28279,9 @@ function Invoke-AMRSelectedUninstall {
             Write-AMRLog "Restarting File Explorer to apply desktop & registry changes..." INFO Customize
             Stop-Process -Name explorer -Force -ErrorAction SilentlyContinue
         }
-        Show-AMRMessage "Applied $appliedSuccessCount customization tweak(s) successfully!" "Customization Complete" OK Information | Out-Null
+        Show-AMRMessageGlass "Applied $appliedSuccessCount customization tweak(s) successfully!" "Customization Complete" OK Information | Out-Null
     } else {
-        Show-AMRMessage "Please select at least one tweak to apply." "Notice" OK Warning | Out-Null
+        Show-AMRMessageGlass "Please select at least one tweak to apply." "Notice" OK Warning | Out-Null
     }
     $script:CurrentTweakName = $null; $script:CurrentTweakSource = $null
 })
@@ -24590,7 +28370,7 @@ foreach ($tweakName in $script:AMRCustomizeCheckboxNames) {
     $infoButton.BorderThickness = [System.Windows.Thickness]::new(1)
     $infoButton.ToolTip = 'Click for details about this customization'
     $infoButton.Tag = [string]$script:AMRCustomizeInfo[$tweakName]
-    $infoButton.Add_Click({ param($sender,$e) [void](Show-AMRMessage -Message ([string]$sender.Tag) -Title 'AMR | Customization Information' -Buttons OK -Icon Information) })
+    $infoButton.Add_Click({ param($sender,$e) [void](Show-AMRMessageGlass -Message ([string]$sender.Tag) -Title 'AMR | Customization Information' -Buttons OK -Icon Information) })
     [System.Windows.Controls.Grid]::SetColumn($infoButton,1)
     [void]$rowGrid.Children.Add($infoButton)
     $rowBorder = New-Object System.Windows.Controls.Border
@@ -24625,6 +28405,7 @@ foreach ($tweakName in $script:AMRCustomizeCheckboxNames) {
     }.GetNewClosure())
 }
 
+Add-AMRStartupMark 'L24930 before-CustomizationPolish'
 # --- Customization interaction polish (lightweight; preserves selected-state visuals) ---
 # Keep the existing blue selection fill + pop animation. Hover only adds a subtle
 # surface tint and border response; it does not animate expensive DropShadow blur.
@@ -24798,36 +28579,37 @@ foreach ($name in $script:AMRBasicCheckboxNames) {
     Write-AMRLog 'Cleared selected tweaks in the right Basic Tweaks panel.' INFO Customize
 })
 (C 'RestoreDefaultsBtn').Add_Click({
-    $answer = Show-AMRMessage 'Restore Defaults will restore the original Registry values, supported Windows service startup/running states, active Power Plan, and Hibernate state captured before the first change. It cannot recover deleted temporary files or Recycle Bin contents. Continue?' 'Restore Defaults' YesNo Warning
+    $answer = Show-AMRMessageGlass 'Restore Defaults will restore the original Registry values, supported Windows service startup/running states, active Power Plan, and Hibernate state captured before the first change. It cannot recover deleted temporary files or Recycle Bin contents. Continue?' 'Restore Defaults' YesNo Warning
     if ($answer -ne 'Yes') { return }
     try {
         $result = Restore-AMRTweakBaseline -Source 'Customize'
-        Show-AMRMessage ("Restore finished. Restored: {0} / {1}; Failed: {2}. Scope: {3}. Check Tweaks Audit for per-setting details." -f $result.Restored,$result.Total,$result.Failed,$result.Scope) 'Restore Defaults' OK $(if($result.Failed -eq 0 -and $result.Total -gt 0){'Information'}else{'Warning'}) | Out-Null
+        Show-AMRMessageGlass ("Restore finished. Restored: {0} / {1}; Failed: {2}. Scope: {3}. Check Tweaks Audit for per-setting details." -f $result.Restored,$result.Total,$result.Failed,$result.Scope) 'Restore Defaults' OK $(if($result.Failed -eq 0 -and $result.Total -gt 0){'Information'}else{'Warning'}) | Out-Null
     } catch {
         Write-AMRLog "Restore Defaults failed: $_" ERROR Tweaks
-        Show-AMRMessage "Restore Defaults failed: $_" 'Restore Defaults' OK Error | Out-Null
+        Show-AMRMessageGlass "Restore Defaults failed: $_" 'Restore Defaults' OK Error | Out-Null
     }
 })
 
 
 (C 'RestoreBasicDefaultsBtn').Add_Click({
-    $answer = Show-AMRMessage 'Restore Defaults on the RIGHT panel will restore only original states captured by Basic Tweaks (Registry, supported services, Power Plan, and Hibernate). It will not affect left-side Customize settings or recover deleted files. Continue?' 'Restore Basic Tweaks Defaults' YesNo Warning
+    $answer = Show-AMRMessageGlass 'Restore Defaults on the RIGHT panel will restore only original states captured by Basic Tweaks (Registry, supported services, Power Plan, and Hibernate). It will not affect left-side Customize settings or recover deleted files. Continue?' 'Restore Basic Tweaks Defaults' YesNo Warning
     if ($answer -ne 'Yes') { return }
     try {
         $result = Restore-AMRTweakBaseline -Source 'Basic Tweaks'
-        Show-AMRMessage ("Right-side restore finished. Restored: {0} / {1}; Failed: {2}. Scope: {3}. Check Tweaks Audit for details." -f $result.Restored,$result.Total,$result.Failed,$result.Scope) 'Restore Basic Tweaks Defaults' OK $(if($result.Failed -eq 0 -and $result.Total -gt 0){'Information'}else{'Warning'}) | Out-Null
+        Show-AMRMessageGlass ("Right-side restore finished. Restored: {0} / {1}; Failed: {2}. Scope: {3}. Check Tweaks Audit for details." -f $result.Restored,$result.Total,$result.Failed,$result.Scope) 'Restore Basic Tweaks Defaults' OK $(if($result.Failed -eq 0 -and $result.Total -gt 0){'Information'}else{'Warning'}) | Out-Null
     } catch {
         Write-AMRLog "Right-side Restore Defaults failed: $_" ERROR Tweaks
-        Show-AMRMessage "Restore failed: $_" 'Restore Basic Tweaks Defaults' OK Error | Out-Null
+        Show-AMRMessageGlass "Restore failed: $_" 'Restore Basic Tweaks Defaults' OK Error | Out-Null
     }
 })
 
 (C 'BasicPresetEssentialBtn').Add_Click({ Set-AMRBasicPreset -Preset Essential })
 (C 'BasicPresetMinimalBtn').Add_Click({ Set-AMRBasicPreset -Preset Minimal })
 (C 'BasicPresetMediumBtn').Add_Click({ Set-AMRBasicPreset -Preset Medium })
+Add-AMRStartupMark 'L25130 before-UpdateTweakSelectionCounts'
 Update-AMRTweakSelectionCounts
 (C 'BasicPresetAdvancedBtn').Add_Click({
-    $answer = Show-AMRMessage 'Advanced selects ALL 45 available Basic Tweaks, including power, hibernation, location, remote access and Windows feature changes. Review every checked option carefully. Nothing is applied until you press Apply. Continue with selection only?' 'Advanced preset' YesNo Warning
+    $answer = Show-AMRMessageGlass 'Advanced selects ALL 45 available Basic Tweaks, including power, hibernation, location, remote access and Windows feature changes. Review every checked option carefully. Nothing is applied until you press Apply. Continue with selection only?' 'Advanced preset' YesNo Warning
     if ($answer -eq 'Yes') { Set-AMRBasicPreset -Preset Advanced }
 })
 
@@ -24863,7 +28645,7 @@ Update-AMRTweakSelectionCounts
         if ((C 'btEmptyRecycleBin').IsChecked -eq $true) {
             $script:CurrentTweakName = [string](C 'btEmptyRecycleBin').Content
             $script:CurrentTweakSource = 'Basic Tweaks'
-            $answer = Show-AMRMessage 'This permanently empties the Recycle Bin. Continue?' 'Confirm Recycle Bin cleanup' YesNo Warning
+            $answer = Show-AMRMessageGlass 'This permanently empties the Recycle Bin. Continue?' 'Confirm Recycle Bin cleanup' YesNo Warning
             if ($answer -eq 'Yes') {
                 $beforeBin = Get-AMRRecycleBinSnapshot
                 $binExecution = 'Success'; $binError = $null
@@ -24927,7 +28709,7 @@ Update-AMRTweakSelectionCounts
             $plans = (& powercfg /list 2>$null) -join "`n"
             $match = [regex]::Match($plans, '([a-fA-F0-9-]{36}).*\(High performance\)', 'IgnoreCase')
             if ($match.Success) { if (Invoke-AMRAuditedPowerPlan -Guid $match.Groups[1].Value -TweakName (Get-AMRTweakContext)) { $count++ } }
-            else { Show-AMRMessage 'High Performance plan was not found on this device. No power plan was changed.' 'Power plan unavailable' OK Information | Out-Null }
+            else { Show-AMRMessageGlass 'High Performance plan was not found on this device. No power plan was changed.' 'Power plan unavailable' OK Information | Out-Null }
         }
         if ((C 'btGameMode').IsChecked -eq $true) {
             $script:CurrentTweakName = [string](C 'btGameMode').Content
@@ -25043,7 +28825,7 @@ Update-AMRTweakSelectionCounts
         if ((C 'btDisableHibernation').IsChecked -eq $true) {
             $script:CurrentTweakName = [string](C 'btDisableHibernation').Content
             $script:CurrentTweakSource = 'Basic Tweaks'
-            $answer = Show-AMRMessage 'Disabling hibernation removes the hibernation file and disables Hibernate (and may disable Fast Startup). Continue?' 'Confirm hibernation change' YesNo Warning
+            $answer = Show-AMRMessageGlass 'Disabling hibernation removes the hibernation file and disables Hibernate (and may disable Fast Startup). Continue?' 'Confirm hibernation change' YesNo Warning
             if ($answer -eq 'Yes') { if (Invoke-AMRAuditedHibernationOff -TweakName (Get-AMRTweakContext)) { $count++ } }
         }
         if ((C 'btDisableStartAppSuggestions').IsChecked -eq $true) {
@@ -25132,20 +28914,20 @@ Update-AMRTweakSelectionCounts
         if ((C 'btDisableRemoteAssistance').IsChecked -eq $true) {
             $script:CurrentTweakName = [string](C 'btDisableRemoteAssistance').Content
             $script:CurrentTweakSource = 'Basic Tweaks'
-            $remoteAnswer = Show-AMRMessage 'This disables incoming Windows Remote Assistance invitations for this computer. Remote support may no longer work. Continue?' 'Remote Assistance protection' YesNo Warning
+            $remoteAnswer = Show-AMRMessageGlass 'This disables incoming Windows Remote Assistance invitations for this computer. Remote support may no longer work. Continue?' 'Remote Assistance protection' YesNo Warning
             if ($remoteAnswer -eq 'Yes') {
                 if (Set-AMRRegistryKey -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Remote Assistance' -Name 'fAllowToGetHelp' -Value 0) { $count++ }
             }
         }
         if ($restartExplorer) {
-            $answer = Show-AMRMessage 'Some Explorer changes may need File Explorer to restart. Restart it now?' 'Refresh File Explorer' YesNo Question
+            $answer = Show-AMRMessageGlass 'Some Explorer changes may need File Explorer to restart. Restart it now?' 'Refresh File Explorer' YesNo Question
             if ($answer -eq 'Yes') { Stop-Process -Name explorer -Force -ErrorAction SilentlyContinue; Start-Sleep -Milliseconds 700; Start-Process explorer.exe }
         }
-        if ($count -gt 0) { Show-AMRMessage "Applied $count basic tweak action(s). Some changes may require sign-out or restart." 'Basic Tweaks' OK Information | Out-Null }
-        else { Show-AMRMessage 'Select at least one tweak to apply.' 'Basic Tweaks' OK Warning | Out-Null }
+        if ($count -gt 0) { Show-AMRMessageGlass "Applied $count basic tweak action(s). Some changes may require sign-out or restart." 'Basic Tweaks' OK Information | Out-Null }
+        else { Show-AMRMessageGlass 'Select at least one tweak to apply.' 'Basic Tweaks' OK Warning | Out-Null }
     } catch {
         Write-AMRLog ("Basic tweaks error: {0}" -f $_.Exception.Message) ERROR Customize
-        Show-AMRMessage ("A tweak could not be completed: {0}" -f $_.Exception.Message) 'Basic Tweaks Error' OK Error | Out-Null
+        Show-AMRMessageGlass ("A tweak could not be completed: {0}" -f $_.Exception.Message) 'Basic Tweaks Error' OK Error | Out-Null
     }
 })
 
@@ -25241,16 +29023,16 @@ function Invoke-AMROptimizeTool {
  param([string]$Key)
  try {
   switch ($Key) {
-   'TelemetryOff' { $script:CurrentTweakName='Disable telemetry service'; $script:CurrentTweakSource='Optimize'; Set-AMRAuditedService -Name 'DiagTrack' -StartupType Disabled -StopAfter $true | Out-Null; Set-AMRRegistryKey -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\DataCollection' -Name 'AllowTelemetry' -Value 0 | Out-Null; Show-AMRMessage 'Diagnostic tracking restrictions were applied where supported. Some Windows editions may ignore policy settings.' 'Optimize' OK Information | Out-Null; return }
-   'BackgroundOff' { Set-AMRRegistryKey -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\BackgroundAccessApplications' -Name 'GlobalUserDisabled' -Value 1 | Out-Null; Show-AMRMessage 'Background app access was disabled for supported apps.' 'Optimize' OK Information | Out-Null; return }
-   'CortanaOff' { Set-AMRRegistryKey -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search' -Name 'AllowCortana' -Value 0 | Out-Null; Show-AMRMessage 'Cortana policy was applied where supported. This setting may not affect newer Windows Search versions.' 'Optimize' OK Information | Out-Null; return }
+   'TelemetryOff' { $script:CurrentTweakName='Disable telemetry service'; $script:CurrentTweakSource='Optimize'; Set-AMRAuditedService -Name 'DiagTrack' -StartupType Disabled -StopAfter $true | Out-Null; Set-AMRRegistryKey -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\DataCollection' -Name 'AllowTelemetry' -Value 0 | Out-Null; Show-AMRMessageGlass 'Diagnostic tracking restrictions were applied where supported. Some Windows editions may ignore policy settings.' 'Optimize' OK Information | Out-Null; return }
+   'BackgroundOff' { Set-AMRRegistryKey -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\BackgroundAccessApplications' -Name 'GlobalUserDisabled' -Value 1 | Out-Null; Show-AMRMessageGlass 'Background app access was disabled for supported apps.' 'Optimize' OK Information | Out-Null; return }
+   'CortanaOff' { Set-AMRRegistryKey -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search' -Name 'AllowCortana' -Value 0 | Out-Null; Show-AMRMessageGlass 'Cortana policy was applied where supported. This setting may not affect newer Windows Search versions.' 'Optimize' OK Information | Out-Null; return }
    'PowerPlan' { powercfg /getactivescheme; return }
-   'Ultimate' { $p=(powercfg /list | Select-String 'Ultimate Performance').ToString(); if($p -match '([a-fA-F0-9-]{36})'){ powercfg /setactive $matches[1] } else { powercfg -duplicatescheme e9a42b02-d5df-448d-aa00-03f14749eb61; Show-AMRMessage 'Ultimate Performance scheme was requested. Check Power Options to confirm availability.' 'Optimize' OK Information | Out-Null }; return }
+   'Ultimate' { $p=(powercfg /list | Select-String 'Ultimate Performance').ToString(); if($p -match '([a-fA-F0-9-]{36})'){ powercfg /setactive $matches[1] } else { powercfg -duplicatescheme e9a42b02-d5df-448d-aa00-03f14749eb61; Show-AMRMessageGlass 'Ultimate Performance scheme was requested. Check Power Options to confirm availability.' 'Optimize' OK Information | Out-Null }; return }
    'PowerOptions' { Start-Process powercfg.cpl; return }
    'AdvancedPower' { Start-Process control.exe -ArgumentList '/name Microsoft.PowerOptions'; return }
    'EnergyReport' { $f=Join-Path ([Environment]::GetFolderPath('Desktop')) 'AMR-Energy-Report.html'; powercfg /energy /duration 60 /output $f; if(Test-Path $f){Start-Process $f}; return }
    'BatteryReport' { $f=Join-Path ([Environment]::GetFolderPath('Desktop')) 'AMR-Battery-Report.html'; powercfg /batteryreport /output $f; if(Test-Path $f){Start-Process $f}; return }
-   'FastStartupOff' { Set-AMRRegistryKey -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power' -Name 'HiberbootEnabled' -Value 0 | Out-Null; Show-AMRMessage 'Fast Startup was disabled. Restart Windows to apply.' 'Optimize' OK Information | Out-Null; return }
+   'FastStartupOff' { Set-AMRRegistryKey -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power' -Name 'HiberbootEnabled' -Value 0 | Out-Null; Show-AMRMessageGlass 'Fast Startup was disabled. Restart Windows to apply.' 'Optimize' OK Information | Out-Null; return }
    'FastStartupOn' { Set-AMRRegistryKey -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power' -Name 'HiberbootEnabled' -Value 1 | Out-Null; return }
    'StartupApps' { Start-Process 'ms-settings:startupapps'; return }
    'TaskManager' { Start-Process taskmgr.exe; return }
@@ -25261,17 +29043,17 @@ function Invoke-AMROptimizeTool {
    'TempSettings' { Start-Process 'ms-settings:temporaryfiles'; return }
    'OptimizeDrives' { Start-Process dfrgui.exe; return }
    'DriveSpace' { Get-PSDrive -PSProvider FileSystem | Select-Object Name,Root,@{N='UsedGB';E={[math]::Round($_.Used/1GB,2)}},@{N='FreeGB';E={[math]::Round($_.Free/1GB,2)}} | Out-GridView -Title 'Drive Space'; return }
-   'ClearUserTemp' { if((Show-AMRMessage 'Delete files from your current user TEMP folder? Files in use may remain.' 'Confirm Cleanup' YesNo Warning) -ne 'Yes'){return}; $cleanupResult=Invoke-AMRVerifiedTempCleanup -Path $env:TEMP -Label 'User TEMP'; Write-AMRLog ("User TEMP cleanup verified: {0} top-level entries deleted; {1} failed." -f $cleanupResult.Deleted,$cleanupResult.Failed) SUCCESS Cleanup; Show-AMRMessage ("User temporary-file cleanup verified.`nDeleted entries: {0}`nFailed: {1}" -f $cleanupResult.Deleted,$cleanupResult.Failed) 'Optimize' OK Information | Out-Null; return }
-   'ClearWindowsTemp' { if((Show-AMRMessage 'Delete files from the Windows TEMP folder? Administrator rights may be required.' 'Confirm Cleanup' YesNo Warning) -ne 'Yes'){return}; $cleanupResult=Invoke-AMRVerifiedTempCleanup -Path (Join-Path $env:windir 'Temp') -Label 'Windows TEMP'; Write-AMRLog ("Windows TEMP cleanup verified: {0} top-level entries deleted; {1} failed." -f $cleanupResult.Deleted,$cleanupResult.Failed) SUCCESS Cleanup; Show-AMRMessage ("Windows temporary-file cleanup verified.`nDeleted entries: {0}`nFailed: {1}" -f $cleanupResult.Deleted,$cleanupResult.Failed) 'Optimize' OK Information | Out-Null; return }
+   'ClearUserTemp' { if((Show-AMRMessageGlass 'Delete files from your current user TEMP folder? Files in use may remain.' 'Confirm Cleanup' YesNo Warning) -ne 'Yes'){return}; $cleanupResult=Invoke-AMRVerifiedTempCleanup -Path $env:TEMP -Label 'User TEMP'; Write-AMRLog ("User TEMP cleanup verified: {0} top-level entries deleted; {1} failed." -f $cleanupResult.Deleted,$cleanupResult.Failed) SUCCESS Cleanup; Show-AMRMessageGlass ("User temporary-file cleanup verified.`nDeleted entries: {0}`nFailed: {1}" -f $cleanupResult.Deleted,$cleanupResult.Failed) 'Optimize' OK Information | Out-Null; return }
+   'ClearWindowsTemp' { if((Show-AMRMessageGlass 'Delete files from the Windows TEMP folder? Administrator rights may be required.' 'Confirm Cleanup' YesNo Warning) -ne 'Yes'){return}; $cleanupResult=Invoke-AMRVerifiedTempCleanup -Path (Join-Path $env:windir 'Temp') -Label 'Windows TEMP'; Write-AMRLog ("Windows TEMP cleanup verified: {0} top-level entries deleted; {1} failed." -f $cleanupResult.Deleted,$cleanupResult.Failed) SUCCESS Cleanup; Show-AMRMessageGlass ("Windows temporary-file cleanup verified.`nDeleted entries: {0}`nFailed: {1}" -f $cleanupResult.Deleted,$cleanupResult.Failed) 'Optimize' OK Information | Out-Null; return }
    'RecycleBin' { Start-Process explorer.exe -ArgumentList 'shell:RecycleBinFolder'; return }
    'InstalledApps' { Start-Process 'ms-settings:appsfeatures'; return }
    'DefaultApps' { Start-Process 'ms-settings:defaultapps'; return }
    'WindowsUpdate' { Start-Process 'ms-settings:windowsupdate'; return }
    'UpdateService' { Get-Service wuauserv | Format-List Name,Status,StartType | Out-GridView -Title 'Windows Update Service'; return }
-   'RestartUpdate' { if((Show-AMRMessage 'Restart the Windows Update service now?' 'Confirm Service Restart' YesNo Warning) -ne 'Yes'){return}; Restart-Service wuauserv -Force -ErrorAction Stop; return }
-   'SFC' { if((Show-AMRMessage 'Run System File Checker? This may take several minutes.' 'Confirm Repair' YesNo Warning) -ne 'Yes'){return}; Start-Process powershell.exe -Verb RunAs -ArgumentList '-NoExit','-Command','sfc /scannow'; return }
+   'RestartUpdate' { if((Show-AMRMessageGlass 'Restart the Windows Update service now?' 'Confirm Service Restart' YesNo Warning) -ne 'Yes'){return}; Restart-Service wuauserv -Force -ErrorAction Stop; return }
+   'SFC' { if((Show-AMRMessageGlass 'Run System File Checker? This may take several minutes.' 'Confirm Repair' YesNo Warning) -ne 'Yes'){return}; Start-Process powershell.exe -Verb RunAs -ArgumentList '-NoExit','-Command','sfc /scannow'; return }
    'DISMCheck' { Start-Process powershell.exe -Verb RunAs -ArgumentList '-NoExit','-Command','DISM /Online /Cleanup-Image /CheckHealth'; return }
-   'DISMRepair' { if((Show-AMRMessage 'Run DISM RestoreHealth? This may take a while and use Windows Update.' 'Confirm Repair' YesNo Warning) -ne 'Yes'){return}; Start-Process powershell.exe -Verb RunAs -ArgumentList '-NoExit','-Command','DISM /Online /Cleanup-Image /RestoreHealth'; return }
+   'DISMRepair' { if((Show-AMRMessageGlass 'Run DISM RestoreHealth? This may take a while and use Windows Update.' 'Confirm Repair' YesNo Warning) -ne 'Yes'){return}; Start-Process powershell.exe -Verb RunAs -ArgumentList '-NoExit','-Command','DISM /Online /Cleanup-Image /RestoreHealth'; return }
    'Troubleshoot' { Start-Process 'ms-settings:troubleshoot'; return }
    'SystemProtection' { Start-Process SystemPropertiesProtection.exe; return }
    'RestorePoint' { Start-Process powershell.exe -Verb RunAs -ArgumentList '-NoExit','-Command','Checkpoint-Computer -Description "AMR Utility Restore Point" -RestorePointType MODIFY_SETTINGS'; return }
@@ -25284,7 +29066,7 @@ function Invoke-AMROptimizeTool {
    'StartupFolder' { Start-Process explorer.exe -ArgumentList 'shell:startup'; return }
    'NetworkStatus' { Start-Process 'ms-settings:network-status'; return }
    'InternetOptions' { Start-Process inetcpl.cpl; return }
-   'FlushDNS' { Invoke-AMRNativeCommand -FilePath 'ipconfig.exe' -ArgumentList @('/flushdns') -Operation 'Flush DNS resolver cache' | Out-Null; Show-AMRMessage 'DNS resolver cache flush command returned exit code 0.' 'Optimize' OK Information | Out-Null; return }
+   'FlushDNS' { Invoke-AMRNativeCommand -FilePath 'ipconfig.exe' -ArgumentList @('/flushdns') -Operation 'Flush DNS resolver cache' | Out-Null; Show-AMRMessageGlass 'DNS resolver cache flush command returned exit code 0.' 'Optimize' OK Information | Out-Null; return }
    'DeliveryOptimization' { Start-Process 'ms-settings:delivery-optimization'; return }
    'Privacy' { Start-Process 'ms-settings:privacy'; return }
    'SearchPrivacy' { Start-Process 'ms-settings:search-permissions'; return }
@@ -25293,7 +29075,7 @@ function Invoke-AMROptimizeTool {
    'ResourceMonitor' { Start-Process resmon.exe; return }
    'PerfReport' { Start-Process powershell.exe -Verb RunAs -ArgumentList '-NoExit','-Command','perfmon /report'; return }
   }
- } catch { Show-AMRMessage ("Could not complete the selected optimization: " + $_.Exception.Message) 'Optimize' OK Error | Out-Null; Write-AMRLog ("Optimize tool failed [$Key]: " + $_.Exception.Message) ERROR Optimize }
+ } catch { Show-AMRMessageGlass ("Could not complete the selected optimization: " + $_.Exception.Message) 'Optimize' OK Error | Out-Null; Write-AMRLog ("Optimize tool failed [$Key]: " + $_.Exception.Message) ERROR Optimize }
 }
 function Get-AMRToolInfoText {
  param([Parameter(Mandatory=$true)]$Tool,[string]$Area='Tool')
@@ -25387,7 +29169,7 @@ function New-AMRCompactToolCard {
  $info=New-Object System.Windows.Controls.Button; $info.Content='i'; $info.Width=23; $info.Height=23; $info.Padding='0'; $info.FontSize=12; $info.FontWeight='Bold'
  $info.Background=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#B89A62'); $info.Foreground=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#17212B')
  $info.BorderThickness='0'; $info.ToolTip=$null; $info.HorizontalAlignment='Center'; $info.VerticalAlignment='Center'
- $info.Tag=$Description; $info.Add_Click({ Show-AMRMessage ([string]$this.Tag) 'Tool Information' OK Information | Out-Null }.GetNewClosure())
+ $info.Tag=$Description; $info.Add_Click({ Show-AMRMessageGlass ([string]$this.Tag) 'Tool Information' OK Information | Out-Null }.GetNewClosure())
  $info.Add_MouseEnter({try{$this.Background=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#D8BC83')}catch{}}.GetNewClosure())
  $info.Add_MouseLeave({try{$this.Background=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#B89A62')}catch{}}.GetNewClosure())
  [System.Windows.Controls.Grid]::SetColumn($info,1); [void]$layout.Children.Add($info)
@@ -25405,6 +29187,7 @@ function Update-AMROptimizeView {
 }
 (C 'OptSearchBox').Add_TextChanged({ Update-AMROptimizeView })
 (C 'OptCategoryFilter').Add_SelectionChanged({ Update-AMROptimizeView })
+Add-AMRStartupMark 'L25710 before-UpdateOptimizeView'
 Update-AMROptimizeView
 
 # SECURITY ENGINE - searchable, categorized security toolbox
@@ -25464,15 +29247,15 @@ function Invoke-AMRSecurityTool {
  param([Parameter(Mandatory=$true)][string]$Key)
  try {
   $adminKeys=@('DefenderOn','FirewallOn','ActivityOff','QuickScan','FullScan','DefenderUpdate')
-  if ($Key -in $adminKeys -and -not (Test-AMRAdmin)) { Show-AMRMessage 'This action may require Administrator privileges. Reopen Amr Utility as Administrator and try again.' 'Administrator Required' OK Warning | Out-Null; return }
+  if ($Key -in $adminKeys -and -not (Test-AMRAdmin)) { Show-AMRMessageGlass 'This action may require Administrator privileges. Reopen Amr Utility as Administrator and try again.' 'Administrator Required' OK Warning | Out-Null; return }
   switch ($Key) {
    'DefenderOn' { Set-MpPreference -DisableRealtimeMonitoring $false -ErrorAction Stop; $msg='Microsoft Defender real-time protection was enabled.'; break }
    'FirewallOn' { Set-NetFirewallProfile -Profile Domain,Private,Public -Enabled True -ErrorAction Stop; $msg='Windows Firewall was enabled for Domain, Private, and Public profiles.'; break }
    'ActivityOff' { Set-AMRRegistryKey -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\System' -Name PublishUserActivities -Value 0 | Out-Null; Set-AMRRegistryKey -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\System' -Name UploadUserActivities -Value 0 | Out-Null; $msg='Activity History collection policy was disabled.'; break }
    'OpenSecurity' { Start-Process 'windowsdefender:'; return }
    'VirusUI' { Start-Process 'windowsdefender://threat'; return }
-   'QuickScan' { if((Show-AMRMessage 'Start a Microsoft Defender quick scan now?' 'Confirm Quick Scan' YesNo Warning) -ne 'Yes'){return}; Start-MpScan -ScanType QuickScan -ErrorAction Stop; $msg='Quick scan request completed.'; break }
-   'FullScan' { if((Show-AMRMessage 'Start a full Microsoft Defender scan? It may take a long time.' 'Confirm Full Scan' YesNo Warning) -ne 'Yes'){return}; Start-MpScan -ScanType FullScan -ErrorAction Stop; $msg='Full scan request completed.'; break }
+   'QuickScan' { if((Show-AMRMessageGlass 'Start a Microsoft Defender quick scan now?' 'Confirm Quick Scan' YesNo Warning) -ne 'Yes'){return}; Start-MpScan -ScanType QuickScan -ErrorAction Stop; $msg='Quick scan request completed.'; break }
+   'FullScan' { if((Show-AMRMessageGlass 'Start a full Microsoft Defender scan? It may take a long time.' 'Confirm Full Scan' YesNo Warning) -ne 'Yes'){return}; Start-MpScan -ScanType FullScan -ErrorAction Stop; $msg='Full scan request completed.'; break }
    'DefenderUpdate' { Update-MpSignature -ErrorAction Stop; $msg='Microsoft Defender security intelligence update requested.'; break }
    'DefenderStatus' { $msg=(Get-MpComputerStatus | Format-List * | Out-String); break }
    'ThreatHistory' { Start-Process 'windowsdefender://history'; return }
@@ -25520,8 +29303,8 @@ function Invoke-AMRSecurityTool {
   }
   Write-AMRLog ("Security tool completed: {0}" -f $Key) SUCCESS Security
   if ([string]::IsNullOrWhiteSpace([string]$msg)) {$msg='Command completed.'}
-  Show-AMRMessage ([string]$msg) 'Security Tool Result' OK Information | Out-Null
- } catch { Write-AMRLog ("Security tool failed ({0}): {1}" -f $Key,$_.Exception.Message) ERROR Security; Show-AMRMessage ("Security tool failed:`n$($_.Exception.Message)") 'Security Tool Error' OK Error | Out-Null }
+  Show-AMRMessageGlass ([string]$msg) 'Security Tool Result' OK Information | Out-Null
+ } catch { Write-AMRLog ("Security tool failed ({0}): {1}" -f $Key,$_.Exception.Message) ERROR Security; Show-AMRMessageGlass ("Security tool failed:`n$($_.Exception.Message)") 'Security Tool Error' OK Error | Out-Null }
 }
 function Update-AMRSecurityView {
  $grid=C 'SecToolsGrid'; $grid.Children.Clear(); $search=[string](C 'SecSearchBox').Text
@@ -25537,6 +29320,7 @@ function Update-AMRSecurityView {
 }
 (C 'SecSearchBox').Add_TextChanged({Update-AMRSecurityView})
 (C 'SecCategoryFilter').Add_SelectionChanged({Update-AMRSecurityView})
+Add-AMRStartupMark 'L25842 before-UpdateSecurityView'
 Update-AMRSecurityView
 
 
@@ -25597,7 +29381,7 @@ function Invoke-AMRSystemTool {
  param([Parameter(Mandatory=$true)][string]$Key)
  try {
   $adminKeys=@('Ultimate','FastStartupOff','FastStartupOn','RestorePoint','SFC','DISMRepair','RestartWuauserv')
-  if ($Key -in $adminKeys -and -not (Test-AMRAdmin)) { Show-AMRMessage 'This action requires Administrator privileges. Reopen Amr Utility as Administrator and try again.' 'Administrator Required' OK Warning | Out-Null; return }
+  if ($Key -in $adminKeys -and -not (Test-AMRAdmin)) { Show-AMRMessageGlass 'This action requires Administrator privileges. Reopen Amr Utility as Administrator and try again.' 'Administrator Required' OK Warning | Out-Null; return }
   switch ($Key) {
    'PowerPlan' { $msg=(powercfg /getactivescheme 2>&1 | Out-String); break }
    'Ultimate' { powercfg -duplicatescheme e9a42b02-d5df-448d-aa00-03f14749eb61 | Out-Null; $scheme=(powercfg /list | Select-String 'Ultimate Performance' | Select-Object -First 1); if($scheme -and $scheme.Line -match '([a-f0-9-]{36})'){powercfg /setactive $matches[1] | Out-Null}; $msg='Ultimate Performance plan command completed. Check the active plan in Power Options.'; break }
@@ -25614,10 +29398,10 @@ function Invoke-AMRSystemTool {
    'BCD' { $msg=(bcdedit /enum 2>&1 | Out-String); break }
    'Recovery' { Start-Process 'ms-settings:recovery'; return }
    'Protection' { Start-Process SystemPropertiesProtection.exe; return }
-   'RestorePoint' { if((Show-AMRMessage 'Create a Windows restore point now? This may take a moment.' 'Confirm Restore Point' YesNo Warning) -ne 'Yes'){return}; Checkpoint-Computer -Description ('AMR Utility {0:yyyy-MM-dd HH:mm}' -f (Get-Date)) -RestorePointType MODIFY_SETTINGS -ErrorAction Stop; $msg='System restore point creation requested successfully.'; break }
-   'SFC' { if((Show-AMRMessage 'Run System File Checker now? It may take several minutes.' 'Confirm SFC Scan' YesNo Warning) -ne 'Yes'){return}; Start-Process cmd.exe -Verb RunAs -ArgumentList '/k sfc /scannow'; return }
+   'RestorePoint' { if((Show-AMRMessageGlass 'Create a Windows restore point now? This may take a moment.' 'Confirm Restore Point' YesNo Warning) -ne 'Yes'){return}; Checkpoint-Computer -Description ('AMR Utility {0:yyyy-MM-dd HH:mm}' -f (Get-Date)) -RestorePointType MODIFY_SETTINGS -ErrorAction Stop; $msg='System restore point creation requested successfully.'; break }
+   'SFC' { if((Show-AMRMessageGlass 'Run System File Checker now? It may take several minutes.' 'Confirm SFC Scan' YesNo Warning) -ne 'Yes'){return}; Start-Process cmd.exe -Verb RunAs -ArgumentList '/k sfc /scannow'; return }
    'DISMCheck' { $msg=(DISM.exe /Online /Cleanup-Image /CheckHealth 2>&1 | Out-String); break }
-   'DISMRepair' { if((Show-AMRMessage 'Run DISM RestoreHealth? This may take a long time and requires internet access in some cases.' 'Confirm DISM Repair' YesNo Warning) -ne 'Yes'){return}; Start-Process cmd.exe -Verb RunAs -ArgumentList '/k DISM /Online /Cleanup-Image /RestoreHealth'; return }
+   'DISMRepair' { if((Show-AMRMessageGlass 'Run DISM RestoreHealth? This may take a long time and requires internet access in some cases.' 'Confirm DISM Repair' YesNo Warning) -ne 'Yes'){return}; Start-Process cmd.exe -Verb RunAs -ArgumentList '/k DISM /Online /Cleanup-Image /RestoreHealth'; return }
    'CHKDSK' { $msg=(chkdsk.exe $env:SystemDrive /scan 2>&1 | Out-String); break }
    'Troubleshoot' { Start-Process 'ms-settings:troubleshoot'; return }
    'EventViewer' { Start-Process eventvwr.msc; return }
@@ -25631,7 +29415,7 @@ function Invoke-AMRSystemTool {
    'TaskManager' { Start-Process taskmgr.exe; return }
    'Services' { Start-Process services.msc; return }
    'AutoServices' { $msg=(Get-CimInstance Win32_Service | Where-Object {$_.StartMode -eq 'Auto'} | Select-Object Name,State,StartMode,DisplayName | Sort-Object Name | Format-Table -AutoSize | Out-String); break }
-   'RestartWuauserv' { if((Show-AMRMessage 'Restart the Windows Update service? Downloads or updates in progress may be interrupted.' 'Confirm Service Restart' YesNo Warning) -ne 'Yes'){return}; Restart-Service wuauserv -Force -ErrorAction Stop; $msg='Windows Update service restarted.'; break }
+   'RestartWuauserv' { if((Show-AMRMessageGlass 'Restart the Windows Update service? Downloads or updates in progress may be interrupted.' 'Confirm Service Restart' YesNo Warning) -ne 'Yes'){return}; Restart-Service wuauserv -Force -ErrorAction Stop; $msg='Windows Update service restarted.'; break }
    'DeviceManager' { Start-Process devmgmt.msc; return }
    'DiskHealth' { $msg=(Get-PhysicalDisk -ErrorAction Stop | Select-Object FriendlyName,MediaType,HealthStatus,OperationalStatus,Size | Format-Table -AutoSize | Out-String); break }
    'Volumes' { $msg=(Get-Volume | Select-Object DriveLetter,FileSystemLabel,FileSystem,HealthStatus,Size,SizeRemaining | Format-Table -AutoSize | Out-String); break }
@@ -25653,8 +29437,8 @@ function Invoke-AMRSystemTool {
   }
   Write-AMRLog ("System tool completed: {0}" -f $Key) SUCCESS System
   if ([string]::IsNullOrWhiteSpace([string]$msg)) {$msg='Command completed.'}
-  Show-AMRMessage ([string]$msg) 'System Tool Result' OK Information | Out-Null
- } catch { Write-AMRLog ("System tool failed ({0}): {1}" -f $Key,$_.Exception.Message) ERROR System; Show-AMRMessage ("System tool failed:`n$($_.Exception.Message)") 'System Tool Error' OK Error | Out-Null }
+  Show-AMRMessageGlass ([string]$msg) 'System Tool Result' OK Information | Out-Null
+ } catch { Write-AMRLog ("System tool failed ({0}): {1}" -f $Key,$_.Exception.Message) ERROR System; Show-AMRMessageGlass ("System tool failed:`n$($_.Exception.Message)") 'System Tool Error' OK Error | Out-Null }
 }
 function Update-AMRSystemView {
  $grid=C 'SysToolsGrid'; $grid.Children.Clear(); $search=[string](C 'SysSearchBox').Text
@@ -25670,6 +29454,7 @@ function Update-AMRSystemView {
 }
 (C 'SysSearchBox').Add_TextChanged({Update-AMRSystemView})
 (C 'SysCategoryFilter').Add_SelectionChanged({Update-AMRSystemView})
+Add-AMRStartupMark 'L25975 before-UpdateSystemView'
 Update-AMRSystemView
 
 # NETWORK ENGINE - searchable, categorized network toolbox
@@ -25730,12 +29515,12 @@ function Invoke-AMRNetworkTool {
  param([Parameter(Mandatory=$true)][string]$Key)
  try {
   $adminKeys=@('ReleaseIP','RenewIP','ClearARP','ResetTCP','ResetWinsock','ResetBoth','RestartDNS')
-  if ($Key -in $adminKeys -and -not (Test-AMRAdmin)) { Show-AMRMessage 'This action requires Administrator privileges. Reopen Amr Utility as Administrator and try again.' 'Administrator Required' OK Warning | Out-Null; return }
+  if ($Key -in $adminKeys -and -not (Test-AMRAdmin)) { Show-AMRMessageGlass 'This action requires Administrator privileges. Reopen Amr Utility as Administrator and try again.' 'Administrator Required' OK Warning | Out-Null; return }
   switch ($Key) {
    'FlushDNS' { Clear-DnsClientCache -ErrorAction Stop; $msg='System DNS cache flushed successfully.'; break }
    'ShowDNS' { $msg=(ipconfig /displaydns 2>&1 | Out-String); break }
    'RenewIP' { Invoke-AMRNativeCommand -FilePath 'ipconfig.exe' -ArgumentList @('/renew') -Operation 'DHCP IP renewal' | Out-Null; $msg='DHCP IP address renewal command returned exit code 0.'; break }
-   'ReleaseIP' { if ((Show-AMRMessage 'This temporarily disconnects network interfaces using DHCP. Continue?' 'Confirm IP Release' YesNo Warning) -ne 'Yes') { return }; Invoke-AMRNativeCommand -FilePath 'ipconfig.exe' -ArgumentList @('/release') -Operation 'DHCP IP release' | Out-Null; $msg='DHCP release command returned exit code 0.'; break }
+   'ReleaseIP' { if ((Show-AMRMessageGlass 'This temporarily disconnects network interfaces using DHCP. Continue?' 'Confirm IP Release' YesNo Warning) -ne 'Yes') { return }; Invoke-AMRNativeCommand -FilePath 'ipconfig.exe' -ArgumentList @('/release') -Operation 'DHCP IP release' | Out-Null; $msg='DHCP release command returned exit code 0.'; break }
    'IPConfig' { $msg=(ipconfig /all 2>&1 | Out-String); break }
    'IPv4' { $msg=(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction Stop | Format-Table -AutoSize | Out-String); break }
    'IPv6' { $msg=(Get-NetIPAddress -AddressFamily IPv6 -ErrorAction Stop | Format-Table -AutoSize | Out-String); break }
@@ -25746,9 +29531,9 @@ function Invoke-AMRNetworkTool {
    'ClearARP' { Invoke-AMRNativeCommand -FilePath 'netsh.exe' -ArgumentList @('interface','ip','delete','arpcache') -Operation 'Clear ARP cache' | Out-Null; $msg='ARP cache clear command returned exit code 0.'; break }
    'Routes' { $msg=(route print | Out-String); break }
    'DNSRenew' { Clear-DnsClientCache -ErrorAction Stop; Invoke-AMRNativeCommand -FilePath 'ipconfig.exe' -ArgumentList @('/renew') -Operation 'DNS flush and DHCP renewal' | Out-Null; $msg='DNS cache cleared and DHCP renewal command returned exit code 0.'; break }
-   'ResetTCP' { if ((Show-AMRMessage 'Resetting TCP/IP can affect network configuration and may require a restart. Continue?' 'Confirm TCP/IP Reset' YesNo Warning) -ne 'Yes') { return }; Invoke-AMRNativeCommand -FilePath 'netsh.exe' -ArgumentList @('int','ip','reset') -Operation 'TCP/IP stack reset' | Out-Null; $msg='TCP/IP reset command returned exit code 0. Restart Windows to complete the reset.'; break }
-   'ResetWinsock' { if ((Show-AMRMessage 'Resetting Winsock can affect networking software and may require a restart. Continue?' 'Confirm Winsock Reset' YesNo Warning) -ne 'Yes') { return }; Invoke-AMRNativeCommand -FilePath 'netsh.exe' -ArgumentList @('winsock','reset') -Operation 'Winsock reset' | Out-Null; $msg='Winsock reset command returned exit code 0. Restart Windows to complete the reset.'; break }
-   'ResetBoth' { if ((Show-AMRMessage 'This resets TCP/IP and Winsock and may require a restart. Continue?' 'Confirm Network Reset' YesNo Warning) -ne 'Yes') { return }; Invoke-AMRNativeCommand -FilePath 'netsh.exe' -ArgumentList @('int','ip','reset') -Operation 'TCP/IP stack reset' | Out-Null; Invoke-AMRNativeCommand -FilePath 'netsh.exe' -ArgumentList @('winsock','reset') -Operation 'Winsock reset' | Out-Null; $msg='TCP/IP and Winsock reset commands both returned exit code 0. Restart Windows.'; break }
+   'ResetTCP' { if ((Show-AMRMessageGlass 'Resetting TCP/IP can affect network configuration and may require a restart. Continue?' 'Confirm TCP/IP Reset' YesNo Warning) -ne 'Yes') { return }; Invoke-AMRNativeCommand -FilePath 'netsh.exe' -ArgumentList @('int','ip','reset') -Operation 'TCP/IP stack reset' | Out-Null; $msg='TCP/IP reset command returned exit code 0. Restart Windows to complete the reset.'; break }
+   'ResetWinsock' { if ((Show-AMRMessageGlass 'Resetting Winsock can affect networking software and may require a restart. Continue?' 'Confirm Winsock Reset' YesNo Warning) -ne 'Yes') { return }; Invoke-AMRNativeCommand -FilePath 'netsh.exe' -ArgumentList @('winsock','reset') -Operation 'Winsock reset' | Out-Null; $msg='Winsock reset command returned exit code 0. Restart Windows to complete the reset.'; break }
+   'ResetBoth' { if ((Show-AMRMessageGlass 'This resets TCP/IP and Winsock and may require a restart. Continue?' 'Confirm Network Reset' YesNo Warning) -ne 'Yes') { return }; Invoke-AMRNativeCommand -FilePath 'netsh.exe' -ArgumentList @('int','ip','reset') -Operation 'TCP/IP stack reset' | Out-Null; Invoke-AMRNativeCommand -FilePath 'netsh.exe' -ArgumentList @('winsock','reset') -Operation 'Winsock reset' | Out-Null; $msg='TCP/IP and Winsock reset commands both returned exit code 0. Restart Windows.'; break }
    'RestartDNS' { Restart-Service Dnscache -Force -ErrorAction Stop; $msg='DNS Client service restart requested.'; break }
    'Troubleshooter' { Start-Process 'ms-settings:network-status'; return }
    'NetworkReset' { Start-Process 'ms-settings:network-advancedsettings'; return }
@@ -25787,10 +29572,10 @@ function Invoke-AMRNetworkTool {
   }
   Write-AMRLog ("Network tool completed: {0}" -f $Key) SUCCESS Network
   if ([string]::IsNullOrWhiteSpace([string]$msg)) { $msg='Command completed. No output was returned.' }
-  Show-AMRMessage ([string]$msg) 'Network Tool Result' OK Information | Out-Null
+  Show-AMRMessageGlass ([string]$msg) 'Network Tool Result' OK Information | Out-Null
  } catch {
   Write-AMRLog ("Network tool failed ({0}): {1}" -f $Key,$_.Exception.Message) ERROR Network
-  Show-AMRMessage ("Network tool failed:`n$($_.Exception.Message)") 'Network Tool Error' OK Error | Out-Null
+  Show-AMRMessageGlass ("Network tool failed:`n$($_.Exception.Message)") 'Network Tool Error' OK Error | Out-Null
  }
 }
 function Update-AMRNetworkView {
@@ -25807,6 +29592,7 @@ function Update-AMRNetworkView {
 }
 (C 'NetSearchBox').Add_TextChanged({ Update-AMRNetworkView })
 (C 'NetCategoryFilter').Add_SelectionChanged({ Update-AMRNetworkView })
+Add-AMRStartupMark 'L26112 before-UpdateNetworkView'
 Update-AMRNetworkView
 
 # ADVANCED DISK ANALYSIS - read-only inventory; no arbitrary drive deletion
@@ -26023,7 +29809,7 @@ function Start-AMRDISMOperation {
 })
 
 (C 'CleanupComponentRunBtn').Add_Click({
-    $answer = Show-AMRMessage 'Run the Microsoft DISM StartComponentCleanup operation? This cleans superseded component versions using Windows servicing rules. It does not use ResetBase, but the operation can take time. Continue?' 'Confirm Windows Component Cleanup' YesNo Warning
+    $answer = Show-AMRMessageGlass 'Run the Microsoft DISM StartComponentCleanup operation? This cleans superseded component versions using Windows servicing rules. It does not use ResetBase, but the operation can take time. Continue?' 'Confirm Windows Component Cleanup' YesNo Warning
     if ($answer -ne [System.Windows.MessageBoxResult]::Yes) { Write-AMRLog 'User cancelled the selected cleanup operation at confirmation.' INFO Cleanup; return }
     Start-AMRDISMOperation -Operation Clean -Arguments @('/Online','/Cleanup-Image','/StartComponentCleanup')
 })
@@ -26068,31 +29854,32 @@ function Update-AMRCleanupDiskOrganizer {
 }
 
 (C 'CleanupDiskOrganizerRefreshBtn').Add_Click({ Update-AMRCleanupDiskOrganizer })
-Update-AMRCleanupDiskOrganizer
+Add-AMRStartupMark 'L26373 before-DeferCleanupDiskOrganizer'
+Add-AMRDeferredStartupAction -Name 'CleanupDiskOrganizer' -Action { Update-AMRCleanupDiskOrganizer }
 (C 'CleanupDiskOrganizerOpenBtn').Add_Click({
     $list = C 'CleanupDiskOrganizerList'
     if (-not $list -or $list.SelectedIndex -lt 0 -or $list.SelectedIndex -ge $script:CleanupDiskOrganizerDrives.Count) {
-        Show-AMRMessage 'Select a ready drive first.' 'Disk Tool Organizers' OK Warning | Out-Null
+        Show-AMRMessageGlass 'Select a ready drive first.' 'Disk Tool Organizers' OK Warning | Out-Null
         return
     }
     $selectedDrive = $script:CleanupDiskOrganizerDrives[$list.SelectedIndex]
     if (-not [System.IO.Directory]::Exists([string]$selectedDrive.Root)) {
-        Show-AMRMessage 'The selected drive is not currently ready.' 'Disk Tool Organizers' OK Warning | Out-Null
+        Show-AMRMessageGlass 'The selected drive is not currently ready.' 'Disk Tool Organizers' OK Warning | Out-Null
         return
     }
     try { Start-Process -FilePath 'explorer.exe' -ArgumentList @([string]$selectedDrive.Root) -ErrorAction Stop }
-    catch { Write-AMRLog ("Could not open drive {0}: {1}" -f $selectedDrive.Root,$_.Exception.Message) ERROR Cleanup; Show-AMRMessage ("Could not open the selected drive:`n{0}" -f $_.Exception.Message) 'Disk Tool Organizers' OK Warning | Out-Null }
+    catch { Write-AMRLog ("Could not open drive {0}: {1}" -f $selectedDrive.Root,$_.Exception.Message) ERROR Cleanup; Show-AMRMessageGlass ("Could not open the selected drive:`n{0}" -f $_.Exception.Message) 'Disk Tool Organizers' OK Warning | Out-Null }
 })
 (C 'CleanupDiskOrganizerStorageBtn').Add_Click({
     try { Start-Process -FilePath 'ms-settings:storagesense' -ErrorAction Stop }
-    catch { Write-AMRLog ("Could not open Windows Storage Settings: {0}" -f $_.Exception.Message) ERROR Cleanup; Show-AMRMessage ("Windows Storage Settings could not be opened:`n{0}" -f $_.Exception.Message) 'Disk Tool Organizers' OK Warning | Out-Null }
+    catch { Write-AMRLog ("Could not open Windows Storage Settings: {0}" -f $_.Exception.Message) ERROR Cleanup; Show-AMRMessageGlass ("Windows Storage Settings could not be opened:`n{0}" -f $_.Exception.Message) 'Disk Tool Organizers' OK Warning | Out-Null }
 })
 (C 'CleanupDiskOrganizerOptimizeBtn').Add_Click({
     $toolPath = Join-Path $env:windir 'System32\dfrgui.exe'
     if (Test-Path -LiteralPath $toolPath -PathType Leaf) {
         try { Start-Process -FilePath $toolPath -ErrorAction Stop }
-        catch { Write-AMRLog ("Could not launch Optimize Drives: {0}" -f $_.Exception.Message) ERROR Cleanup; Show-AMRMessage ("Optimize Drives could not be opened:`n{0}" -f $_.Exception.Message) 'Disk Tool Organizers' OK Warning | Out-Null }
-    } else { Show-AMRMessage 'Windows Optimize Drives is not available on this installation.' 'Disk Tool Organizers' OK Warning | Out-Null }
+        catch { Write-AMRLog ("Could not launch Optimize Drives: {0}" -f $_.Exception.Message) ERROR Cleanup; Show-AMRMessageGlass ("Optimize Drives could not be opened:`n{0}" -f $_.Exception.Message) 'Disk Tool Organizers' OK Warning | Out-Null }
+    } else { Show-AMRMessageGlass 'Windows Optimize Drives is not available on this installation.' 'Disk Tool Organizers' OK Warning | Out-Null }
 })
 
 $script:AMRBrowserCleanupCatalog = @{
@@ -26207,6 +29994,7 @@ function Get-AMRBrowserCleanupLaunchArguments {
 # Instead, open a fresh browser window, activate its process, and send the native
 # Ctrl+Shift+Delete shortcut. This opens the browser's own cleanup UI only; AMR never
 # confirms the dialog or deletes browsing data.
+Add-AMRStartupMark 'L26512 before-BrowserCleanupLaunch'
 $script:AMRBrowserCleanupLaunch = [pscustomobject]@{
     Timer = $null; Shell = $null; Attempts = 0; BrowserName = ''
     ProcessNames = @(); LaunchProcessId = 0; StartedAt = [datetime]::MinValue
@@ -26282,7 +30070,7 @@ function Start-AMRBrowserCleanupDialog {
     $browserName = [string]$choice.SelectedItem.Content
     $browserUrl = [string]$choice.SelectedItem.Tag
     if (-not $script:AMRBrowserCleanupCatalog.ContainsKey($browserName) -or [string]::IsNullOrWhiteSpace($browserUrl)) {
-        Show-AMRMessage 'The selected browser is not in the AMR browser catalog.' 'Web & Browsers' OK Warning | Out-Null
+        Show-AMRMessageGlass 'The selected browser is not in the AMR browser catalog.' 'Web & Browsers' OK Warning | Out-Null
         Write-AMRLog ("Rejected unknown browser cleanup target: {0}" -f $browserName) WARNING Cleanup
         return
     }
@@ -26312,13 +30100,14 @@ function Start-AMRBrowserCleanupDialog {
     Start-AMRDISMOperation -Operation Analyze -Arguments @('/Online','/Cleanup-Image','/AnalyzeComponentStore')
 })
 (C 'CleanupComponentRunNewBtn').Add_Click({
-    $answer = Show-AMRMessage 'Run Microsoft DISM StartComponentCleanup? This removes superseded component versions using Windows servicing rules. AMR does not use /ResetBase, so installed updates remain uninstallable. This can take time. Continue?' 'Confirm Windows Component Cleanup' YesNo Warning
+    $answer = Show-AMRMessageGlass 'Run Microsoft DISM StartComponentCleanup? This removes superseded component versions using Windows servicing rules. AMR does not use /ResetBase, so installed updates remain uninstallable. This can take time. Continue?' 'Confirm Windows Component Cleanup' YesNo Warning
     if ($answer -ne [System.Windows.MessageBoxResult]::Yes) { Write-AMRLog 'User cancelled the dedicated Windows Component Cleanup action.' INFO Cleanup; return }
     Start-AMRDISMOperation -Operation Clean -Arguments @('/Online','/Cleanup-Image','/StartComponentCleanup')
 })
 
 # ORPHAN ANALYZER + REVERSIBLE QUARANTINE
 # All enumeration and file moves run in a background runspace. Never targets user-profile data.
+Add-AMRStartupMark 'L26624 before-OrphanAnalyzer'
 $script:AMROrphanScanState = [pscustomobject]@{ Current = $null }
 $script:AMROrphanQuarantineRoot = Join-Path $env:ProgramData 'AMR-Utility\Quarantine\OrphanedApps'
 
@@ -26518,6 +30307,7 @@ Set-AMROrphanQuarantineList
 # Only known rebuildable cache folders are included. DriverStore, Windows\Installer,
 # AMD extraction roots (for example C:\AMD), user projects and browser profile data are excluded.
 $script:CleanupScanResults = @{}
+Add-AMRStartupMark 'L26823 before-CacheRootsInit'
 $script:AMRAppCacheRoots = New-Object 'System.Collections.Generic.List[string]' # GPU shader-cache roots
 $script:AMRApplicationCacheRoots = New-Object 'System.Collections.Generic.List[string]'
 $script:AMRApplicationCacheInventory = New-Object 'System.Collections.Generic.List[object]'
@@ -26749,6 +30539,7 @@ function Add-AMRAppCacheCandidate {
 }
 
 # DirectX cache is Windows-managed and may be used by any GPU vendor.
+Add-AMRStartupMark 'L27054 before-GpuCacheDiscoveryStart'
 Add-AMRGPUCacheCandidate -Vendor 'Microsoft/DirectX' -CacheType 'DirectX Shader Cache' -Path (Join-Path $env:LOCALAPPDATA 'D3DSCache')
 
 # Known vendor cache locations. These are checked regardless of the currently installed
@@ -26972,6 +30763,7 @@ foreach ($app in $appCacheDefinitions) {
 # signed-in user's profile. The old all-fixed-volumes / all-profiles pass caused slow
 # launches, touched unrelated disks, and added little value to the normal cleanup view.
 # Other volumes and other user profiles are never traversed by this startup discovery.
+Add-AMRStartupMark 'L27277 before-CacheDiscoveryVolumes'
 $script:AMRCacheDiscoveryVolumes = New-Object 'System.Collections.Generic.List[string]'
 $systemVolumeRoot = ([string]$env:SystemDrive).TrimEnd('\')
 if ([string]::IsNullOrWhiteSpace($systemVolumeRoot)) { $systemVolumeRoot = 'C:' }
@@ -27128,6 +30920,7 @@ if (Test-AMRCleanupDirectory -Path $nvidiaOtaPath) { $script:AMRDriverArtifactRo
 # Expand only recognized temporary-directory roots. This deliberately avoids a
 # drive-wide search for filenames containing 'temp', which could include installers,
 # application data, source files, or user documents that are not disposable.
+Add-AMRStartupMark 'L27433 before-UserTempDiscoveryRoots'
 $script:AMRUserTempDiscoveryRoots = New-Object 'System.Collections.Generic.List[string]'
 foreach ($profileRoot in @($crossVolumeProfiles)) {
     if ([string]::IsNullOrWhiteSpace([string]$profileRoot)) { continue }
@@ -27644,7 +31437,7 @@ function Set-AMRCleanupUiBusy {
         $filesEstimate += [int]$script:CleanupScanResults[$category.Key].Count
     }
     $names = ($selected | ForEach-Object { $_.Label }) -join "`n• "
-    $answer = Show-AMRMessage ("You are about to remove the selected temporary/cache files:`n`n• $names`n`nEstimated: {0:N0} files ({1:N2} MB).`n`nThis cannot be undone. Continue?" -f $filesEstimate,($estimate / 1MB)) 'Confirm Cleanup' YesNo Warning
+    $answer = Show-AMRMessageGlass ("You are about to remove the selected temporary/cache files:`n`n• $names`n`nEstimated: {0:N0} files ({1:N2} MB).`n`nThis cannot be undone. Continue?" -f $filesEstimate,($estimate / 1MB)) 'Confirm Cleanup' YesNo Warning
     if ($answer -ne [System.Windows.MessageBoxResult]::Yes) {
         Write-AMRLog 'User cancelled the selected cleanup operation at confirmation.' INFO Cleanup
         return
@@ -27818,7 +31611,7 @@ function Update-AMRSmartCleanupRecycleBin {
         Show-AMRCleanupSummary -Title 'AMR | Recycle Bin' -Status 'Already empty' -Details ('No Recycle Bin items were found on {0}.' -f $snap.Drive) -Kind Info
         return
     }
-    $answer = Show-AMRMessage ("Permanently empty {0:N0} Recycle Bin item(s) ({1:N2} MB) on {2} only? Other drives will not be touched." -f $snap.Count,($snap.Bytes / 1MB),$snap.Drive) 'Confirm Recycle Bin' YesNo Warning
+    $answer = Show-AMRMessageGlass ("Permanently empty {0:N0} Recycle Bin item(s) ({1:N2} MB) on {2} only? Other drives will not be touched." -f $snap.Count,($snap.Bytes / 1MB),$snap.Drive) 'Confirm Recycle Bin' YesNo Warning
     if ($answer -ne [System.Windows.MessageBoxResult]::Yes -and $answer -ne 'Yes') {
         Write-AMRLog 'Smart Cleanup Recycle Bin empty operation cancelled.' INFO Cleanup
         return
@@ -27834,6 +31627,7 @@ function Update-AMRSmartCleanupRecycleBin {
         Show-AMRCleanupSummary -Title 'AMR | Recycle Bin' -Status 'Could not empty Recycle Bin' -Details $_.Exception.Message -Kind Error
     }
 })
+Add-AMRStartupMark 'L28139 before-UpdateSmartCleanupRecycleBin'
 Update-AMRSmartCleanupRecycleBin
 
 function Get-AMRReadOnlyFileInventory {
@@ -28111,7 +31905,7 @@ function Invoke-AMRBackupAction {
     # A restore point is stored by Windows, not as a desktop file. Add a desktop shortcut to launch System Protection.
     try { $desk=[Environment]::GetFolderPath('Desktop'); $lnk=Join-Path $desk 'AMR System Protection.lnk'; $w=New-Object -ComObject WScript.Shell; $sc=$w.CreateShortcut($lnk); $sc.TargetPath="$env:windir\System32\SystemPropertiesProtection.exe"; $sc.Description='Open Windows System Protection and restore point settings'; $sc.Save() } catch { Write-AMRLog "Restore point created; desktop shortcut could not be created: $_" WARNING System }
     Write-AMRLog 'Created System Restore Point.' SUCCESS System
-    Show-AMRMessage "Restore point created successfully.`nA desktop shortcut to System Protection was added (if permitted)." 'Backup' OK Information | Out-Null; return
+    Show-AMRMessageGlass "Restore point created successfully.`nA desktop shortcut to System Protection was added (if permitted)." 'Backup' OK Information | Out-Null; return
    }
    'Registry' { & reg.exe export 'HKCU\Software' (Join-Path $script:BackupDir ("HKCU_Backup_{0}.reg" -f $stamp)) /y | Out-Null; if($LASTEXITCODE -ne 0){throw "reg.exe returned exit code $LASTEXITCODE"}; $out=Join-Path $script:BackupDir ("HKCU_Backup_{0}.reg" -f $stamp); break }
    'HKCU' { & reg.exe export HKCU $out.Replace('.txt','.reg') /y | Out-Null; if($LASTEXITCODE -ne 0){throw "reg.exe returned exit code $LASTEXITCODE"}; $out=$out.Replace('.txt','.reg'); break }
@@ -28166,10 +31960,10 @@ function Invoke-AMRBackupAction {
    default { throw 'Unknown backup action.' }
   }
   Write-AMRLog ("Backup export completed: {0} -> {1}" -f $Key,$out) SUCCESS System
-  Show-AMRMessage ("Backup/export completed.`nSaved to:`n$out") 'Backup' OK Information | Out-Null
+  Show-AMRMessageGlass ("Backup/export completed.`nSaved to:`n$out") 'Backup' OK Information | Out-Null
  } catch {
   Write-AMRLog ("Backup action failed ({0}): {1}" -f $Key,$_.Exception.Message) ERROR System
-  Show-AMRMessage ("Backup action failed:`n$($_.Exception.Message)") 'Backup Error' OK Error | Out-Null
+  Show-AMRMessageGlass ("Backup action failed:`n$($_.Exception.Message)") 'Backup Error' OK Error | Out-Null
  }
 }
 
@@ -28264,7 +32058,7 @@ function New-AMRBackupActionCard {
  $infoButton.HorizontalAlignment='Center';$infoButton.VerticalAlignment='Center'
  $infoButton.Cursor=[System.Windows.Input.Cursors]::Hand
  $infoButton.Tag=(Get-AMRBackupInfoText -Action $a)
- $infoButton.Add_Click({ Show-AMRMessage ([string]$this.Tag) 'Backup Tool Information' OK Information | Out-Null }.GetNewClosure())
+ $infoButton.Add_Click({ Show-AMRMessageGlass ([string]$this.Tag) 'Backup Tool Information' OK Information | Out-Null }.GetNewClosure())
  $infoButton.Add_MouseEnter({try{$this.Background=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#D8BC83')}catch{}}.GetNewClosure())
  $infoButton.Add_MouseLeave({try{$this.Background=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#B89A62')}catch{}}.GetNewClosure())
  [System.Windows.Controls.Grid]::SetColumn($infoButton,1);[void]$layout.Children.Add($infoButton)
@@ -28417,6 +32211,7 @@ $overviewTabsForRefresh.Add_SelectionChanged({
  if($this.SelectedItem -and [string]$this.SelectedItem.Header -eq 'Backups'){Request-AMRBackupViewRefresh}
 }.GetNewClosure())
 
+Add-AMRStartupMark 'L28722 before-StartupManagerSection'
 # ----------------------------------------------------------
 # AMR Startup Manager — Task Manager-aligned Windows startup inventory
 # Combines Win32_StartupCommand, registry Run sources and Startup folders.
@@ -28968,9 +32763,13 @@ function Refresh-AMRStartupManager {
     if(-not ($AppendEntries -and $script:StartupRenderState)){try { if($script:StartupRenderTimer){$script:StartupRenderTimer.Stop()} } catch {}}
     if(-not $AppendEntries){$hostPanel.Children.Clear()}
     if($PSBoundParameters.ContainsKey('Entries')){$entries=@($Entries)}else{
+        $perfRf = Get-AMRPerfNow
         Update-AMRStartupInstalledMatchIndex
+        Add-AMRPerfSince 'startups.matchIndex' $perfRf
         # Registry and Startup-folder discovery is fast; CIM and icons are deferred.
+        $perfRf = Get-AMRPerfNow
         $entries=@(Get-AMRStartupEntries -SkipCim -SkipIcons)
+        Add-AMRPerfSince 'startups.getEntries' $perfRf
     }
     if(-not $AppendEntries){$script:StartupManagerEntries=@($entries)}
     $summaryEntries=@($script:StartupManagerEntries)
@@ -28989,6 +32788,7 @@ function Refresh-AMRStartupManager {
     $timer.Interval=[TimeSpan]::FromMilliseconds(24)
     $script:StartupRenderHostPanel=$hostPanel
     $timer.Add_Tick({
+        $perfRt = Get-AMRPerfNow
         try {
         $state=$script:StartupRenderState
         if(-not $state){$script:StartupRenderTimer.Stop();return}
@@ -29068,7 +32868,7 @@ function Refresh-AMRStartupManager {
                 if($currentSummary){$all=@($script:StartupManagerEntries);$on=@($all|Where-Object {$_.Enabled}).Count;$currentSummary.Text=('{0} startup item(s) detected  ·  {1} enabled  ·  {2} disabled' -f $all.Count,$on,($all.Count-$on))}
                 Write-AMRLog ("Startup item '{0}' changed to {1}." -f $entryCopy.Name,$(if($desired){'Enabled'}else{'Disabled'})) SUCCESS System
             }catch{
-                Show-AMRMessage ("Could not change startup state for '{0}':`n`n{1}" -f $entryCopy.Name,$_.Exception.Message) 'Startup Manager' OK Warning | Out-Null
+                Show-AMRMessageGlass ("Could not change startup state for '{0}':`n`n{1}" -f $entryCopy.Name,$_.Exception.Message) 'Startup Manager' OK Warning | Out-Null
                 Set-AMRStartupSwitchVisual -Track $trackCopy -Thumb $thumbCopy -Enabled ([bool]$entryCopy.Enabled) -StatusText $statusCopy
             }
             $eventArgs.Handled=$true
@@ -29144,8 +32944,13 @@ function Refresh-AMRStartupManager {
             $script:StartupRenderTimer.Stop()
             $script:StartupManagerLoaded=$true
             $rendered=@($state.RenderedEntries.ToArray())
+            Add-AMRPerfSince 'startups.renderTickLast' $perfRt
+            $perfRt2 = Get-AMRPerfNow
             Start-AMRStartupIconHydration -Entries $rendered
+            Add-AMRPerfSince 'startups.iconHydrationStart' $perfRt2
+            $perfRt2 = Get-AMRPerfNow
             if(-not $state.SkipDeferredCim){Start-AMRStartupAppxScan}
+            Add-AMRPerfSince 'startups.appxScanStart' $perfRt2
             if($state.RefreshInventory -and $script:InstalledScanState -and -not $script:InstalledScanState.Current){
                 try{Start-AMRInstalledCatalogScan -Refresh}catch{Write-AMRLog ('Startup manager inventory refresh could not start: '+$_.Exception.Message) WARNING System}
             }
@@ -29156,7 +32961,7 @@ function Refresh-AMRStartupManager {
             try { Write-AMRLog ('Startup card rendering failed: '+$renderError) ERROR System } catch {}
             try { if($script:StartupRenderTimer){$script:StartupRenderTimer.Stop()} } catch {}
             $script:StartupRenderState=$null
-        }
+        } finally { Add-AMRPerfSince 'startups.renderTick' $perfRt }
     })
     $script:StartupRenderTimer=$timer
     $timer.Start()
@@ -29178,7 +32983,9 @@ function Start-AMRStartupIconHydration {
             $source=$null
             if($entry.PSObject.Properties['IconSource']){$source=$entry.IconSource}
             if(-not $source){
+                $perfIc = Get-AMRPerfNow
                 $source=Get-AMRStartupIconSource -Entry $entry
+                Add-AMRPerfSince 'startups.iconSource' $perfIc
                 if($source){$entry.IconSource=$source}
             }
             if($source){$entry.IconControl.Source=$source;$entry.GlyphControl.Child=$entry.IconControl}
@@ -29367,10 +33174,12 @@ function Add-AMRStartupScheduledTaskEntries {
 function Start-AMRStartupScheduledTaskScan {
     if($script:StartupTaskState -and $script:StartupTaskState.Current){return}
     try {
+        $perfRs = Get-AMRPerfNow
         $rs=[System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace()
         $rs.ApartmentState=[System.Threading.ApartmentState]::MTA
         $rs.ThreadOptions=[System.Management.Automation.Runspaces.PSThreadOptions]::ReuseThread
         $rs.Open()
+        Add-AMRPerfSince 'startups.taskRunspaceOpen' $perfRs
         $ps=[PowerShell]::Create();$ps.Runspace=$rs
         $scriptText=@'
 $results=New-Object 'System.Collections.Generic.List[object]'
@@ -29441,13 +33250,17 @@ $results.ToArray()
             if(-not $state -or -not $state.Current){$script:StartupTaskTimer.Stop();return}
             if($state.Handle.IsCompleted){
                 $script:StartupTaskTimer.Stop()
+                $perfPd = Get-AMRPerfNow
                 try{$items=@($state.PowerShell.EndInvoke($state.Handle));foreach($workerError in @($state.PowerShell.Streams.Error)){Write-AMRLog ('Deferred scheduled-task worker error: '+[string]$workerError) WARNING System};Add-AMRStartupScheduledTaskEntries -Items $items}
                 catch{Write-AMRLog ('Deferred scheduled-task startup inventory warning: '+$_.Exception.Message) WARNING System}
                 finally{
                     try{$state.PowerShell.Dispose()}catch{}
                     try{$state.Runspace.Close();$state.Runspace.Dispose()}catch{}
                     $script:StartupTaskState=@{Current=$false}
+                    Add-AMRPerfSince 'startups.taskComplete' $perfPd
+                    $perfPd = Get-AMRPerfNow
                     Start-AMRStartupCimScan
+                    Add-AMRPerfSince 'startups.cimScanStart' $perfPd
                 }
             }
         })
@@ -29462,10 +33275,12 @@ $results.ToArray()
 function Start-AMRStartupAppxScan {
     if($script:StartupAppxState -and $script:StartupAppxState.Current){return}
     try {
+        $perfRs = Get-AMRPerfNow
         $rs=[System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace()
         $rs.ApartmentState=[System.Threading.ApartmentState]::STA
         $rs.ThreadOptions=[System.Management.Automation.Runspaces.PSThreadOptions]::ReuseThread
         $rs.Open()
+        Add-AMRPerfSince 'startups.appxRunspaceOpen' $perfRs
         $ps=[PowerShell]::Create();$ps.Runspace=$rs
         $scriptText=@'
 $results=New-Object 'System.Collections.Generic.List[object]'
@@ -29649,6 +33464,7 @@ $results.ToArray()
             if(-not $state -or -not $state.Current){$script:StartupAppxTimer.Stop();return}
             if($state.Handle.IsCompleted){
                 $script:StartupAppxTimer.Stop()
+                $perfPd = Get-AMRPerfNow
                 try{
                     $items=@($state.PowerShell.EndInvoke($state.Handle))
                     foreach($workerError in @($state.PowerShell.Streams.Error)){Write-AMRLog ('Deferred packaged-startup worker error: '+[string]$workerError) WARNING System}
@@ -29658,7 +33474,10 @@ $results.ToArray()
                     try{$state.PowerShell.Dispose()}catch{}
                     try{$state.Runspace.Close();$state.Runspace.Dispose()}catch{}
                     $script:StartupAppxState=@{Current=$false}
+                    Add-AMRPerfSince 'startups.appxComplete' $perfPd
+                    $perfPd = Get-AMRPerfNow
                     Start-AMRStartupScheduledTaskScan
+                    Add-AMRPerfSince 'startups.taskScanStart' $perfPd
                 }
             }
         })
@@ -29673,10 +33492,12 @@ $results.ToArray()
 function Start-AMRStartupCimScan {
     if($script:StartupCimState -and $script:StartupCimState.Current){return}
     try {
+        $perfRs = Get-AMRPerfNow
         $rs=[System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace()
         $rs.ApartmentState=[System.Threading.ApartmentState]::MTA
         $rs.ThreadOptions=[System.Management.Automation.Runspaces.PSThreadOptions]::ReuseThread
         $rs.Open()
+        Add-AMRPerfSince 'startups.cimRunspaceOpen' $perfRs
         $ps=[PowerShell]::Create();$ps.Runspace=$rs
         [void]$ps.AddScript(@'
 # Win32_StartupCommand is an independent Windows inventory cross-check for
@@ -29701,9 +33522,10 @@ if(Get-Command Get-WmiObject -ErrorAction SilentlyContinue){
             if(-not $state -or -not $state.Current){$script:StartupCimTimer.Stop();return}
             if($state.Handle.IsCompleted){
                 $script:StartupCimTimer.Stop()
+                $perfPd = Get-AMRPerfNow
                 try{$items=@($state.PowerShell.EndInvoke($state.Handle));foreach($workerError in @($state.PowerShell.Streams.Error)){Write-AMRLog ('Deferred Windows startup inventory error: '+[string]$workerError) WARNING System};Add-AMRStartupCimEntries -Items $items}
                 catch{Write-AMRLog ('Deferred Windows startup inventory warning: '+$_.Exception.Message) WARNING System}
-                finally{try{$state.PowerShell.Dispose()}catch{};try{$state.Runspace.Close();$state.Runspace.Dispose()}catch{};$script:StartupCimState=@{Current=$false}}
+                finally{try{$state.PowerShell.Dispose()}catch{};try{$state.Runspace.Close();$state.Runspace.Dispose()}catch{};$script:StartupCimState=@{Current=$false};Add-AMRPerfSince 'startups.cimComplete' $perfPd}
             }
         })
         $script:StartupCimTimer=$poll;$poll.Start()
@@ -29738,6 +33560,7 @@ function Set-AMRBackupSubTab {
 (C 'AMRStartupRefreshBtn').Add_Click({ Start-AMRRefreshButtonAnimation -Button (C 'AMRStartupRefreshBtn'); Refresh-AMRStartupManager -RefreshInventory })
 
 # Windows Update Center controls are deliberately isolated to the System > Update tab.
+Add-AMRStartupMark 'L30043 before-UpdateCenterControls'
 Set-AMRRefreshButtonVisual -Button (C 'AMRUpdateRefreshBtn') -Label 'Refresh Status'
 (C 'AMRUpdateRefreshBtn').Add_Click({
     $refreshButton=C 'AMRUpdateRefreshBtn'
@@ -29752,23 +33575,23 @@ Set-AMRRefreshButtonVisual -Button (C 'AMRUpdateRefreshBtn') -Label 'Refresh Sta
         Write-AMRLog ('Windows Update status refresh failed: '+$_.Exception.Message) ERROR System
     } finally { $refreshButton.IsEnabled=$true }
 })
-(C 'AMRUpdateSettingsBtn').Add_Click({ try { Start-Process 'ms-settings:windowsupdate' } catch { Show-AMRMessage $_.Exception.Message 'Windows Update Settings' OK Warning | Out-Null } })
+(C 'AMRUpdateSettingsBtn').Add_Click({ try { Start-Process 'ms-settings:windowsupdate' } catch { Show-AMRMessageGlass $_.Exception.Message 'Windows Update Settings' OK Warning | Out-Null } })
 (C 'AMRUpdateRecommendedBtn').Add_Click({ Invoke-AMRUpdateProfile -Profile Recommended })
 (C 'AMRUpdateDefaultBtn').Add_Click({ Invoke-AMRUpdateProfile -Profile Default })
 (C 'AMRUpdateRestrictBtn').Add_Click({ Invoke-AMRUpdateProfile -Profile Restricted })
-(C 'AMRUpdateRestoreBackupBtn').Add_Click({ try { Restore-AMRUpdateProfileBackup } catch { Show-AMRMessage $_.Exception.Message 'Restore Update Backup' OK Error | Out-Null } })
+(C 'AMRUpdateRestoreBackupBtn').Add_Click({ try { Restore-AMRUpdateProfileBackup } catch { Show-AMRMessageGlass $_.Exception.Message 'Restore Update Backup' OK Error | Out-Null } })
 (C 'AMRUpdateCheckBtn').Add_Click({ Start-AMRUpdateWorker -Action Scan })
 (C 'AMRUpdateHistoryBtn').Add_Click({ Start-AMRUpdateWorker -Action History })
 (C 'AMRUpdateDownloadBtn').Add_Click({ Start-AMRUpdateWorker -Action Download -Selected @((C 'AMRUpdateResultsList').SelectedItems) })
 (C 'AMRUpdateInstallBtn').Add_Click({
     $selected=@((C 'AMRUpdateResultsList').SelectedItems)
     $notDownloaded=@($selected | Where-Object { -not $_.Downloaded })
-    if($notDownloaded.Count -gt 0){ Show-AMRMessage 'Some selected updates are not downloaded yet. Download them first, then run Check for Updates again and install the downloaded selections.' 'Download Required' OK Information | Out-Null; return }
-    if((Show-AMRMessage ('Install {0} selected update(s)? Windows may request a restart. AMR will not restart the computer automatically.' -f $selected.Count) 'Confirm Update Installation' YesNo Warning) -ne 'Yes'){return}
+    if($notDownloaded.Count -gt 0){ Show-AMRMessageGlass 'Some selected updates are not downloaded yet. Download them first, then run Check for Updates again and install the downloaded selections.' 'Download Required' OK Information | Out-Null; return }
+    if((Show-AMRMessageGlass ('Install {0} selected update(s)? Windows may request a restart. AMR will not restart the computer automatically.' -f $selected.Count) 'Confirm Update Installation' YesNo Warning) -ne 'Yes'){return}
     Start-AMRUpdateWorker -Action Install -Selected $selected
 })
 (C 'AMRUpdateRepairBtn').Add_Click({ Invoke-AMRUpdateServiceRepair })
-try { Update-AMRUpdateCenterStatus } catch { Write-AMRLog ('Initial Update Center status refresh failed: '+$_.Exception.Message) WARNING System }
+Add-AMRDeferredStartupAction -Name 'UpdateCenterStatus' -Action { try { Update-AMRUpdateCenterStatus } catch { Write-AMRLog ('Initial Update Center status refresh failed: '+$_.Exception.Message) WARNING System } }
 try { Set-AMRUpdateCheckVisual -Running $false } catch {}
 
 (C 'BackupCenterChoiceBtn').Add_Click({ Set-AMRBackupSubTab 0 })
@@ -29793,6 +33616,7 @@ foreach($backupChoiceName in @('BackupCenterChoiceBtn','DriverBackupChoiceBtn'))
   }catch{}
  }.GetNewClosure())
 }
+Add-AMRStartupMark 'L30098 before-BackupSubTab'
 Set-AMRBackupSubTab 0
 Update-AMRBackupView
 
@@ -29972,7 +33796,7 @@ foreach ($utilityButton in $utilityButtons) {
     $infoButton.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#17212B')
     $infoButton.ToolTip = $null; $infoButton.HorizontalAlignment = 'Center'; $infoButton.VerticalAlignment = 'Center'
     $infoButton.Tag = $utilityDescription
-    $infoButton.Add_Click({ Show-AMRMessage ([string]$this.Tag) 'Utility Information' OK Information | Out-Null }.GetNewClosure())
+    $infoButton.Add_Click({ Show-AMRMessageGlass ([string]$this.Tag) 'Utility Information' OK Information | Out-Null }.GetNewClosure())
     $infoButton.Add_MouseEnter({try{$this.Background=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#D8BC83')}catch{}}.GetNewClosure())
     $infoButton.Add_MouseLeave({try{$this.Background=[System.Windows.Media.BrushConverter]::new().ConvertFromString('#B89A62')}catch{}}.GetNewClosure())
     [System.Windows.Controls.Grid]::SetColumn($infoButton,1); [void]$cardGrid.Children.Add($infoButton)
@@ -29997,6 +33821,7 @@ function Update-AMRUtilitiesView {
 (C 'UtilCategoryFilter').Add_SelectionChanged({ Update-AMRUtilitiesView })
 Update-AMRUtilitiesView
 
+Add-AMRStartupMark 'L30302 before-CleanupHoverPass'
 # --- Cleanup Center: premium lightweight hover + interaction pass ---
 # The interaction layer is intentionally visual-only: it does not change any
 # cleanup selection, scan, quarantine, browser, DISM, or disk-operation logic.
@@ -30281,11 +34106,16 @@ if ($cleanupTabsForMotion) {
     }.GetNewClosure())
 }
 
+# Diagnostics only (file log, never the in-app Logs tab): one write for all startup marks.
+try {
+    Add-AMRStartupMark 'L30586 before-LaunchSuite'
+    Write-AMRDiagnostic -Severity 'INFO' -Area 'Startup' -Operation 'StartupPhaseMarks' -Message ('Startup marks (name=elapsedMs(+deltaMs since previous mark); each delta is the time spent in the block that ends at that mark): ' + ($script:AMRStartupMarks -join ' ; ') + ' || Phases: ' + (($script:AMRStartupPhaseTimings.GetEnumerator() | ForEach-Object { '{0}={1}' -f $_.Key,$_.Value }) -join '; '))
+} catch { }
 # --- 9. Launch Suite ---
 Write-AMRLog ('Amr | windows_utility initialized. ' + $script:AMRReliabilityPhase) INFO System
 $script:AMRStartupPhaseTimings['BeforeOverviewRefreshMs'] = [int]$script:AMRStartupStopwatch.ElapsedMilliseconds
 Write-AMRLog ('Startup checkpoint: BeforeOverviewRefresh={0}ms' -f $script:AMRStartupPhaseTimings['BeforeOverviewRefreshMs']) INFO Startup
-Refresh-AMROverview
+Refresh-AMROverview -DeferRestorePoint
 $script:AMRStartupPhaseTimings['AfterOverviewRefreshMs'] = [int]$script:AMRStartupStopwatch.ElapsedMilliseconds
 Write-AMRLog ('Startup checkpoint: AfterOverviewRefresh={0}ms; OverviewRefreshCost={1}ms' -f $script:AMRStartupPhaseTimings['AfterOverviewRefreshMs'],($script:AMRStartupPhaseTimings['AfterOverviewRefreshMs']-$script:AMRStartupPhaseTimings['BeforeOverviewRefreshMs'])) INFO Startup
 Write-AMRLog 'Utility Ready.' SUCCESS System
@@ -30677,15 +34507,20 @@ function Start-AMRBackgroundIconRefresh {
 
                 # Deliver a small, steady batch from the local cache. File I/O and image
                 # decoding remain on the worker; only frozen ImageSources are assigned here.
+                $perfDeliverStart = Get-AMRPerfNow
                 for ($delivery = 0; $delivery -lt 4; $delivery++) {
                     $ready = $null
                     if (-not $workerReadyQueue.TryDequeue([ref]$ready)) { break }
                     if ($null -ne $ready -and $ready.Index -ge 0 -and $ready.Index -lt $script:SoftwareCatalog.Count) {
                         $catalogItem = $script:SoftwareCatalog[$ready.Index]
+                        $perfItemStart = Get-AMRPerfNow
                         $catalogItem.Icon = $ready.Source
                         Sync-AMRRealizedSoftwareIconItem -Item $catalogItem
+                        Add-AMRPerfSince -Key 'icons.catalogApplyItem' -Start $perfItemStart
+                        Set-AMRPerfMark 'catalogIcon'
                     }
                 }
+                if ($perfDeliverStart -ne 0) { Add-AMRPerfSince -Key 'icons.catalogDeliverTick' -Start $perfDeliverStart }
 
                 if (-not $workerAsyncHandle.IsCompleted) {
                     $nowUtc = [DateTime]::UtcNow
@@ -30783,6 +34618,36 @@ $script:Window.Add_Loaded({
     Start-AMRInstalledCatalogScan -Refresh
     try { Invoke-AMRSoftwarePremiumEntrance } catch {}
 })
+# Runs the queued startup-only refreshes after the first render. Each action gets its own
+# dispatcher turn (Background priority) so input and rendering can run between them, and a
+# failure in one action is logged without affecting the others.
+function Invoke-AMRDeferredStartupWork {
+    $queued = @($script:AMRDeferredStartupActions.ToArray())
+    $script:AMRDeferredStartupActions.Clear()
+    # Diagnostics: a logger bound to this script scope (a closure cannot always see script functions)
+    # and a clock that starts when the queue is released, so each task shows when it ran.
+    $deferredLogger = { param([string]$Message,[string]$Level) Write-AMRLog $Message $Level 'Startup' }
+    $deferredClock = [System.Diagnostics.Stopwatch]::StartNew()
+    try { & $deferredLogger ('Deferred startup work released after first render: {0} task(s) queued [{1}].' -f $queued.Count,((@($queued | ForEach-Object { [string]$_.Name })) -join ', ')) 'INFO' } catch {}
+    foreach ($queuedItem in $queued) {
+        $deferredName = [string]$queuedItem.Name
+        $deferredAction = $queuedItem.Action
+        $deferredInvoke = {
+            $deferredTaskWatch = $null
+            try { $deferredTaskWatch = [System.Diagnostics.Stopwatch]::StartNew(); & $deferredLogger ("Deferred startup task '{0}' started at +{1} ms after queue release." -f $deferredName,$deferredClock.ElapsedMilliseconds) 'INFO' } catch {}
+            try {
+                & $deferredAction
+                try { & $deferredLogger ("Deferred startup task '{0}' finished in {1} ms (no exception reached the dispatcher wrapper)." -f $deferredName,$deferredTaskWatch.ElapsedMilliseconds) 'INFO' } catch {}
+            }
+            catch {
+                $deferredError = $_
+                try { & $deferredLogger ("Deferred startup task '{0}' failed: {1}" -f $deferredName,$deferredError.Exception.Message) 'WARNING' } catch {}
+                try { & $deferredLogger ("Deferred startup task '{0}' failure detail | ExceptionType={1} | ElapsedMs={2} | Line={3} | Stack: {4}" -f $deferredName,$deferredError.Exception.GetType().FullName,$deferredTaskWatch.ElapsedMilliseconds,[string]$deferredError.InvocationInfo.ScriptLineNumber,[string]$deferredError.ScriptStackTrace) 'WARNING' } catch {}
+            }
+        }.GetNewClosure()
+        try { $null = $script:Window.Dispatcher.BeginInvoke([Action]$deferredInvoke,[System.Windows.Threading.DispatcherPriority]::Background) } catch {}
+    }
+}
 $script:Window.Add_ContentRendered({
     try {
         if ($script:AMRStartupStopwatch) {
@@ -30790,6 +34655,7 @@ $script:Window.Add_ContentRendered({
             Write-AMRLog ("Startup first-render completed in {0:N2} seconds." -f $script:AMRStartupStopwatch.Elapsed.TotalSeconds) INFO System
         }
     } catch { }
+    try { Invoke-AMRDeferredStartupWork } catch { try { Write-AMRLog ('Deferred startup work could not be queued: ' + $_.Exception.Message) WARNING System } catch {} }
     Start-AMRBackgroundIconRefresh
 })
 
