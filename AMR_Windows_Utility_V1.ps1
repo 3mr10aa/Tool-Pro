@@ -6110,6 +6110,75 @@ Write-AMRLog ("Catalog item model: {0} ({1} items)." -f $(if ($script:AMRCatalog
        </StackPanel>
       </ScrollViewer>
      </TabItem>
+ <TabItem Name="ToolKitBatteryTab" Header="Battery">
+  <Grid>
+   <ScrollViewer Name="BTScroll" Margin="0,52,0,0" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+    <Border Padding="20,0,20,20">
+     <StackPanel>
+      <Border Background="{StaticResource AMRPerfGlassSoftBrush}" BorderBrush="{StaticResource AMRPerfGlassSoftEdgeBrush}" BorderThickness="1" CornerRadius="12" Padding="16" Margin="0,0,0,12">
+       <Grid>
+        <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+        <StackPanel Grid.Column="0">
+         <TextBlock Text="CHARGE" Foreground="#7DD3FC" FontSize="11" FontWeight="SemiBold"/>
+         <TextBlock Name="BTPercent" Text="--" Foreground="#F4EAD5" FontSize="30" FontWeight="Bold" Margin="0,4,0,0"/>
+         <TextBlock Name="BTPowerState" Text="Scanning..." Foreground="#C9B27E" FontSize="12" Margin="0,2,0,0"/>
+        </StackPanel>
+        <StackPanel Grid.Column="1">
+         <TextBlock Text="HEALTH" Foreground="#7DD3FC" FontSize="11" FontWeight="SemiBold"/>
+         <TextBlock Name="BTHealth" Text="--" Foreground="#F4EAD5" FontSize="30" FontWeight="Bold" Margin="0,4,0,0"/>
+         <TextBlock Name="BTHealthNote" Text="" Foreground="#C9B27E" FontSize="12" Margin="0,2,0,0" TextWrapping="Wrap"/>
+        </StackPanel>
+        <StackPanel Grid.Column="2">
+         <TextBlock Text="CAPACITY AND CYCLES" Foreground="#7DD3FC" FontSize="11" FontWeight="SemiBold"/>
+         <TextBlock Name="BTCapacity" Text="--" Foreground="#F4EAD5" FontSize="14" FontWeight="SemiBold" Margin="0,8,0,0" TextWrapping="Wrap"/>
+         <TextBlock Name="BTCycles" Text="--" Foreground="#C9B27E" FontSize="12" Margin="0,2,0,0"/>
+        </StackPanel>
+       </Grid>
+      </Border>
+      <Border Name="BTLimitCard" Background="{StaticResource AMRPerfGlassSoftBrush}" BorderBrush="{StaticResource AMRPerfGlassSoftEdgeBrush}" BorderThickness="1" CornerRadius="12" Padding="16" Margin="0,0,0,12">
+       <StackPanel>
+        <Grid>
+         <TextBlock Text="CHARGING PROTECTION (STOP CHARGING AT)" Foreground="#7DD3FC" FontSize="11" FontWeight="SemiBold" VerticalAlignment="Center"/>
+         <Border Name="BTTrustChip" HorizontalAlignment="Right" CornerRadius="9" Padding="9,2" Background="#26FFFFFF" BorderBrush="#55B49A70" BorderThickness="1">
+          <TextBlock Name="BTTrustText" Text="Scanning" Foreground="#E9D8B5" FontSize="11"/>
+         </Border>
+        </Grid>
+        <TextBlock Name="BTValueText" Text="--" Foreground="#E9D8B5" FontSize="26" FontWeight="Bold" Margin="0,8,0,0"/>
+        <TextBlock Name="BTSubValueText" Text="" Foreground="#C9B27E" FontSize="12" Margin="0,0,0,6" TextWrapping="Wrap"/>
+        <Grid Name="BTTrackHost" Height="62" Margin="6,6,6,0">
+         <Canvas Name="BTCanvas" Background="Transparent" ClipToBounds="False"/>
+        </Grid>
+        <WrapPanel Name="BTModePanel" Margin="0,6,0,0" Visibility="Collapsed"/>
+        <TextBlock Name="BTRangeNote" Text="" Foreground="#EAF4FF" FontSize="12" Margin="0,10,0,0" TextWrapping="Wrap"/>
+        <TextBlock Name="BTVerifyLine" Text="" Foreground="#C9B27E" FontSize="12" Margin="0,6,0,0" TextWrapping="Wrap"/>
+        <WrapPanel Margin="0,12,0,0">
+         <Button Name="BTApplyBtn" Content="Apply" Style="{StaticResource AMRUpdateGlassButtonStyle}" Margin="0,0,8,0" MinWidth="96"/>
+         <Button Name="BTRestoreBtn" Content="Restore original" Style="{StaticResource AMRUpdateGlassButtonStyle}" Margin="0,0,8,0"/>
+         <Button Name="BTVerifyBtn" Content="Verify now" Style="{StaticResource AMRUpdateGlassButtonStyle}" Margin="0,0,8,0"/>
+         <Button Name="BTRefreshBtn" Content="Refresh" Style="{StaticResource AMRUpdateGlassButtonStyle}" Margin="0,0,8,0"/>
+        </WrapPanel>
+       </StackPanel>
+      </Border>
+      <Border Background="{StaticResource AMRPerfGlassSoftBrush}" BorderBrush="{StaticResource AMRPerfGlassSoftEdgeBrush}" BorderThickness="1" CornerRadius="12" Padding="16" Margin="0,0,0,12">
+       <StackPanel>
+        <TextBlock Text="DEVICE AND CHARGING CONTROLLER" Foreground="#7DD3FC" FontSize="11" FontWeight="SemiBold"/>
+        <TextBlock Name="BTDeviceText" Text="--" Foreground="#F4EAD5" FontSize="13" Margin="0,8,0,0" TextWrapping="Wrap"/>
+        <TextBlock Name="BTEngineText" Text="--" Foreground="#C9B27E" FontSize="12" Margin="0,4,0,0" TextWrapping="Wrap"/>
+        <WrapPanel Margin="0,12,0,0">
+         <Button Name="BTReportBtn" Content="Battery report" Style="{StaticResource AMRUpdateGlassButtonStyle}" Margin="0,0,8,0"/>
+         <Button Name="BTPowerBtn" Content="Power settings" Style="{StaticResource AMRUpdateGlassButtonStyle}" Margin="0,0,8,0"/>
+        </WrapPanel>
+       </StackPanel>
+      </Border>
+     </StackPanel>
+    </Border>
+   </ScrollViewer>
+   <Grid Name="BTHeader" Height="30" Margin="20,14,20,0" VerticalAlignment="Top">
+    <TextBlock Text="Battery Health &amp; Charging Protection" FontSize="22" FontWeight="Bold" Foreground="#E9D8B5" Margin="0" VerticalAlignment="Center"/>
+    <TextBlock Name="BTHeaderStatus" Text="" Foreground="#C9B27E" HorizontalAlignment="Right" VerticalAlignment="Center"/>
+   </Grid>
+  </Grid>
+ </TabItem>
  <TabItem Name="ToolKitControlTab" Header="Control Center"><Grid/></TabItem>
      <TabItem Name="ToolKitCCOptimize" Style="{StaticResource ToolkitSubTabChildItemStyle}" Header="Optimize">
      <Grid>
@@ -11436,7 +11505,7 @@ try {
         if (-not $TabItem) { return }
 
         $tabName = [string]$TabItem.Header
-        if ($tabName -notin @('Optimize','Security','System','Networks','Utilities')) { return }
+        if ($tabName -notin @('Optimize','Security','System','Networks','Utilities','Battery')) { return }
 
         if (-not $script:AMRToolKitEntrancePlayed) {
             $script:AMRToolKitEntrancePlayed = @{}
@@ -38675,6 +38744,746 @@ $script:Window.Add_ContentRendered({
 # intentional catalog/installed switches use a low-cost grid-level cross-fade + slide.
 # Inventory is warmed in a dedicated background runspace at startup. The UI only
 # consumes the last cached snapshot and the completed refresh payload.
+# AMR Battery (r24): independent Battery section (own engines, own UI).
+# ===== AMR Battery (r24): pure helpers (no UI, no WMI) =====
+function Get-AMRBatteryNearestAllowed {
+    param([double]$Value,[int[]]$Allowed)
+    $best = $null
+    foreach ($a in @($Allowed)) {
+        if ($null -eq $best -or [math]::Abs($a - $Value) -lt [math]::Abs($best - $Value)) { $best = [int]$a }
+    }
+    return $best
+}
+function Get-AMRBatteryAllowedList {
+    param([int]$Min,[int]$Max,[int]$Step)
+    if ($Step -lt 1) { $Step = 1 }
+    $list = New-Object System.Collections.Generic.List[int]
+    for ($v = $Min; $v -le $Max; $v += $Step) { [void]$list.Add($v) }
+    if ($list.Count -eq 0 -or $list[$list.Count - 1] -ne $Max) { [void]$list.Add($Max) }
+    return ,@($list.ToArray())
+}
+function Get-AMRBatteryDellStartFor {
+    param([int]$Stop,[int]$StartMin,[int]$StartMax,[int]$MinGap)
+    $s = $Stop - $MinGap
+    if ($s -gt $StartMax) { $s = $StartMax }
+    if ($s -lt $StartMin) { $s = $StartMin }
+    return [int]$s
+}
+function Get-AMRBatteryDellWriteOrder {
+    # Returns the order ('Stop','Start') or ('Start','Stop') that keeps stop - start >= MinGap at every step.
+    param([int]$CurrentStop,[int]$NewStop)
+    if ($NewStop -ge $CurrentStop) { return @('Stop','Start') }
+    return @('Start','Stop')
+}
+function ConvertFrom-AMRBatteryHpValue {
+    # HP_BIOSSetting.Value style: "Choice A,*Choice B,Choice C" (asterisk = selected).
+    param([string]$Raw)
+    $choices = @(); $current = $null
+    foreach ($p in ($Raw -split ',')) {
+        $t = $p.Trim()
+        if ($t.Length -eq 0) { continue }
+        if ($t.StartsWith('*')) { $t = $t.Substring(1).Trim(); $current = $t }
+        $choices += $t
+    }
+    return [pscustomobject]@{ Choices = $choices; Current = $current }
+}
+function Get-AMRBatteryCleanChoices {
+    # HP pads PossibleValues with empty strings (seen on a real Victus). Drop blanks, trim, keep order, no duplicates.
+    param($Values)
+    $out = New-Object System.Collections.Generic.List[string]
+    foreach ($v in @($Values)) {
+        if ($null -eq $v) { continue }
+        $t = ([string]$v).Trim()
+        if ($t.Length -eq 0) { continue }
+        if (-not $out.Contains($t)) { [void]$out.Add($t) }
+    }
+    return ,@($out.ToArray())
+}
+function Get-AMRBatteryHpModeInfo {
+    # HP renamed the three Battery Health Manager values between BIOS versions (HP support doc ish_4449597):
+    #   older: "Let HP manage my battery charging" / "Maximize my battery health" / "Maximize my battery duration"
+    #   newer: "Let HP Manage My Battery Health" / "Maximize Battery Health Management" / "Minimize Battery Health Management"
+    # Order matters: the newer names all contain "health".
+    param([string]$Choice)
+    $c = ([string]$Choice).ToLowerInvariant()
+    if ($c -match 'let hp|hp manage') { return [pscustomobject]@{ Key='Adaptive'; Label='HP adaptive charging'; Hint='HP balances run time and battery health'; Order=2 } }
+    if ($c -match 'minimi[sz]e|duration|runtime|run time') { return [pscustomobject]@{ Key='Full'; Label='Maximize battery duration'; Hint='Charges to the full available capacity'; Order=3 } }
+    if ($c -match 'maximi[sz]e.*health') { return [pscustomobject]@{ Key='Health'; Label='Maximize battery health'; Hint='Limits charging to about 80% of design capacity'; Order=1 } }
+    return [pscustomobject]@{ Key='Other'; Label=[string]$Choice; Hint=''; Order=9 }
+}
+function Get-AMRBatteryHealthPercent {
+    param($Design,$Full)
+    try {
+        $d = [double]$Design; $f = [double]$Full
+        if ($d -le 0 -or $f -le 0) { return $null }
+        $p = [math]::Round(($f / $d) * 100, 1)
+        if ($p -gt 150) { return $null }
+        return $p
+    } catch { return $null }
+}
+function Get-AMRBatteryRangeSentence {
+    param($Caps)
+    if (-not $Caps) { return '' }
+    switch ([string]$Caps.Kind) {
+        'Range' { return ('This laptop firmware lets you stop charging anywhere from {0}% to {1}%. Values below {0}% are locked by the manufacturer.' -f $Caps.Min,$Caps.Max) }
+        'Steps' { return 'This laptop firmware offers fixed charging modes, not a free percentage. Choose one of the modes above.' }
+        'ReadOnly' { return [string]$Caps.Reason }
+        default { return [string]$Caps.Reason }
+    }
+}
+
+function Get-AMRBatteryDellModeInfo {
+    param([string]$Choice)
+    $c = ([string]$Choice).ToLowerInvariant()
+    if ($c -match '^custom') { return [pscustomobject]@{ Key='Custom'; Label='Custom (you choose start and stop)'; Hint='Charging starts and stops at the percentages you set'; Order=5 } }
+    if ($c -match 'primac|primary.?ac|primarily') { return [pscustomobject]@{ Key='PrimAc'; Label='Primarily AC use'; Hint='Dell: for laptops that stay plugged in most of the time'; Order=3 } }
+    if ($c -match 'express') { return [pscustomobject]@{ Key='Express'; Label='Express charge'; Hint='Dell fast charging'; Order=2 } }
+    if ($c -match 'adaptive') { return [pscustomobject]@{ Key='Adaptive'; Label='Adaptive'; Hint='Dell adjusts charging to your usage'; Order=4 } }
+    if ($c -match 'standard') { return [pscustomobject]@{ Key='Standard'; Label='Standard charge'; Hint='Dell: charges over a longer period'; Order=1 } }
+    return [pscustomobject]@{ Key='Other'; Label=[string]$Choice; Hint=''; Order=9 }
+}
+
+# ===== AMR Battery (r24): engines (WMI). Reads are read-only. Writes happen only from the Apply/Restore buttons. =====
+$script:AMRBatteryState = @{ Caps = $null; Telemetry = $null; Pending = $null; PendingMode = $null; Busy = $false; Opened = $false }
+$script:AMRBatteryOriginalFile = Join-Path $script:AppRoot 'battery-original.json'
+
+function Get-AMRBatteryProp {
+    # Set-StrictMode is on in AMR: read optional WMI properties without throwing when they are absent.
+    param($Obj,[string]$Name)
+    try { if ($null -ne $Obj) { $p = $Obj.PSObject.Properties[$Name]; if ($p) { return $p.Value } } } catch { }
+    return $null
+}
+function Get-AMRBatteryTelemetry {
+    $t = [ordered]@{ Percent=$null; Status=$null; PowerOnline=$null; Charging=$null; Discharging=$null; Design=$null; Full=$null; Cycles=$null; Name=$null }
+    try {
+        $b = Get-CimInstance -ClassName Win32_Battery -ErrorAction Stop | Select-Object -First 1
+        if ($b) {
+            $t.Percent = $b.EstimatedChargeRemaining; $t.Name = [string]$b.Name
+            if ($b.DesignCapacity) { $t.Design = [double]$b.DesignCapacity }
+            if ($b.FullChargeCapacity) { $t.Full = [double]$b.FullChargeCapacity }
+            $t.Status = [int]$b.BatteryStatus
+        }
+    } catch { }
+    try { $s = Get-CimInstance -Namespace root\wmi -ClassName BatteryStatus -ErrorAction Stop | Select-Object -First 1
+        if ($s) { $t.PowerOnline = $s.PowerOnline; $t.Charging = $s.Charging; $t.Discharging = $s.Discharging } } catch { }
+    try { $f = Get-CimInstance -Namespace root\wmi -ClassName BatteryFullChargedCapacity -ErrorAction Stop | Select-Object -First 1
+        if ($f -and $f.FullChargedCapacity) { $t.Full = [double]$f.FullChargedCapacity } } catch { }
+    try { $d = Get-CimInstance -Namespace root\wmi -ClassName BatteryStaticData -ErrorAction Stop | Select-Object -First 1
+        if ($d -and $d.DesignedCapacity) { $t.Design = [double]$d.DesignedCapacity } } catch { }
+    try { $c = Get-CimInstance -Namespace root\wmi -ClassName BatteryCycleCount -ErrorAction Stop | Select-Object -First 1
+        if ($c -and $null -ne $c.CycleCount) { $t.Cycles = [int]$c.CycleCount } } catch { }
+    return [pscustomobject]$t
+}
+
+function New-AMRBatteryCaps {
+    param([string]$Engine,[string]$Kind,[string]$Reason,[string]$Source='unverified')
+    return [pscustomobject]@{ Engine=$Engine; Kind=$Kind; Min=$null; Max=$null; Step=1; Allowed=@(); MinGap=0; Source=$Source; Reason=$Reason
+        CurrentStop=$null; CurrentStart=$null; CurrentMode=$null; ModeText=$null; Modes=@(); Writable=$false
+        DellNames=$null; StartMin=$null; StartMax=$null; HpName='Battery Health Manager'; Error=$null; Iface=$null; IfaceNote=''; Warnings=@() }
+}
+
+function Get-AMRBatteryDellInterfaces {
+    # Dell exposes the same BIOS attributes through more than one WMI interface. Each one is probed at runtime.
+    return @(
+        @{ Id='BiosAttributes'; Ns='root\dcim\sysman\biosattributes'; Enum='EnumerationAttribute'; Int='IntegerAttribute'; Conf='confirmed on a Dell Precision 5540 (read and name discovery); write path from public WMI recipe' },
+        @{ Id='CommandMonitor'; Ns='root\dcim\sysman'; Enum='DCIM_BIOSEnumeration'; Int='DCIM_BIOSInteger'; Conf='documentation only (Dell Command | Monitor), not tested on any machine' }
+    )
+}
+function Find-AMRBatteryDellAttr {
+    param($List,[string]$NamePattern,[string]$DisplayPattern)
+    foreach ($i in @($List)) { if ([string](Get-AMRBatteryProp $i 'AttributeName') -match $NamePattern) { return $i } }
+    foreach ($i in @($List)) { if ([string](Get-AMRBatteryProp $i 'DisplayName') -match $DisplayPattern) { return $i } }
+    return $null
+}
+function Get-AMRBatteryDellCaps {
+    $caps = New-AMRBatteryCaps -Engine 'Dell' -Kind 'None' -Reason 'Dell BIOS charge settings were not found on this machine.'
+    if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') { $caps.Reason = 'Dell documents this BIOS interface as not supported on ARM64.'; return $caps }
+    $denied = $false; $notPresent = 0; $other = ''; $found = $null
+    foreach ($if in (Get-AMRBatteryDellInterfaces)) {
+        $enum = $null
+        try { $enum = @(Get-CimInstance -Namespace $if.Ns -ClassName $if.Enum -ErrorAction Stop) }
+        catch {
+            $m = [string]$_.Exception.Message
+            if ($m -match 'denied') { $denied = $true } elseif ($m -match 'Invalid namespace|Invalid class|not found') { $notPresent++ } else { $other = $m }
+            continue
+        }
+        $mode = Find-AMRBatteryDellAttr -List $enum -NamePattern 'PrimaryBatt\w*Charge' -DisplayPattern 'Primary\s*Batter\w*\s*Charge'
+        if ($mode) { $found = @{ If=$if; Enum=$enum; Mode=$mode }; break }
+    }
+    if (-not $found) {
+        if ($denied) { $caps.Reason = 'Windows denied access to the Dell BIOS interface. Run AMR as Administrator.' }
+        elseif ($other) { $caps.Reason = 'Could not read the Dell BIOS interface: ' + $other }
+        elseif ($notPresent -ge 2) { $caps.Reason = 'No Dell BIOS WMI interface is present on this machine (neither the BIOS attributes interface nor Dell Command | Monitor).' }
+        else { $caps.Reason = 'This Dell BIOS does not expose a battery charge mode setting.' }
+        return $caps
+    }
+    $if = $found.If; $enum = $found.Enum; $mode = $found.Mode
+    $caps.Iface = $if.Id; $caps.IfaceNote = $if.Conf
+    $int = @()
+    try { $int = @(Get-CimInstance -Namespace $if.Ns -ClassName $if.Int -ErrorAction Stop) } catch { $int = @() }
+    $stop = Find-AMRBatteryDellAttr -List $int -NamePattern 'Custom\w*Charge\w*Stop|Custom\w*Charge\w*End' -DisplayPattern 'Custom\s*Charge\s*(Stop|End)'
+    $start = Find-AMRBatteryDellAttr -List $int -NamePattern 'Custom\w*Charge\w*Start' -DisplayPattern 'Custom\s*Charge\s*Start'
+    $possible = @(Get-AMRBatteryProp $mode 'PossibleValue' | ForEach-Object { [string]$_ })
+    $customValue = $null
+    foreach ($pv in $possible) { if ($pv -match '^Custom') { $customValue = $pv } }
+    $modeName = [string](Get-AMRBatteryProp $mode 'AttributeName')
+    try { $caps.CurrentMode = [string](@($mode.CurrentValue)[0]) } catch { }
+    $caps.ModeText = $caps.CurrentMode
+    $caps.Writable = $true; $caps.Reason = ''
+    $w = New-Object System.Collections.Generic.List[string]
+    # Read-only flag on the mode attribute itself.
+    $ro = Get-AMRBatteryProp $mode 'ReadOnly'
+    if ($null -ne $ro -and ([string]$ro -match 'True|^1$')) { $caps.Writable = $false; $caps.Reason = 'The BIOS marks the charge mode as read only on this machine.' }
+    # Documented conflicts. They are warnings, not blocks: the read-back after Apply is the real test.
+    $adv = Find-AMRBatteryDellAttr -List $enum -NamePattern '^AdvBatteryChargeCfg$' -DisplayPattern '^Advanced Batter\w* Charge'
+    if ($adv) { try { if ([string](@($adv.CurrentValue)[0]) -match 'Enable') { $w.Add('Advanced Battery Charge is enabled in the BIOS. Dell documents that it must be disabled before the charge mode can change, so the change may be refused.') } } catch { } }
+    $ll = Find-AMRBatteryDellAttr -List $enum -NamePattern '^LongLifeCyclePriBattery$' -DisplayPattern '^Long Life Cycle'
+    if ($ll) { try { if ([string](@($ll.CurrentValue)[0]) -match 'Enable') { $w.Add('A long life cycle battery option is enabled in the BIOS. Dell documents that the charge mode cannot be changed with a long life cycle battery.') } } catch { } }
+    $caps.Warnings = @($w.ToArray())
+    if ($customValue) {
+        $stopMin = 55; $stopMax = 100; $startMin = 50; $startMax = 95; $src = 'model table (documented Dell range)'; $inc = 1
+        $stopName = 'CustomChargeStop'; $startName = 'CustomChargeStart'
+        if ($stop -and $start) {
+            $stopName = [string]$stop.AttributeName; $startName = [string]$start.AttributeName
+            $sLo = Get-AMRBatteryProp $stop 'LowerBound'; $sHi = Get-AMRBatteryProp $stop 'UpperBound'
+            $tLo = Get-AMRBatteryProp $start 'LowerBound'; $tHi = Get-AMRBatteryProp $start 'UpperBound'
+            try {
+                if ($null -ne $sLo -and $null -ne $sHi -and [int]$sHi -gt [int]$sLo) { $stopMin = [int]$sLo; $stopMax = [int]$sHi; $src = 'read from firmware' }
+                if ($null -ne $tLo -and $null -ne $tHi -and [int]$tHi -gt [int]$tLo) { $startMin = [int]$tLo; $startMax = [int]$tHi }
+            } catch { }
+            try { $incRaw = Get-AMRBatteryProp $stop 'ScalarIncrement'; if ($null -ne $incRaw -and [int]$incRaw -ge 1) { $inc = [int]$incRaw } } catch { }
+            try { $caps.CurrentStop = [int](@($stop.CurrentValue)[0]) } catch { }
+            try { $caps.CurrentStart = [int](@($start.CurrentValue)[0]) } catch { }
+        } else {
+            $w.Add('This BIOS lists the Custom mode but did not list the start and stop values yet. The documented Dell names and range (stop 55 to 100, start 50 to 95) are used, and the read-back after Apply confirms them.')
+            $caps.Warnings = @($w.ToArray())
+        }
+        $caps.Kind = 'Range'; $caps.Min = $stopMin; $caps.Max = $stopMax; $caps.Step = $inc
+        $caps.Allowed = Get-AMRBatteryAllowedList -Min $stopMin -Max $stopMax -Step $inc
+        $caps.MinGap = 5; $caps.Source = $src; $caps.StartMin = $startMin; $caps.StartMax = $startMax
+        $caps.DellNames = [pscustomobject]@{ Mode=$modeName; Stop=$stopName; Start=$startName; CustomValue=$customValue }
+    } else {
+        # No Custom option on this BIOS: only the fixed charge modes it lists.
+        $caps.Kind = 'Steps'; $caps.Source = 'read from firmware'
+        $caps.DellNames = [pscustomobject]@{ Mode=$modeName; Stop=$null; Start=$null; CustomValue=$null }
+        $caps.Modes = @($possible | ForEach-Object { $i = Get-AMRBatteryDellModeInfo -Choice $_; [pscustomobject]@{ Value=$_; Key=$i.Key; Label=$i.Label; Hint=$i.Hint; Order=$i.Order } } | Sort-Object Order)
+        $cm = $caps.Modes | Where-Object { $_.Value -eq $caps.CurrentMode } | Select-Object -First 1
+        if ($cm) { $caps.ModeText = $cm.Label }
+        $caps.Warnings = @(@($caps.Warnings) + 'This Dell BIOS has no Custom charge option, so there is no stop percentage. Only the fixed charging modes it lists can be selected.')
+    }
+    # Password state (admin password blocks writes without the password, which v1 does not support).
+    try {
+        $pwNs = 'root\dcim\sysman\wmisecurity'
+        $pw = Get-CimInstance -Namespace $pwNs -ClassName PasswordObject -ErrorAction Stop | Where-Object { [string](Get-AMRBatteryProp $_ 'NameId') -match 'Admin' } | Select-Object -First 1
+        if ($pw -and [bool](Get-AMRBatteryProp $pw 'IsPasswordSet')) {
+            $caps.Writable = $false
+            $caps.Reason = 'A BIOS administrator password is set. Changing the limit needs the password, which this version does not support. Showing current values only.'
+        }
+    } catch { }
+    return $caps
+}
+
+function Get-AMRBatteryHpCaps {
+    $ns = 'root\HP\InstrumentedBIOS'
+    $caps = New-AMRBatteryCaps -Engine 'HP' -Kind 'None' -Reason 'No HP battery charging setting was found in this BIOS.'
+    $enumAll = $null
+    try { $enumAll = @(Get-CimInstance -Namespace $ns -ClassName HP_BIOSEnumeration -ErrorAction Stop) }
+    catch {
+        $m = [string]$_.Exception.Message
+        if ($m -match 'denied') { $caps.Reason = 'Windows denied access to the HP BIOS interface. Run AMR as Administrator.'; $caps.Error = $m; return $caps }
+        if ($m -match 'Invalid namespace|not found') { $caps.Reason = 'The HP BIOS WMI interface is not present on this machine.'; $caps.Error = $m; return $caps }
+        $enumAll = $null
+    }
+    $caps.Iface = 'HP_BIOSEnumeration'
+    $caps.IfaceNote = 'documentation only for the charge setting (HP Client Management and HP support pages); the interface itself was seen on an HP Victus'
+    $setting = $null
+    if ($enumAll) { $setting = $enumAll | Where-Object { ([string](Get-AMRBatteryProp $_ 'Name')).Trim() -match '^Battery Health Manager$' } | Select-Object -First 1 }
+    $choices = @(); $current = $null; $roFlag = $null
+    if ($setting) {
+        $choices = Get-AMRBatteryCleanChoices -Values (Get-AMRBatteryProp $setting 'PossibleValues')
+        $cv = Get-AMRBatteryProp $setting 'CurrentValue'; if ($null -ne $cv) { $current = ([string]$cv).Trim() }
+        $roFlag = Get-AMRBatteryProp $setting 'IsReadOnly'
+    }
+    if ($choices.Count -eq 0) {
+        try {
+            $s2 = Get-CimInstance -Namespace $ns -ClassName HP_BIOSSetting -ErrorAction Stop | Where-Object { ([string](Get-AMRBatteryProp $_ 'Name')).Trim() -match '^Battery Health Manager$' } | Select-Object -First 1
+            if ($s2) {
+                $p = ConvertFrom-AMRBatteryHpValue -Raw ([string](Get-AMRBatteryProp $s2 'Value'))
+                $choices = Get-AMRBatteryCleanChoices -Values $p.Choices; $current = $p.Current
+                $roFlag = Get-AMRBatteryProp $s2 'IsReadOnly'
+            }
+        } catch { }
+    }
+    # Other battery-related HP settings are listed read only, never written.
+    $others = New-Object System.Collections.Generic.List[string]
+    if ($enumAll) {
+        foreach ($o in @($enumAll)) {
+            $n = ([string](Get-AMRBatteryProp $o 'Name')).Trim()
+            if ($n -match 'batt|charg' -and $n -notmatch '^Battery Health Manager$|Remaining Time|Status$|Batt_LTemp|^Adaptive Battery Extender$') {
+                $ov = ''; try { $ov = ([string](Get-AMRBatteryProp $o 'CurrentValue')).Trim() } catch { }
+                [void]$others.Add($n + ' = ' + $ov)
+            }
+        }
+    }
+    $otherNote = ''
+    if ($others.Count -gt 0) { $otherNote = 'Other battery settings found in the BIOS (shown only, not changed): ' + ($others -join '; ') + '.' }
+    if ($choices.Count -eq 0) {
+        try { if (Get-CimInstance -Namespace root\wmi -ClassName HPBatteryChargeLimit -ErrorAction Stop) { $caps.Reason = 'This HP exposes a consumer charge limit interface. It is detected but not enabled in this version.' } } catch { }
+        $abe = $null
+        if ($enumAll) { $abe = $enumAll | Where-Object { ([string](Get-AMRBatteryProp $_ 'Name')).Trim() -eq 'Adaptive Battery Extender' } | Select-Object -First 1 }
+        if ($abe) {
+            $caps.ModeText = ('HP Adaptive Battery Extender: ' + ([string](Get-AMRBatteryProp $abe 'CurrentValue')).Trim() + ' (HP-managed, no percentage setting)')
+            $caps.Reason = 'This HP BIOS does not expose a user charge limit. It only has HP Adaptive Battery Extender, which HP manages itself and which has no percentage setting. Health and battery information are still shown.'
+        }
+        if ($otherNote) { $caps.Warnings = @($otherNote) }
+        return $caps
+    }
+    $caps.Kind = 'Steps'; $caps.Source = 'read from firmware'; $caps.Reason = ''; $caps.Writable = $true
+    $caps.Modes = @($choices | ForEach-Object { $i = Get-AMRBatteryHpModeInfo -Choice $_; [pscustomobject]@{ Value=$_; Key=$i.Key; Label=$i.Label; Hint=$i.Hint; Order=$i.Order } } | Sort-Object Order)
+    $caps.CurrentMode = $current
+    $cm = $caps.Modes | Where-Object { $_.Value -eq $current } | Select-Object -First 1
+    if ($cm) { $caps.ModeText = $cm.Label } else { $caps.ModeText = $current }
+    $w = New-Object System.Collections.Generic.List[string]
+    if ($null -ne $roFlag -and ([string]$roFlag -match 'True|^1$')) { $caps.Writable = $false; $caps.Reason = 'The BIOS marks Battery Health Manager as read only on this machine.' }
+    if (@($caps.Modes | Where-Object { $_.Key -eq 'Other' }).Count -gt 0) { [void]$w.Add('This BIOS lists a battery mode AMR does not recognise. It is shown by its BIOS name and has no description.') }
+    if (@($caps.Modes | Where-Object { $_.Key -eq 'Health' }).Count -gt 0) { [void]$w.Add('HP says the 80% mode can show 80% or 100% in the Windows battery icon depending on the model year, and a battery above 80% only drains down slowly.') }
+    if ($otherNote) { [void]$w.Add($otherNote) }
+    $caps.Warnings = @($w.ToArray())
+    try {
+        $pw = Get-CimInstance -Namespace $ns -ClassName HP_BIOSPassword -ErrorAction Stop | Where-Object { ([string](Get-AMRBatteryProp $_ 'Name')) -match 'Setup' } | Select-Object -First 1
+        if ($pw -and [bool](Get-AMRBatteryProp $pw 'IsSet')) {
+            $caps.Writable = $false
+            $caps.Reason = 'A BIOS setup password is set. Changing the mode needs the password, which this version does not support. Showing current values only.'
+        }
+    } catch { }
+    return $caps
+}
+
+function Get-AMRBatteryCaps {
+    $man = ''
+    try { $man = [string](Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction Stop).Manufacturer } catch { }
+    $hasBattery = $true
+    try { $hasBattery = [bool](Get-CimInstance -ClassName Win32_Battery -ErrorAction Stop | Select-Object -First 1) } catch { }
+    if (-not $hasBattery) { return (New-AMRBatteryCaps -Engine 'None' -Kind 'None' -Reason 'No battery was detected on this PC.') }
+    if ($man -match 'Dell') { return (Get-AMRBatteryDellCaps) }
+    if ($man -match 'HP|Hewlett') { return (Get-AMRBatteryHpCaps) }
+    return (New-AMRBatteryCaps -Engine 'Unsupported' -Kind 'None' -Reason ('No supported charging controller was found for "' + $man + '". Health and battery information are still shown.'))
+}
+
+function Invoke-AMRBatteryDellSet {
+    param([string]$Name,[string]$Value,[string]$Iface='BiosAttributes')
+    if ($Iface -eq 'CommandMonitor') {
+        $svc = Get-CimInstance -Namespace 'root\dcim\sysman' -ClassName DCIM_BIOSService -ErrorAction Stop | Select-Object -First 1
+        $r = Invoke-CimMethod -InputObject $svc -MethodName SetBIOSAttributes -Arguments @{ AttributeName=@($Name); AttributeValue=@($Value); AuthorizationToken=' ' } -ErrorAction Stop
+        return $r
+    }
+    $ns = 'root\dcim\sysman\biosattributes'
+    $iface2 = Get-CimInstance -Namespace $ns -ClassName BIOSAttributeInterface -ErrorAction Stop | Select-Object -First 1
+    $args = @{ SecType=[uint32]0; SecHndCount=[uint32]0; SecHandle=[byte[]]@(); AttributeName=$Name; AttributeValue=$Value }
+    $r = Invoke-CimMethod -InputObject $iface2 -MethodName SetAttribute -Arguments $args -ErrorAction Stop
+    return $r
+}
+function Invoke-AMRBatteryHpSet {
+    param([string]$Name,[string]$Value)
+    $ns = 'root\HP\InstrumentedBIOS'
+    $iface = Get-CimInstance -Namespace $ns -ClassName HP_BIOSSettingInterface -ErrorAction Stop | Select-Object -First 1
+    $r = Invoke-CimMethod -InputObject $iface -MethodName SetBIOSSetting -Arguments @{ Name=$Name; Value=$Value; Password='' } -ErrorAction Stop
+    return $r
+}
+function Get-AMRBatteryHpReturnText {
+    param($Code)
+    switch ([int]$Code) { 0 {'Success'} 1 {'Not supported'} 2 {'Unspecified error'} 3 {'Timeout'} 4 {'Failed'} 5 {'Invalid parameter'} 6 {'Access denied'} default {'Code ' + $Code} }
+}
+
+function Save-AMRBatteryOriginal {
+    param($Caps)
+    try {
+        if (Test-Path -LiteralPath $script:AMRBatteryOriginalFile) { return }   # keep the very first original
+        $dir = Split-Path -Parent $script:AMRBatteryOriginalFile
+        if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+        $o = [ordered]@{ Engine=$Caps.Engine; Saved=(Get-Date).ToString('s'); Mode=$Caps.CurrentMode; Stop=$Caps.CurrentStop; Start=$Caps.CurrentStart; DellNames=$Caps.DellNames }
+        ($o | ConvertTo-Json -Depth 4) | Set-Content -LiteralPath $script:AMRBatteryOriginalFile -Encoding UTF8
+    } catch { }
+}
+function Read-AMRBatteryOriginal {
+    try { if (Test-Path -LiteralPath $script:AMRBatteryOriginalFile) { return (Get-Content -LiteralPath $script:AMRBatteryOriginalFile -Raw | ConvertFrom-Json) } } catch { }
+    return $null
+}
+
+# Returns @{ Ok; Message; Caps } . Verification is by read-back; method return values are not trusted.
+function Set-AMRBatteryDell {
+    param($Caps,[string]$Mode,[int]$Stop,[bool]$SetValues)
+    $n = $Caps.DellNames
+    $log = New-Object System.Collections.Generic.List[string]
+    try {
+        if ([string]$Caps.CurrentMode -ne $Mode) { [void](Invoke-AMRBatteryDellSet -Name $n.Mode -Value $Mode -Iface $Caps.Iface); $log.Add("mode=$Mode") }
+        if ($SetValues) {
+            $start = Get-AMRBatteryDellStartFor -Stop $Stop -StartMin $Caps.StartMin -StartMax $Caps.StartMax -MinGap $Caps.MinGap
+            $curStop = $Caps.CurrentStop; if ($null -eq $curStop) { $curStop = 100 }
+            foreach ($which in (Get-AMRBatteryDellWriteOrder -CurrentStop $curStop -NewStop $Stop)) {
+                if ($which -eq 'Stop') { [void](Invoke-AMRBatteryDellSet -Name $n.Stop -Value ([string]$Stop) -Iface $Caps.Iface); $log.Add("stop=$Stop") }
+                else { [void](Invoke-AMRBatteryDellSet -Name $n.Start -Value ([string]$start) -Iface $Caps.Iface); $log.Add("start=$start") }
+            }
+        }
+    } catch { return @{ Ok=$false; Message=('Write failed: ' + $_.Exception.Message + ' (' + ($log -join ', ') + ')') } }
+    $new = Get-AMRBatteryDellCaps
+    $ok = ([string]$new.CurrentMode -eq $Mode)
+    if ($SetValues) { $ok = ($ok -and $new.CurrentStop -eq $Stop) }
+    if ($ok) { return @{ Ok=$true; Message=('Verified by read-back: ' + ($log -join ', ')); Caps=$new } }
+    return @{ Ok=$false; Message=('The firmware did not keep the value. Read back mode=' + $new.CurrentMode + ' stop=' + $new.CurrentStop + ' start=' + $new.CurrentStart); Caps=$new }
+}
+function Set-AMRBatteryHp {
+    param($Caps,[string]$Value)
+    try {
+        $r = Invoke-AMRBatteryHpSet -Name $Caps.HpName -Value $Value
+        $code = $null; try { $code = [int]$r.Return } catch { }
+        if ($null -ne $code -and $code -ne 0) { return @{ Ok=$false; Message=('HP BIOS refused the change: ' + (Get-AMRBatteryHpReturnText -Code $code)) } }
+    } catch { return @{ Ok=$false; Message=('Write failed: ' + $_.Exception.Message) } }
+    $new = Get-AMRBatteryHpCaps
+    if (([string]$new.CurrentMode).Trim() -eq $Value.Trim()) { return @{ Ok=$true; Message='Verified by read-back.'; Caps=$new } }
+    return @{ Ok=$false; Message=('The firmware did not keep the value. Read back: ' + $new.CurrentMode); Caps=$new }
+}
+
+# ===== AMR Battery (r24): UI wiring =====
+function Set-AMRBatteryText {
+    param([string]$Name,[string]$Text)
+    try { $el = C $Name; if ($el) { $el.Text = $Text } } catch { }
+}
+function New-AMRBatteryBrush {
+    param([string]$Hex)
+    $b = (New-Object System.Windows.Media.BrushConverter).ConvertFromString($Hex)
+    return $b
+}
+function Update-AMRBatteryChip {
+    param($Caps)
+    $chip = C 'BTTrustChip'; $txt = C 'BTTrustText'
+    if (-not $chip -or -not $txt) { return }
+    $label = 'Not controllable'; $color = '#55B49A70'
+    if ($Caps -and $Caps.Kind -ne 'None') {
+        if ([string]$Caps.Source -like 'read from firmware*') { $label = 'Range from firmware'; $color = '#8860C28A' }
+        elseif ([string]$Caps.Source -like 'model table*') { $label = 'Range from model table'; $color = '#88E0B050' }
+        else { $label = 'Range unverified'; $color = '#88E07070' }
+        if (-not $Caps.Writable) { $label = $label + ' | read only' }
+    }
+    $txt.Text = $label
+    $chip.BorderBrush = New-AMRBatteryBrush $color
+}
+
+function Update-AMRBatteryTelemetryView {
+    $t = Get-AMRBatteryTelemetry
+    $script:AMRBatteryState.Telemetry = $t
+    $pct = '--'; if ($null -ne $t.Percent) { $pct = ([string]$t.Percent + '%') }
+    Set-AMRBatteryText 'BTPercent' $pct
+    $ps = 'Battery state unknown'
+    if ($t.Charging -eq $true) { $ps = 'Charging' }
+    elseif ($t.Discharging -eq $true) { $ps = 'On battery' }
+    elseif ($t.PowerOnline -eq $true) { $ps = 'Plugged in, not charging' }
+    elseif ($null -ne $t.Status) { $ps = 'Windows battery status code ' + $t.Status }
+    Set-AMRBatteryText 'BTPowerState' $ps
+    Set-AMRBatteryText 'BTHeaderStatus' ($pct + '  |  ' + $ps)
+    $h = Get-AMRBatteryHealthPercent -Design $t.Design -Full $t.Full
+    if ($null -ne $h) { Set-AMRBatteryText 'BTHealth' ([string]$h + '%'); Set-AMRBatteryText 'BTHealthNote' 'Full charge capacity compared with design capacity.' }
+    else { Set-AMRBatteryText 'BTHealth' 'Not reported'; Set-AMRBatteryText 'BTHealthNote' 'This battery does not report its design capacity to Windows, so a health percentage cannot be calculated.' }
+    $cap = 'Full charge capacity: not reported'
+    if ($null -ne $t.Full) { $cap = ('Full charge: {0:N0} mWh' -f $t.Full); if ($null -ne $t.Design) { $cap = $cap + (' of {0:N0} mWh design' -f $t.Design) } }
+    Set-AMRBatteryText 'BTCapacity' $cap
+    $cy = 'Cycle count: not reported'; if ($null -ne $t.Cycles) { $cy = 'Cycle count: ' + $t.Cycles }
+    Set-AMRBatteryText 'BTCycles' $cy
+}
+
+# ---- custom slider (Canvas, no template) ----
+$script:AMRBatterySlider = @{ Thumb=$null; Zones=@(); Ticks=@(); Value=$null; Dragging=$false }
+$script:AMRBatteryTrackMax = 90.0
+function Get-AMRBatteryXForValue { param([double]$V,[double]$Width) $pad = 12.0; return ($pad + (($V - 10.0) / ($script:AMRBatteryTrackMax - 10.0)) * ($Width - 2 * $pad)) }
+function Get-AMRBatteryValueForX { param([double]$X,[double]$Width) $pad = 12.0; $v = 10.0 + (($X - $pad) / ($Width - 2 * $pad)) * ($script:AMRBatteryTrackMax - 10.0); if ($v -lt 10) { $v = 10 }; if ($v -gt $script:AMRBatteryTrackMax) { $v = $script:AMRBatteryTrackMax }; return $v }
+
+function Update-AMRBatterySliderLayout {
+    $cv = C 'BTCanvas'; if (-not $cv) { return }
+    $caps = $script:AMRBatteryState.Caps
+    $w = [double]$cv.ActualWidth; if ($w -lt 60) { return }
+    $cv.Children.Clear()
+    $top = 22.0; $h = 10.0
+    $conv = New-Object System.Windows.Media.BrushConverter
+    $show = ($caps -and $caps.Kind -eq 'Range')
+    $script:AMRBatteryTrackMax = 90.0
+    if ($show -and [double]$caps.Max -gt 90) { $script:AMRBatteryTrackMax = 100.0 }
+    $tmax = $script:AMRBatteryTrackMax
+    # full 10-90 track
+    $track = New-Object System.Windows.Controls.Border
+    $track.Width = $w - 24; $track.Height = $h; $track.CornerRadius = New-Object System.Windows.CornerRadius(5)
+    $track.Background = $conv.ConvertFromString('#22FFFFFF'); $track.BorderBrush = $conv.ConvertFromString('#33FFFFFF'); $track.BorderThickness = New-Object System.Windows.Thickness(1)
+    [System.Windows.Controls.Canvas]::SetLeft($track,12); [System.Windows.Controls.Canvas]::SetTop($track,$top)
+    [void]$cv.Children.Add($track)
+    if ($show) {
+        $min = [double]$caps.Min; $max = [double]$caps.Max
+        $xMin = Get-AMRBatteryXForValue -V ([math]::Max(10,$min)) -Width $w
+        $xMax = Get-AMRBatteryXForValue -V ([math]::Min($tmax,$max)) -Width $w
+        # locked zone (hatched look: dashed outline over a dim fill)
+        if ($min -gt 10) {
+            $lock = New-Object System.Windows.Shapes.Rectangle
+            $lock.Width = [math]::Max(1,$xMin - 12); $lock.Height = $h + 6; $lock.RadiusX = 4; $lock.RadiusY = 4
+            $lock.Fill = $conv.ConvertFromString('#33E07070'); $lock.Stroke = $conv.ConvertFromString('#99E07070'); $lock.StrokeThickness = 1
+            $lock.StrokeDashArray = New-Object System.Windows.Media.DoubleCollection; [void]$lock.StrokeDashArray.Add(2); [void]$lock.StrokeDashArray.Add(2)
+            $lock.ToolTip = ('Locked by the manufacturer. This laptop cannot stop charging below ' + $min + '%.')
+            [System.Windows.Controls.Canvas]::SetLeft($lock,12); [System.Windows.Controls.Canvas]::SetTop($lock,$top - 3)
+            [void]$cv.Children.Add($lock)
+        }
+        # supported zone
+        $zone = New-Object System.Windows.Controls.Border
+        $zone.Width = [math]::Max(2,$xMax - $xMin); $zone.Height = $h; $zone.CornerRadius = New-Object System.Windows.CornerRadius(5)
+        $g = New-Object System.Windows.Media.LinearGradientBrush; $g.StartPoint = New-Object System.Windows.Point(0,0); $g.EndPoint = New-Object System.Windows.Point(1,0)
+        [void]$g.GradientStops.Add((New-Object System.Windows.Media.GradientStop ([System.Windows.Media.ColorConverter]::ConvertFromString('#B49A70')),0))
+        [void]$g.GradientStops.Add((New-Object System.Windows.Media.GradientStop ([System.Windows.Media.ColorConverter]::ConvertFromString('#E9D8B5')),1))
+        $zone.Background = $g
+        [System.Windows.Controls.Canvas]::SetLeft($zone,$xMin); [System.Windows.Controls.Canvas]::SetTop($zone,$top)
+        [void]$cv.Children.Add($zone)
+    }
+    # ticks 10..90
+    for ($v = 10; $v -le $tmax; $v += 10) {
+        $x = Get-AMRBatteryXForValue -V $v -Width $w
+        $tl = New-Object System.Windows.Controls.TextBlock; $tl.Text = [string]$v + '%'; $tl.FontSize = 10; $tl.Foreground = $conv.ConvertFromString('#C9B27E')
+        [System.Windows.Controls.Canvas]::SetLeft($tl,$x - 10); [System.Windows.Controls.Canvas]::SetTop($tl,$top + 20)
+        [void]$cv.Children.Add($tl)
+    }
+    $script:AMRBatterySlider.Thumb = $null
+    if ($show) {
+        $val = $script:AMRBatteryState.Pending
+        if ($null -eq $val -and [string]$caps.CurrentMode -match '^Custom') { $val = $caps.CurrentStop }
+        if ($null -eq $val -or [int]$val -gt $tmax) { $val = [math]::Min($tmax,[int]$caps.Max) }
+        $script:AMRBatteryState.Pending = [int]$val
+        $thumb = New-Object System.Windows.Shapes.Ellipse
+        $thumb.Width = 22; $thumb.Height = 22; $thumb.Fill = $conv.ConvertFromString('#F4EAD5'); $thumb.Stroke = $conv.ConvertFromString('#B49A70'); $thumb.StrokeThickness = 2
+        $thumb.Effect = New-Object System.Windows.Media.Effects.DropShadowEffect -Property @{ Color=[System.Windows.Media.Colors]::Black; BlurRadius=8; ShadowDepth=2; Opacity=0.35 }
+        $thumb.IsHitTestVisible = $false
+        $thumbX = Get-AMRBatteryXForValue -V ([math]::Min($tmax,[double]$val)) -Width $w
+        [System.Windows.Controls.Canvas]::SetLeft($thumb,$thumbX - 11); [System.Windows.Controls.Canvas]::SetTop($thumb,$top - 6)
+        [void]$cv.Children.Add($thumb)
+        $script:AMRBatterySlider.Thumb = $thumb
+        $cv.Cursor = [System.Windows.Input.Cursors]::Hand
+    } else { $cv.Cursor = [System.Windows.Input.Cursors]::Arrow }
+}
+
+function Update-AMRBatteryPendingText {
+    $caps = $script:AMRBatteryState.Caps
+    $vt = C 'BTValueText'; $sv = C 'BTSubValueText'
+    if (-not $vt -or -not $sv) { return }
+    if ($caps -and $caps.Kind -eq 'Range') {
+        $p = [int]$script:AMRBatteryState.Pending
+        $vt.Text = ('Stop at ' + $p + '%')
+        $st = Get-AMRBatteryDellStartFor -Stop $p -StartMin $caps.StartMin -StartMax $caps.StartMax -MinGap $caps.MinGap
+        $sv.Text = ('Charging resumes at ' + $st + '%.  Current in BIOS: ' + $(if ($caps.CurrentMode -and [string]$caps.CurrentMode -notmatch '^Custom') { 'mode ' + $caps.CurrentMode + ' (no custom limit active)' } elseif ($null -ne $caps.CurrentStop) { 'stop ' + $caps.CurrentStop + '%' } else { 'unknown' }))
+    } elseif ($caps -and $caps.Kind -eq 'Steps') {
+        $vt.Text = [string]$caps.ModeText
+        $pm = $script:AMRBatteryState.PendingMode
+        if ($pm) { $m = $caps.Modes | Where-Object { $_.Value -eq $pm } | Select-Object -First 1; if ($m) { $sv.Text = ('Selected: ' + $m.Label + '. ' + $m.Hint) } }
+        else { $sv.Text = 'Current mode in BIOS.' }
+    } else {
+        $vt.Text = 'No charge limit available'
+        $sv.Text = [string]$caps.ModeText
+    }
+}
+
+function Update-AMRBatteryModeButtons {
+    $caps = $script:AMRBatteryState.Caps
+    $panel = C 'BTModePanel'; if (-not $panel) { return }
+    $panel.Children.Clear()
+    if (-not ($caps -and $caps.Kind -eq 'Steps')) { $panel.Visibility = 'Collapsed'; return }
+    $panel.Visibility = 'Visible'
+    foreach ($m in $caps.Modes) {
+        $btn = New-Object System.Windows.Controls.Button
+        $btn.Content = $m.Label; $btn.Style = $script:Window.FindResource('AMRUpdateGlassButtonStyle'); $btn.Margin = New-Object System.Windows.Thickness(0,0,8,6)
+        $btn.ToolTip = $m.Hint; $btn.Tag = [string]$m.Value
+        if ([string]$m.Value -eq [string]$script:AMRBatteryState.PendingMode) { $btn.BorderBrush = New-AMRBatteryBrush '#F4EAD5'; $btn.BorderThickness = New-Object System.Windows.Thickness(2) }
+        if (-not $caps.Writable) { $btn.IsEnabled = $false }
+        $btn.Add_Click({ param($s,$e) $script:AMRBatteryState.PendingMode = [string]$s.Tag; Update-AMRBatteryModeButtons; Update-AMRBatteryPendingText })
+        [void]$panel.Children.Add($btn)
+    }
+}
+
+function Update-AMRBatteryButtons {
+    $caps = $script:AMRBatteryState.Caps
+    $canWrite = ($caps -and $caps.Kind -ne 'None' -and $caps.Writable -and -not $script:AMRBatteryState.Busy)
+    foreach ($n in 'BTApplyBtn') { $b = C $n; if ($b) { $b.IsEnabled = [bool]$canWrite } }
+    $rb = C 'BTRestoreBtn'; if ($rb) { $rb.IsEnabled = [bool]($canWrite -and (Test-Path -LiteralPath $script:AMRBatteryOriginalFile)) }
+    $vb = C 'BTVerifyBtn'; if ($vb) { $vb.IsEnabled = [bool]($caps -and $caps.Kind -ne 'None') }
+}
+
+function Update-AMRBatteryLimitView {
+    $caps = $script:AMRBatteryState.Caps
+    Update-AMRBatteryChip -Caps $caps
+    Update-AMRBatteryModeButtons
+    $note = Get-AMRBatteryRangeSentence -Caps $caps
+    if ($caps -and $caps.Kind -ne 'None' -and -not $caps.Writable -and $caps.Reason) { $note = $note + ' ' + $caps.Reason }
+    $wl = $null; try { $wl = $caps.Warnings } catch { }
+    if ($wl) { foreach ($x in @($wl)) { $note = $note + ' ' + [string]$x } }
+    Set-AMRBatteryText 'BTRangeNote' $note
+    $man = ''; $model = ''
+    try { $cs = Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction Stop; $man = [string]$cs.Manufacturer; $model = [string]$cs.Model } catch { }
+    Set-AMRBatteryText 'BTDeviceText' (($man + ' ' + $model).Trim())
+    $eng = 'Charging controller: none detected'
+    if ($caps) {
+        $ifn = ''; try { if ($caps.Iface) { $ifn = ' Interface: ' + $caps.Iface + ' (' + $caps.IfaceNote + ').' } } catch { }
+        if ($caps.Kind -eq 'Range') { $eng = ('Charging controller: ' + $caps.Engine + ' BIOS (custom start and stop). Source: ' + $caps.Source + '.' + $ifn) }
+        elseif ($caps.Kind -eq 'Steps') { $eng = ('Charging controller: ' + $caps.Engine + ' BIOS (fixed charge modes). Source: ' + $caps.Source + '.' + $ifn) }
+        else { $eng = ('Charging controller: ' + $caps.Engine + ' (not controllable). ' + $caps.Reason) }
+    }
+    Set-AMRBatteryText 'BTEngineText' $eng
+    Update-AMRBatteryPendingText
+    Update-AMRBatterySliderLayout
+    Update-AMRBatteryButtons
+}
+
+function Invoke-AMRBatteryScan {
+    param([switch]$Quiet)
+    try {
+        Set-AMRBatteryText 'BTPowerState' 'Scanning...'
+        Set-AMRBatteryText 'BTVerifyLine' 'Reading the battery and firmware...'
+        try { $script:Window.Dispatcher.Invoke([Action]{}, [System.Windows.Threading.DispatcherPriority]::Render) } catch { }
+        Update-AMRBatteryTelemetryView
+        $script:AMRBatteryState.Caps = Get-AMRBatteryCaps
+        $script:AMRBatteryState.Pending = $null
+        $script:AMRBatteryState.PendingMode = $script:AMRBatteryState.Caps.CurrentMode
+        $caps = $script:AMRBatteryState.Caps
+        if (-not (Test-AMRAdmin) -and $caps.Kind -ne 'None') { $caps.Writable = $false; $caps.Reason = 'AMR is not running as Administrator, so changing the limit is disabled.' }
+        Update-AMRBatteryLimitView
+        $vl = 'Read-back: '
+        if ($caps.Kind -eq 'Range') { $vl += ('mode ' + $caps.CurrentMode + ', stop ' + $caps.CurrentStop + '%, start ' + $caps.CurrentStart + '% (read from firmware just now).') }
+        elseif ($caps.Kind -eq 'Steps') { $vl += ('mode "' + $caps.ModeText + '" (read from firmware just now).') }
+        else { $vl += 'nothing to verify on this laptop.' }
+        Set-AMRBatteryText 'BTVerifyLine' $vl
+    } catch {
+        Set-AMRBatteryText 'BTVerifyLine' ('Scan failed: ' + $_.Exception.Message)
+        try { Write-AMRLog ('Battery scan failed: ' + $_.Exception.Message) ERROR System } catch { }
+    }
+}
+
+function Invoke-AMRBatteryApply {
+    $st = $script:AMRBatteryState; $caps = $st.Caps
+    if (-not $caps -or $caps.Kind -eq 'None' -or -not $caps.Writable) { return }
+    if (-not (Test-AMRAdmin)) { [void](Show-AMRMessageGlass -Message 'Administrator rights are required to change the BIOS charging setting.' -Title 'AMR | Battery' -Buttons OK -Icon Warning); return }
+    $desc = ''
+    if ($caps.Kind -eq 'Range') {
+        $p = [int]$st.Pending
+        if ($p -lt $caps.Min -or $p -gt $caps.Max) { return }
+        $sv = Get-AMRBatteryDellStartFor -Stop $p -StartMin $caps.StartMin -StartMax $caps.StartMax -MinGap $caps.MinGap
+        $desc = ('Stop charging at ' + $p + '% and resume at ' + $sv + '%.')
+    } else {
+        if (-not $st.PendingMode -or [string]$st.PendingMode -eq [string]$caps.CurrentMode) { Set-AMRBatteryText 'BTVerifyLine' 'That mode is already active. Nothing to change.'; return }
+        $m = $caps.Modes | Where-Object { $_.Value -eq $st.PendingMode } | Select-Object -First 1
+        $desc = ('Set the ' + $caps.Engine + ' battery charge mode to: ' + $m.Label + '.')
+    }
+    $msg = $desc + "`n`nThis writes a setting to your laptop BIOS through the manufacturer's Windows interface. The current value is saved first so you can restore it, and AMR reads it back afterwards to check it was kept.`n`nContinue?"
+    $ans = Show-AMRMessageGlass -Message $msg -Title 'AMR | Battery charging protection' -Buttons YesNo -Icon Warning
+    if ($ans -ne [System.Windows.MessageBoxResult]::Yes) { return }
+    $st.Busy = $true; Update-AMRBatteryButtons
+    Set-AMRBatteryText 'BTVerifyLine' 'Writing to the BIOS...'
+    try { $script:Window.Dispatcher.Invoke([Action]{}, [System.Windows.Threading.DispatcherPriority]::Render) } catch { }
+    try {
+        Save-AMRBatteryOriginal -Caps $caps
+        $res = $null
+        if ($caps.Kind -eq 'Range') { $res = Set-AMRBatteryDell -Caps $caps -Mode $caps.DellNames.CustomValue -Stop ([int]$st.Pending) -SetValues $true }
+        elseif ($caps.Engine -eq 'Dell') { $res = Set-AMRBatteryDell -Caps $caps -Mode ([string]$st.PendingMode) -Stop 100 -SetValues $false }
+        else { $res = Set-AMRBatteryHp -Caps $caps -Value ([string]$st.PendingMode) }
+        if ($res.Caps) { $st.Caps = $res.Caps; $st.Pending = $null; $st.PendingMode = $res.Caps.CurrentMode }
+        if ($res.Ok) { Set-AMRBatteryText 'BTVerifyLine' ('Verified: ' + $res.Message); try { Write-AMRLog ('Battery: ' + $desc + ' ' + $res.Message) SUCCESS System } catch { } }
+        else { Set-AMRBatteryText 'BTVerifyLine' ('NOT verified: ' + $res.Message); try { Write-AMRLog ('Battery: change not verified. ' + $res.Message) WARNING System } catch { } }
+    } catch {
+        Set-AMRBatteryText 'BTVerifyLine' ('Failed: ' + $_.Exception.Message)
+        try { Write-AMRLog ('Battery apply failed: ' + $_.Exception.Message) ERROR System } catch { }
+    } finally { $st.Busy = $false }
+    Update-AMRBatteryLimitView
+}
+
+function Invoke-AMRBatteryRestore {
+    $st = $script:AMRBatteryState; $caps = $st.Caps
+    $o = Read-AMRBatteryOriginal
+    if (-not $o -or -not $caps -or $caps.Kind -eq 'None' -or -not $caps.Writable) { return }
+    if ([string]$o.Engine -ne [string]$caps.Engine) { Set-AMRBatteryText 'BTVerifyLine' 'The saved original belongs to a different charging controller. Not restoring.'; return }
+    if (-not (Test-AMRAdmin)) { return }
+    $what = 'the mode saved before your first change'
+    if ($caps.Kind -eq 'Range') { $what = ('mode ' + $o.Mode + $(if ($null -ne $o.Stop) { ', stop ' + $o.Stop + '%, start ' + $o.Start + '%' } else { '' })) } else { $what = ('mode ' + $o.Mode) }
+    $ans = Show-AMRMessageGlass -Message ("Restore the original BIOS charging setting?`n`n" + $what) -Title 'AMR | Battery charging protection' -Buttons YesNo -Icon Warning
+    if ($ans -ne [System.Windows.MessageBoxResult]::Yes) { return }
+    $st.Busy = $true; Update-AMRBatteryButtons
+    try {
+        $res = $null
+        if ($caps.Kind -eq 'Range') {
+            $isCustom = ([string]$o.Mode -match '^Custom')
+            if ($isCustom -and $null -ne $o.Stop) { $res = Set-AMRBatteryDell -Caps $caps -Mode ([string]$o.Mode) -Stop ([int]$o.Stop) -SetValues $true }
+            else { $res = Set-AMRBatteryDell -Caps $caps -Mode ([string]$o.Mode) -Stop 100 -SetValues $false }
+        } elseif ($caps.Engine -eq 'Dell') { $res = Set-AMRBatteryDell -Caps $caps -Mode ([string]$o.Mode) -Stop 100 -SetValues $false }
+        else { $res = Set-AMRBatteryHp -Caps $caps -Value ([string]$o.Mode) }
+        if ($res.Caps) { $st.Caps = $res.Caps; $st.Pending = $null; $st.PendingMode = $res.Caps.CurrentMode }
+        if ($res.Ok) { Set-AMRBatteryText 'BTVerifyLine' ('Restored. ' + $res.Message); try { Write-AMRLog ('Battery: original setting restored. ' + $res.Message) SUCCESS System } catch { } }
+        else { Set-AMRBatteryText 'BTVerifyLine' ('Restore NOT verified: ' + $res.Message); try { Write-AMRLog ('Battery: restore not verified. ' + $res.Message) WARNING System } catch { } }
+    } catch { Set-AMRBatteryText 'BTVerifyLine' ('Restore failed: ' + $_.Exception.Message) }
+    finally { $st.Busy = $false }
+    Update-AMRBatteryLimitView
+}
+
+function Initialize-AMRBatteryTab {
+    $tab = C 'ToolKitBatteryTab'; if (-not $tab) { return }
+    $cv = C 'BTCanvas'
+    if ($cv) {
+        $cv.Add_SizeChanged({ try { Update-AMRBatterySliderLayout } catch { } })
+        $setFromX = {
+            param($x)
+            $caps = $script:AMRBatteryState.Caps
+            if (-not ($caps -and $caps.Kind -eq 'Range' -and $caps.Writable)) { return }
+            $w = [double](C 'BTCanvas').ActualWidth
+            $v = Get-AMRBatteryValueForX -X $x -Width $w
+            $snap = Get-AMRBatteryNearestAllowed -Value $v -Allowed $caps.Allowed
+            if ($null -eq $snap) { return }
+            if ([int]$script:AMRBatteryState.Pending -ne [int]$snap) {
+                $script:AMRBatteryState.Pending = [int]$snap
+                $th = $script:AMRBatterySlider.Thumb
+                if ($th) { [System.Windows.Controls.Canvas]::SetLeft($th, (Get-AMRBatteryXForValue -V $snap -Width $w) - 11) }
+                Update-AMRBatteryPendingText
+            }
+        }
+        $script:AMRBatterySetFromX = $setFromX
+        $cv.Add_MouseLeftButtonDown({ param($s,$e)
+            $script:AMRBatterySlider.Dragging = $true; [void]$s.CaptureMouse()
+            & $script:AMRBatterySetFromX ($e.GetPosition($s).X) })
+        $cv.Add_MouseMove({ param($s,$e) if ($script:AMRBatterySlider.Dragging) { & $script:AMRBatterySetFromX ($e.GetPosition($s).X) } })
+        $cv.Add_MouseLeftButtonUp({ param($s,$e) $script:AMRBatterySlider.Dragging = $false; $s.ReleaseMouseCapture() })
+    }
+    $bind = @{
+        'BTApplyBtn'   = { Invoke-AMRBatteryApply }
+        'BTRestoreBtn' = { Invoke-AMRBatteryRestore }
+        'BTVerifyBtn'  = { Invoke-AMRBatteryScan }
+        'BTRefreshBtn' = { Invoke-AMRBatteryScan }
+        'BTReportBtn'  = { try { $p = Join-Path $env:TEMP 'amr-battery-report.html'; & powercfg.exe /batteryreport /output $p | Out-Null; if (Test-Path -LiteralPath $p) { Start-Process $p } else { Set-AMRBatteryText 'BTVerifyLine' 'Windows did not create a battery report on this PC.' } } catch { Set-AMRBatteryText 'BTVerifyLine' ('Battery report failed: ' + $_.Exception.Message) } }
+        'BTPowerBtn'   = { try { Start-Process 'ms-settings:powersleep' } catch { } }
+    }
+    foreach ($k in $bind.Keys) { $b = C $k; if ($b) { $b.Add_Click($bind[$k]) } }
+    # Hover identity for the cards: 220 ms colour fade on the border, no layout change.
+    foreach ($cardName in 'BTLimitCard') {
+        $card = C $cardName
+        if ($card) {
+            $card.Add_MouseEnter({ param($s,$e) try {
+                if (-not $s.Tag) { $s.Tag = $s.BorderBrush }
+                $br = New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.ColorConverter]::ConvertFromString('#40FFFFFF'))
+                $s.BorderBrush = $br
+                $a = New-Object System.Windows.Media.Animation.ColorAnimation; $a.To = [System.Windows.Media.ColorConverter]::ConvertFromString('#B49A70'); $a.Duration = [TimeSpan]::FromMilliseconds(220)
+                $br.BeginAnimation([System.Windows.Media.SolidColorBrush]::ColorProperty,$a) } catch { } })
+            $card.Add_MouseLeave({ param($s,$e) try {
+                $br = $s.BorderBrush
+                if ($br -is [System.Windows.Media.SolidColorBrush] -and $s.Tag) {
+                    $a = New-Object System.Windows.Media.Animation.ColorAnimation; $a.To = [System.Windows.Media.ColorConverter]::ConvertFromString('#40FFFFFF'); $a.Duration = [TimeSpan]::FromMilliseconds(220)
+                    $orig = $s.Tag; $card2 = $s
+                    $a.Add_Completed({ try { if (-not $card2.IsMouseOver) { $card2.BorderBrush = $orig } } catch { } }.GetNewClosure())
+                    $br.BeginAnimation([System.Windows.Media.SolidColorBrush]::ColorProperty,$a)
+                } } catch { } })
+        }
+    }
+    $tab.Add_Selected({ param($s,$e)
+        if ($e.OriginalSource -ne $s) { return }
+        Invoke-AMRBatteryScan
+    })
+}
+try { Initialize-AMRBatteryTab } catch { try { Write-AMRLog ('Battery tab init failed: ' + $_.Exception.Message) ERROR System } catch { } }
+
 $script:AMRStartupPhaseTimings['BeforeShowDialogMs'] = [int]$script:AMRStartupStopwatch.ElapsedMilliseconds
 Write-AMRLog ('Startup checkpoint: BeforeShowDialog={0}ms' -f $script:AMRStartupPhaseTimings['BeforeShowDialogMs']) INFO Startup
 [void]$script:Window.ShowDialog()
