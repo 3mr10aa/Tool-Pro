@@ -599,6 +599,8 @@ $script:LogUIRing = New-Object 'System.Collections.Generic.List[object]'
 $script:LogUIRingMax = 1500
 $script:LogUIRingKeep = 1200
 $script:LogUIShowAll = $false
+$script:LogUISearch = ''
+$script:LogSubTabsCtl = $null
 $script:LogUIDirty = @{}
 $script:LogUIAppended = @{}
 $script:LogUIAppendRebuildThreshold = 400
@@ -885,12 +887,15 @@ function ConvertTo-AMRLogDisplayMap {
     $lastBase = @{}
     $lastCount = @{}
     $toolAreas = @('Network','Security','Optimize','Backup','Activation')
+    $logSearch = [string]$script:LogUISearch
     foreach ($entry in $Entries) {
         $level = [string]$entry.Level
         if ($level -eq 'DEBUG') { continue }
         $line = [string]$entry.Line
         if ([string]::IsNullOrWhiteSpace($line)) { continue }
         if (-not $ShowAll -and -not (Test-AMRLogEntryMajor -Entry $entry)) { continue }
+        # Logs page search: show only lines that contain the typed text (case-insensitive; the line includes time, level and area).
+        if ($logSearch.Length -gt 0 -and $line.IndexOf($logSearch,[System.StringComparison]::OrdinalIgnoreCase) -lt 0) { continue }
         $area = [string]$entry.Area
         $sig = $null
         if (-not [bool]$entry.Major) {
@@ -3207,6 +3212,29 @@ Write-AMRLog ("Catalog item model: {0} ({1} items)." -f $(if ($script:AMRCatalog
         MinHeight="600" MinWidth="900" WindowStartupLocation="CenterScreen" WindowState="Normal" 
         Background="#18181B" Foreground="#E4E4E7" FontFamily="Segoe UI">
  <Window.Resources>
+  <!-- Software cards: shared overlay brushes (one instance each, no animation, frozen at startup). Defined FIRST in Window.Resources: templates below resolve StaticResource at parse time and cannot see later keys. -->
+  <RadialGradientBrush x:Key="AMRSoftCardGlowBrush" Center="0,0" GradientOrigin="0,0" RadiusX="0.7" RadiusY="1.0">
+   <GradientStop Color="#24FFFFFF" Offset="0"/>
+   <GradientStop Color="#0AFFFFFF" Offset="0.5"/>
+   <GradientStop Color="#00FFFFFF" Offset="1"/>
+  </RadialGradientBrush>
+  <LinearGradientBrush x:Key="AMRSoftCardHairBrush" StartPoint="0,0" EndPoint="1,1">
+   <GradientStop Color="#2EFFFFFF" Offset="0"/>
+   <GradientStop Color="#0AFFFFFF" Offset="0.5"/>
+   <GradientStop Color="#12FFFFFF" Offset="1"/>
+  </LinearGradientBrush>
+  <LinearGradientBrush x:Key="AMRSoftTileBrush" StartPoint="0,0" EndPoint="0,1">
+   <GradientStop Color="#FF4A4A53" Offset="0"/>
+   <GradientStop Color="#FF2F2F36" Offset="1"/>
+  </LinearGradientBrush>
+  <SolidColorBrush x:Key="AMRSoftTileEdgeBrush" Color="#1FFFFFFF"/>
+  <!-- Details popup Copy button: same glass face and warm edge as the Activation copy button (values copied, Activation untouched). -->
+  <LinearGradientBrush x:Key="AMRCopyBtnGlassBrush" StartPoint="0,0" EndPoint="1,1">
+   <GradientStop Color="#B85D574B" Offset="0"/><GradientStop Color="#E33B3D41" Offset="0.22"/><GradientStop Color="#E52C2E33" Offset="0.68"/><GradientStop Color="#D9232529" Offset="1"/>
+  </LinearGradientBrush>
+  <LinearGradientBrush x:Key="AMRCopyBtnEdgeBrush" StartPoint="0,0" EndPoint="1,1">
+   <GradientStop Color="#D9D4C29F" Offset="0"/><GradientStop Color="#986F624B" Offset="0.38"/><GradientStop Color="#665B554B" Offset="1"/>
+  </LinearGradientBrush>
   <!-- Full card template (details popup/toggle) used only by the Installed surface; the catalog uses a lean inline template. -->
   <DataTemplate x:Key="AMRInstalledCardTemplate">
           <!-- Fixed item-slot geometry prevents category-header visibility and progressive
@@ -3231,8 +3259,8 @@ Write-AMRLog ("Catalog item model: {0} ({1} items)." -f $(if ($script:AMRCatalog
               </Style.Triggers>
              </Style>
             </StackPanel.Style>
-            <Border Width="12" Height="2" CornerRadius="1" Background="#3B82F6" VerticalAlignment="Center" Margin="0,0,5,0"/>
-            <TextBlock Text="{Binding CategoryNumber}" Foreground="#8DBBFA" FontSize="9.5" FontWeight="SemiBold" VerticalAlignment="Center" Margin="0,0,0,0"/>
+            <Border Width="12" Height="2" CornerRadius="1" Background="#3B6FB8" VerticalAlignment="Center" Margin="0,0,5,0"/>
+            <TextBlock Text="{Binding CategoryNumber}" Foreground="#7E9CBE" FontSize="9.5" FontWeight="SemiBold" VerticalAlignment="Center" Margin="0,0,0,0"/>
            </StackPanel>
           <!-- Static shadow layer (no Effect): cheap to render and to scroll. -->
           <Border Grid.Row="1" IsHitTestVisible="False" HorizontalAlignment="Stretch" VerticalAlignment="Bottom" Height="63" Margin="2.5,0.5" CornerRadius="10.5" Background="#000000" Opacity="0.09"/>
@@ -3240,7 +3268,7 @@ Write-AMRLog ("Catalog item model: {0} ({1} items)." -f $(if ($script:AMRCatalog
           <Border Grid.Row="1" IsHitTestVisible="False" HorizontalAlignment="Stretch" VerticalAlignment="Bottom" Height="66" Margin="1,-1" CornerRadius="12" Background="#000000" Opacity="0.06"/>
           <!-- Static shadow layer (no Effect): cheap to render and to scroll. -->
           <Border Grid.Row="1" IsHitTestVisible="False" HorizontalAlignment="Stretch" VerticalAlignment="Bottom" Height="69" Margin="-0.5,-2.5" CornerRadius="13.5" Background="#000000" Opacity="0.035"/>
-          <Border x:Name="SoftwareCardSurface" Grid.Row="1" Background="#FF27272A" BorderBrush="#FF3F3F46" BorderThickness="1" CornerRadius="9" HorizontalAlignment="Stretch" VerticalAlignment="Bottom" RenderTransformOrigin="0.5,0.5">
+          <Border x:Name="SoftwareCardSurface" Grid.Row="1" Background="#FF222226" BorderBrush="#FF38383F" BorderThickness="1" CornerRadius="9" HorizontalAlignment="Stretch" VerticalAlignment="Bottom" RenderTransformOrigin="0.5,0.5">
            <Border.Style>
             <Style TargetType="Border">
              <Setter Property="Height" Value="60"/>
@@ -3254,7 +3282,7 @@ Write-AMRLog ("Catalog item model: {0} ({1} items)." -f $(if ($script:AMRCatalog
                <MultiTrigger.EnterActions>
                 <BeginStoryboard>
                  <Storyboard>
-                  <ColorAnimation Storyboard.TargetProperty="(Border.Background).(SolidColorBrush.Color)" To="#FF3B4652" Duration="0:0:0.16">
+                  <ColorAnimation Storyboard.TargetProperty="(Border.Background).(SolidColorBrush.Color)" To="#FF31353B" Duration="0:0:0.16">
                    <ColorAnimation.EasingFunction><CubicEase EasingMode="EaseOut"/></ColorAnimation.EasingFunction>
                   </ColorAnimation>
                   <ColorAnimation Storyboard.TargetProperty="(Border.BorderBrush).(SolidColorBrush.Color)" To="#FFFFE0AD" Duration="0:0:0.18">
@@ -3275,10 +3303,10 @@ Write-AMRLog ("Catalog item model: {0} ({1} items)." -f $(if ($script:AMRCatalog
                <MultiTrigger.ExitActions>
                 <BeginStoryboard>
                  <Storyboard>
-                  <ColorAnimation Storyboard.TargetProperty="(Border.Background).(SolidColorBrush.Color)" To="#FF27272A" Duration="0:0:0.21">
+                  <ColorAnimation Storyboard.TargetProperty="(Border.Background).(SolidColorBrush.Color)" To="#FF222226" Duration="0:0:0.21">
                    <ColorAnimation.EasingFunction><CubicEase EasingMode="EaseOut"/></ColorAnimation.EasingFunction>
                   </ColorAnimation>
-                  <ColorAnimation Storyboard.TargetProperty="(Border.BorderBrush).(SolidColorBrush.Color)" To="#FF3F3F46" Duration="0:0:0.21">
+                  <ColorAnimation Storyboard.TargetProperty="(Border.BorderBrush).(SolidColorBrush.Color)" To="#FF38383F" Duration="0:0:0.21">
                    <ColorAnimation.EasingFunction><CubicEase EasingMode="EaseOut"/></ColorAnimation.EasingFunction>
                   </ColorAnimation>
                   <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TransformGroup.Children)[1].(TranslateTransform.Y)" To="0" Duration="0:0:0.21">
@@ -3295,7 +3323,7 @@ Write-AMRLog ("Catalog item model: {0} ({1} items)." -f $(if ($script:AMRCatalog
                </MultiTrigger.ExitActions>
               </MultiTrigger>
               <DataTrigger Binding="{Binding IsSelected}" Value="True">
-               <Setter Property="Background" Value="#FF2C4054"/>
+               <Setter Property="Background" Value="#FF262E38"/>
                <Setter Property="BorderBrush" Value="#FFD7B77C"/>
                <Setter Property="BorderThickness" Value="1.4"/>
                </DataTrigger>
@@ -3303,15 +3331,15 @@ Write-AMRLog ("Catalog item model: {0} ({1} items)." -f $(if ($script:AMRCatalog
               <MultiDataTrigger><MultiDataTrigger.Conditions><Condition Binding="{Binding IsSelected}" Value="True"/><Condition Binding="{Binding RelativeSource={RelativeSource Self},Path=IsVisible}" Value="True"/></MultiDataTrigger.Conditions><MultiDataTrigger.EnterActions>
                 <BeginStoryboard>
                  <Storyboard>
-                  <ColorAnimation Storyboard.TargetProperty="(Border.Background).(SolidColorBrush.Color)" To="#FF31475B" Duration="0:0:0.18"/>
+                  <ColorAnimation Storyboard.TargetProperty="(Border.Background).(SolidColorBrush.Color)" To="#FF2A3340" Duration="0:0:0.18"/>
                   <ColorAnimation Storyboard.TargetProperty="(Border.BorderBrush).(SolidColorBrush.Color)" To="#FFFFDFA8" Duration="0:0:0.20"/>
                  </Storyboard>
                 </BeginStoryboard>
                </MultiDataTrigger.EnterActions><MultiDataTrigger.ExitActions>
                 <BeginStoryboard>
                  <Storyboard>
-                  <ColorAnimation Storyboard.TargetProperty="(Border.Background).(SolidColorBrush.Color)" To="#FF27272A" Duration="0:0:0.16"/>
-                  <ColorAnimation Storyboard.TargetProperty="(Border.BorderBrush).(SolidColorBrush.Color)" To="#FF3F3F46" Duration="0:0:0.16"/>
+                  <ColorAnimation Storyboard.TargetProperty="(Border.Background).(SolidColorBrush.Color)" To="#FF222226" Duration="0:0:0.16"/>
+                  <ColorAnimation Storyboard.TargetProperty="(Border.BorderBrush).(SolidColorBrush.Color)" To="#FF38383F" Duration="0:0:0.16"/>
                  </Storyboard>
                 </BeginStoryboard>
                </MultiDataTrigger.ExitActions></MultiDataTrigger>
@@ -3320,6 +3348,7 @@ Write-AMRLog ("Catalog item model: {0} ({1} items)." -f $(if ($script:AMRCatalog
            </Border.Style>
            <Grid>
             <Grid.RowDefinitions><RowDefinition Height="*"/></Grid.RowDefinitions>
+            <Border IsHitTestVisible="False" Grid.Row="0" Margin="-5,-3" CornerRadius="8" BorderThickness="1" Background="{StaticResource AMRSoftCardGlowBrush}" BorderBrush="{StaticResource AMRSoftCardHairBrush}"/>
             <Grid Grid.Row="0" VerticalAlignment="Center">
              <Grid.ColumnDefinitions>
               <ColumnDefinition Width="Auto"/>
@@ -3334,10 +3363,10 @@ Write-AMRLog ("Catalog item model: {0} ({1} items)." -f $(if ($script:AMRCatalog
               <CheckBox.Template>
                <ControlTemplate TargetType="CheckBox">
                 <Border x:Name="SelectionSurface" Width="18" Height="18" CornerRadius="5"
-                        Background="#FF202C3B" BorderBrush="#FF65758B" BorderThickness="1.2"
+                        Background="#FF1C222A" BorderBrush="#FF5B6573" BorderThickness="1.2"
                         SnapsToDevicePixels="True">
                  <Grid>
-                  <Path x:Name="SelectionTick" Data="M 3,9 L 7,13 L 15,4"
+                  <Path x:Name="SelectionTick" RenderTransformOrigin="0.5,0.5" Data="M 3,9 L 7,13 L 15,4"
                         Stroke="#FFFFFFFF" StrokeThickness="2.0" StrokeStartLineCap="Round"
                         StrokeEndLineCap="Round" StrokeLineJoin="Round" Visibility="Collapsed"
                         HorizontalAlignment="Center" VerticalAlignment="Center"/>
@@ -3346,7 +3375,7 @@ Write-AMRLog ("Catalog item model: {0} ({1} items)." -f $(if ($script:AMRCatalog
                 <ControlTemplate.Triggers>
                  <Trigger Property="IsMouseOver" Value="True">
                   <Setter TargetName="SelectionSurface" Property="BorderBrush" Value="#FFE0AD"/>
-                  <Setter TargetName="SelectionSurface" Property="Background" Value="#FF34465A"/>
+                  <Setter TargetName="SelectionSurface" Property="Background" Value="#FF2C3641"/>
                  </Trigger>
                  <Trigger Property="IsChecked" Value="True">
                   <Setter TargetName="SelectionSurface" Property="Background" Value="#FFB88D4D"/>
@@ -3361,7 +3390,7 @@ Write-AMRLog ("Catalog item model: {0} ({1} items)." -f $(if ($script:AMRCatalog
               </CheckBox.Template>
              </CheckBox>
              <Grid Grid.Column="1" Width="36" Height="36" Margin="0,0,8,0">
-              <Border Background="#3F3F46" CornerRadius="9"/>
+              <Border Background="{StaticResource AMRSoftTileBrush}" BorderBrush="{StaticResource AMRSoftTileEdgeBrush}" BorderThickness="1" CornerRadius="9"/>
               <TextBlock x:Name="SoftwareIconInitials" Text="{Binding Initials}" Foreground="#A1A1AA" FontSize="16" FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center">
                <TextBlock.Style>
                 <Style TargetType="TextBlock">
@@ -3375,7 +3404,7 @@ Write-AMRLog ("Catalog item model: {0} ({1} items)." -f $(if ($script:AMRCatalog
               <Image x:Name="SoftwareIconImage" Source="{Binding Icon, Mode=OneWay, TargetNullValue={x:Null}, FallbackValue={x:Null}}" Width="30" Height="30" Stretch="Uniform" HorizontalAlignment="Center" VerticalAlignment="Center" SnapsToDevicePixels="True" RenderOptions.BitmapScalingMode="LowQuality"/>
              </Grid>
              <StackPanel Grid.Column="2" VerticalAlignment="Center">
-              <TextBlock Text="{Binding Name}" FontSize="14" FontWeight="SemiBold" Foreground="#FFFFFF" TextWrapping="Wrap">
+              <TextBlock x:Name="SoftwareNameText" Text="{Binding Name}" FontSize="14" FontWeight="SemiBold" Foreground="#FFFFFF" TextWrapping="Wrap">
                <TextBlock.Style>
                 <Style TargetType="TextBlock">
                  <Style.Triggers>
@@ -3405,12 +3434,12 @@ Write-AMRLog ("Catalog item model: {0} ({1} items)." -f $(if ($script:AMRCatalog
              <ToggleButton x:Name="InstalledDetailsToggle" Grid.Column="3" IsChecked="{Binding DetailsExpanded, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" Width="25" Height="25" Margin="8,0,3,0" FontSize="15" FontWeight="Bold" Foreground="#FFFFFF" Background="#52525B" BorderBrush="#71717A" BorderThickness="1" Cursor="Hand" FocusVisualStyle="{x:Null}" VerticalAlignment="Center" HorizontalAlignment="Right" ToolTip="Show installation details">
               <ToggleButton.Template>
                <ControlTemplate TargetType="ToggleButton">
-                <Border x:Name="ArrowSurface" Background="#52525B" BorderBrush="#71717A" BorderThickness="1" CornerRadius="5" SnapsToDevicePixels="True">
-                 <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" RecognizesAccessKey="True"/>
+                <Border x:Name="ArrowSurface" Background="#52525B" BorderBrush="#71717A" BorderThickness="1" CornerRadius="5" SnapsToDevicePixels="True" RenderTransformOrigin="0.5,0.5">
+                 <ContentPresenter x:Name="ArrowGlyph" RenderTransformOrigin="0.5,0.5" HorizontalAlignment="Center" VerticalAlignment="Center" RecognizesAccessKey="True"/>
                 </Border>
                 <ControlTemplate.Triggers>
-                 <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="ArrowSurface" Property="Background" Value="#52525B"/><Setter TargetName="ArrowSurface" Property="BorderBrush" Value="#71717A"/></Trigger>
-                 <Trigger Property="IsPressed" Value="True"><Setter TargetName="ArrowSurface" Property="Background" Value="#52525B"/><Setter TargetName="ArrowSurface" Property="BorderBrush" Value="#71717A"/></Trigger>
+                 <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="ArrowSurface" Property="Background" Value="#62626C"/><Setter TargetName="ArrowSurface" Property="BorderBrush" Value="#8E8E99"/></Trigger>
+                 <Trigger Property="IsPressed" Value="True"><Setter TargetName="ArrowSurface" Property="Background" Value="#46464E"/><Setter TargetName="ArrowSurface" Property="BorderBrush" Value="#71717A"/><Setter TargetName="ArrowSurface" Property="RenderTransform"><Setter.Value><ScaleTransform ScaleX="0.9" ScaleY="0.9"/></Setter.Value></Setter></Trigger>
                  <Trigger Property="IsChecked" Value="True"><Setter Property="Content" Value="⌃"/></Trigger>
                 </ControlTemplate.Triggers>
                </ControlTemplate>
@@ -3447,17 +3476,17 @@ Write-AMRLog ("Catalog item model: {0} ({1} items)." -f $(if ($script:AMRCatalog
              <Control Focusable="False" IsTabStop="False">
 <Control.Template>
 <ControlTemplate TargetType="Control">
-<Border x:Name="InstalledDetailsPanel" Width="250" Margin="0" Padding="8" Background="#202B3B" BorderBrush="#527AA8" BorderThickness="1" CornerRadius="7" SnapsToDevicePixels="True">
+<Border x:Name="InstalledDetailsPanel" Width="250" Margin="0" Padding="8" Background="#1C232D" BorderBrush="#3F5F80" BorderThickness="1" CornerRadius="7" SnapsToDevicePixels="True">
              <StackPanel>
-              <TextBlock Text="Installation details" Foreground="#8FB8E8" FontSize="10" FontWeight="Bold" Margin="0,0,0,5"/>
+              <TextBlock Text="Installation details" Foreground="#7F9CBF" FontSize="10" FontWeight="Bold" Margin="0,0,0,5"/>
               <TextBlock Text="Full application name" Foreground="#94A3B8" FontSize="9"/>
               <TextBlock Text="{Binding DisplayName}" Foreground="#E2E8F0" FontSize="10" TextWrapping="Wrap" Margin="0,1,0,5"/>
               <TextBlock Text="Application ID" Foreground="#94A3B8" FontSize="9"/>
               <TextBlock Text="{Binding Id}" Foreground="#E2E8F0" FontSize="10" TextWrapping="Wrap" Margin="0,1,0,5"/>
               <TextBlock Text="Install path" Foreground="#94A3B8" FontSize="9"/>
               <DockPanel LastChildFill="True" Margin="0,1,0,5">
-               <Button x:Name="InstalledCopyPathBtn" DockPanel.Dock="Right" Content="⧉" Tag="{Binding DisplayInstallPath}" Width="24" Height="22" Margin="6,0,0,0" Padding="0" FontSize="13" Foreground="#FFFFFF" Background="#465569" BorderBrush="#718096" BorderThickness="1" Cursor="Hand" FocusVisualStyle="{x:Null}" ToolTip="Copy installation path">
-                <Button.Style><Style TargetType="Button"><Setter Property="Visibility" Value="Collapsed"/><Style.Triggers><DataTrigger Binding="{Binding HasCopyableInstallPath}" Value="True"><Setter Property="Visibility" Value="Visible"/></DataTrigger></Style.Triggers></Style></Button.Style>
+               <Button x:Name="InstalledCopyPathBtn" DockPanel.Dock="Right" Content="⧉" Tag="{Binding DisplayInstallPath}" Width="24" Height="22" Margin="6,0,0,0" Padding="0" FontSize="14" FontWeight="SemiBold" Foreground="#E8D8B5" Background="{StaticResource AMRCopyBtnGlassBrush}" BorderBrush="{StaticResource AMRCopyBtnEdgeBrush}" BorderThickness="1" Cursor="Hand" FocusVisualStyle="{x:Null}" ToolTip="Copy installation path">
+                <Button.Style><Style TargetType="Button"><Setter Property="Visibility" Value="Collapsed"/><Setter Property="Template"><Setter.Value><ControlTemplate TargetType="Button"><Border Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="8"><ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" Margin="{TemplateBinding Padding}"/></Border></ControlTemplate></Setter.Value></Setter><Style.Triggers><DataTrigger Binding="{Binding HasCopyableInstallPath}" Value="True"><Setter Property="Visibility" Value="Visible"/></DataTrigger></Style.Triggers></Style></Button.Style>
                </Button>
                <TextBlock Text="{Binding DisplayInstallPath, TargetNullValue='Not recorded by Windows', FallbackValue='Not recorded by Windows'}" Foreground="#E2E8F0" FontSize="10" TextWrapping="Wrap" VerticalAlignment="Center"/>
               </DockPanel>
@@ -3502,6 +3531,251 @@ Write-AMRLog ("Catalog item model: {0} ({1} items)." -f $(if ($script:AMRCatalog
   </LinearGradientBrush>
   <SolidColorBrush x:Key="OverviewOuterGlassBorder" Color="#9A80B8D8"/>
   <SolidColorBrush x:Key="OverviewInnerGlassBorder" Color="#805F83A8"/>
+  <!-- Performance cards: neutral graphite "liquid glass" (variant B). Static vector layers only (no blur, no shadow, no animation), shared by all cards. -->
+  <DrawingBrush x:Key="AMRPerfGlassBrush" Stretch="Fill" Viewbox="0,0,100,100" ViewboxUnits="Absolute">
+   <DrawingBrush.Drawing>
+    <DrawingGroup ClipGeometry="M0,0 L100,0 L100,100 L0,100 Z">
+     <GeometryDrawing Geometry="M0,0 L100,0 L100,100 L0,100 Z">
+      <GeometryDrawing.Brush>
+       <LinearGradientBrush StartPoint="0,0" EndPoint="0.8,1">
+        <GradientStop Color="#E01E2229" Offset="0"/>
+        <GradientStop Color="#DB14161B" Offset="0.55"/>
+        <GradientStop Color="#E61B1E24" Offset="1"/>
+       </LinearGradientBrush>
+      </GeometryDrawing.Brush>
+     </GeometryDrawing>
+     <GeometryDrawing Geometry="M0,0 L100,0 L100,100 L0,100 Z">
+      <GeometryDrawing.Brush>
+       <LinearGradientBrush StartPoint="0,0" EndPoint="0.9,0.9">
+        <GradientStop Color="#1CFFFFFF" Offset="0"/>
+        <GradientStop Color="#06FFFFFF" Offset="0.4"/>
+        <GradientStop Color="#00FFFFFF" Offset="0.7"/>
+       </LinearGradientBrush>
+      </GeometryDrawing.Brush>
+     </GeometryDrawing>
+     <GeometryDrawing Geometry="M0,0 L100,0 L100,30 Q 56,48 0,36 Z">
+      <GeometryDrawing.Brush>
+       <LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
+        <GradientStop Color="#24FFFFFF" Offset="0"/>
+        <GradientStop Color="#0AFFFFFF" Offset="0.5"/>
+        <GradientStop Color="#00FFFFFF" Offset="1"/>
+       </LinearGradientBrush>
+      </GeometryDrawing.Brush>
+     </GeometryDrawing>
+     <GeometryDrawing Geometry="M0,0 L100,0 L100,0.9 L0,0.9 Z">
+      <GeometryDrawing.Brush>
+       <LinearGradientBrush StartPoint="0,0" EndPoint="1,0">
+        <GradientStop Color="#00FFFFFF" Offset="0"/>
+        <GradientStop Color="#E6FFFFFF" Offset="0.1"/>
+        <GradientStop Color="#99FFFFFF" Offset="0.6"/>
+        <GradientStop Color="#00FFFFFF" Offset="1"/>
+       </LinearGradientBrush>
+      </GeometryDrawing.Brush>
+     </GeometryDrawing>
+     <GeometryDrawing Geometry="M0,0 L0.45,0 L0.45,100 L0,100 Z">
+      <GeometryDrawing.Brush>
+       <LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
+        <GradientStop Color="#D9FFFFFF" Offset="0"/>
+        <GradientStop Color="#00FFFFFF" Offset="0.5"/>
+       </LinearGradientBrush>
+      </GeometryDrawing.Brush>
+     </GeometryDrawing>
+     <GeometryDrawing Geometry="M2,1.6 L98,1.6 L98,2.2 L2,2.2 Z">
+      <GeometryDrawing.Brush>
+       <LinearGradientBrush StartPoint="0,0" EndPoint="1,0">
+        <GradientStop Color="#00FFFFFF" Offset="0"/>
+        <GradientStop Color="#24FFFFFF" Offset="0.25"/>
+        <GradientStop Color="#10FFFFFF" Offset="0.8"/>
+        <GradientStop Color="#00FFFFFF" Offset="1"/>
+       </LinearGradientBrush>
+      </GeometryDrawing.Brush>
+     </GeometryDrawing>
+     <GeometryDrawing Geometry="M0,92 L100,92 L100,100 L0,100 Z">
+      <GeometryDrawing.Brush>
+       <LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
+        <GradientStop Color="#00FFFFFF" Offset="0"/>
+        <GradientStop Color="#10FFFFFF" Offset="1"/>
+       </LinearGradientBrush>
+      </GeometryDrawing.Brush>
+     </GeometryDrawing>
+    </DrawingGroup>
+   </DrawingBrush.Drawing>
+  </DrawingBrush>
+  <LinearGradientBrush x:Key="AMRPerfGlassEdgeBrush" StartPoint="0,0" EndPoint="1,1">
+   <GradientStop Color="#E6FFFFFF" Offset="0"/>
+   <GradientStop Color="#2EFFFFFF" Offset="0.25"/>
+   <GradientStop Color="#14FFFFFF" Offset="0.7"/>
+   <GradientStop Color="#4DFFFFFF" Offset="1"/>
+  </LinearGradientBrush>
+  <!-- Soft graphite glass (S1): no rims, no specular band, no inner line. Static vector layers only; used for Cleanup, Overview, Logs and About panels. -->
+  <DrawingBrush x:Key="AMRSoftGlassBrush" Stretch="Fill" Viewbox="0,0,100,100" ViewboxUnits="Absolute">
+   <DrawingBrush.Drawing>
+    <DrawingGroup ClipGeometry="M0,0 L100,0 L100,100 L0,100 Z">
+     <GeometryDrawing Geometry="M0,0 L100,0 L100,100 L0,100 Z">
+      <GeometryDrawing.Brush>
+       <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
+        <GradientStop Color="#E61C1F25" Offset="0"/>
+        <GradientStop Color="#E6171A1F" Offset="0.6"/>
+        <GradientStop Color="#E61A1D22" Offset="1"/>
+       </LinearGradientBrush>
+      </GeometryDrawing.Brush>
+     </GeometryDrawing>
+     <GeometryDrawing Geometry="M0,0 L100,0 L100,100 L0,100 Z">
+      <GeometryDrawing.Brush>
+       <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
+        <GradientStop Color="#0DFFFFFF" Offset="0"/>
+        <GradientStop Color="#00FFFFFF" Offset="0.5"/>
+        <GradientStop Color="#06FFFFFF" Offset="1"/>
+       </LinearGradientBrush>
+      </GeometryDrawing.Brush>
+     </GeometryDrawing>
+     <GeometryDrawing Geometry="M0,0 L100,0 L100,100 L0,100 Z">
+      <GeometryDrawing.Brush>
+       <RadialGradientBrush Center="0,0" GradientOrigin="0,0" RadiusX="0.55" RadiusY="1.1">
+        <GradientStop Color="#16FFFFFF" Offset="0"/>
+        <GradientStop Color="#00FFFFFF" Offset="1"/>
+       </RadialGradientBrush>
+      </GeometryDrawing.Brush>
+     </GeometryDrawing>
+    </DrawingGroup>
+   </DrawingBrush.Drawing>
+  </DrawingBrush>
+  <LinearGradientBrush x:Key="AMRSoftGlassEdgeBrush" StartPoint="0,0" EndPoint="1,1">
+   <GradientStop Color="#26FFFFFF" Offset="0"/>
+   <GradientStop Color="#0FFFFFFF" Offset="0.5"/>
+   <GradientStop Color="#1AFFFFFF" Offset="1"/>
+  </LinearGradientBrush>
+  <!-- Performance cards: graphite glass B with softened rims (same layers, lower alpha). -->
+  <DrawingBrush x:Key="AMRPerfGlassSoftBrush" Stretch="Fill" Viewbox="0,0,100,100" ViewboxUnits="Absolute">
+   <DrawingBrush.Drawing>
+    <DrawingGroup ClipGeometry="M0,0 L100,0 L100,100 L0,100 Z">
+     <GeometryDrawing Geometry="M0,0 L100,0 L100,100 L0,100 Z">
+      <GeometryDrawing.Brush>
+       <LinearGradientBrush StartPoint="0,0" EndPoint="0.8,1">
+        <GradientStop Color="#E01E2229" Offset="0"/>
+        <GradientStop Color="#DB14161B" Offset="0.55"/>
+        <GradientStop Color="#E61B1E24" Offset="1"/>
+       </LinearGradientBrush>
+      </GeometryDrawing.Brush>
+     </GeometryDrawing>
+     <GeometryDrawing Geometry="M0,0 L100,0 L100,100 L0,100 Z">
+      <GeometryDrawing.Brush>
+       <LinearGradientBrush StartPoint="0,0" EndPoint="0.9,0.9">
+        <GradientStop Color="#1CFFFFFF" Offset="0"/>
+        <GradientStop Color="#06FFFFFF" Offset="0.4"/>
+        <GradientStop Color="#00FFFFFF" Offset="0.7"/>
+       </LinearGradientBrush>
+      </GeometryDrawing.Brush>
+     </GeometryDrawing>
+     <GeometryDrawing Geometry="M0,0 L100,0 L100,30 Q 56,48 0,36 Z">
+      <GeometryDrawing.Brush>
+       <LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
+        <GradientStop Color="#24FFFFFF" Offset="0"/>
+        <GradientStop Color="#0AFFFFFF" Offset="0.5"/>
+        <GradientStop Color="#00FFFFFF" Offset="1"/>
+       </LinearGradientBrush>
+      </GeometryDrawing.Brush>
+     </GeometryDrawing>
+     <GeometryDrawing Geometry="M0,0 L100,0 L100,0.9 L0,0.9 Z">
+      <GeometryDrawing.Brush>
+       <LinearGradientBrush StartPoint="0,0" EndPoint="1,0">
+        <GradientStop Color="#00FFFFFF" Offset="0"/>
+        <GradientStop Color="#8CFFFFFF" Offset="0.1"/>
+        <GradientStop Color="#59FFFFFF" Offset="0.6"/>
+        <GradientStop Color="#00FFFFFF" Offset="1"/>
+       </LinearGradientBrush>
+      </GeometryDrawing.Brush>
+     </GeometryDrawing>
+     <GeometryDrawing Geometry="M0,0 L0.45,0 L0.45,100 L0,100 Z">
+      <GeometryDrawing.Brush>
+       <LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
+        <GradientStop Color="#80FFFFFF" Offset="0"/>
+        <GradientStop Color="#00FFFFFF" Offset="0.5"/>
+       </LinearGradientBrush>
+      </GeometryDrawing.Brush>
+     </GeometryDrawing>
+     <GeometryDrawing Geometry="M2,1.6 L98,1.6 L98,2.2 L2,2.2 Z">
+      <GeometryDrawing.Brush>
+       <LinearGradientBrush StartPoint="0,0" EndPoint="1,0">
+        <GradientStop Color="#00FFFFFF" Offset="0"/>
+        <GradientStop Color="#14FFFFFF" Offset="0.25"/>
+        <GradientStop Color="#0AFFFFFF" Offset="0.8"/>
+        <GradientStop Color="#00FFFFFF" Offset="1"/>
+       </LinearGradientBrush>
+      </GeometryDrawing.Brush>
+     </GeometryDrawing>
+     <GeometryDrawing Geometry="M0,92 L100,92 L100,100 L0,100 Z">
+      <GeometryDrawing.Brush>
+       <LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
+        <GradientStop Color="#00FFFFFF" Offset="0"/>
+        <GradientStop Color="#10FFFFFF" Offset="1"/>
+       </LinearGradientBrush>
+      </GeometryDrawing.Brush>
+     </GeometryDrawing>
+    </DrawingGroup>
+   </DrawingBrush.Drawing>
+  </DrawingBrush>
+  <LinearGradientBrush x:Key="AMRPerfGlassSoftEdgeBrush" StartPoint="0,0" EndPoint="1,1">
+   <GradientStop Color="#99FFFFFF" Offset="0"/>
+   <GradientStop Color="#22FFFFFF" Offset="0.25"/>
+   <GradientStop Color="#10FFFFFF" Offset="0.7"/>
+   <GradientStop Color="#33FFFFFF" Offset="1"/>
+  </LinearGradientBrush>
+  <!-- Overview panels: S1 soft graphite plus wide soft light ramps from the top and left (no thin rim lines, no inner line; the lit edge is the 1px border). -->
+  <DrawingBrush x:Key="AMROverviewGlassBrush" Stretch="Fill" Viewbox="0,0,100,100" ViewboxUnits="Absolute">
+   <DrawingBrush.Drawing>
+    <DrawingGroup ClipGeometry="M0,0 L100,0 L100,100 L0,100 Z">
+     <GeometryDrawing Geometry="M0,0 L100,0 L100,100 L0,100 Z">
+      <GeometryDrawing.Brush>
+       <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
+        <GradientStop Color="#E61C1F25" Offset="0"/>
+        <GradientStop Color="#E6171A1F" Offset="0.6"/>
+        <GradientStop Color="#E61A1D22" Offset="1"/>
+       </LinearGradientBrush>
+      </GeometryDrawing.Brush>
+     </GeometryDrawing>
+     <GeometryDrawing Geometry="M0,0 L100,0 L100,100 L0,100 Z">
+      <GeometryDrawing.Brush>
+       <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
+        <GradientStop Color="#0DFFFFFF" Offset="0"/>
+        <GradientStop Color="#00FFFFFF" Offset="0.5"/>
+        <GradientStop Color="#06FFFFFF" Offset="1"/>
+       </LinearGradientBrush>
+      </GeometryDrawing.Brush>
+     </GeometryDrawing>
+     <GeometryDrawing Geometry="M0,0 L100,0 L100,100 L0,100 Z">
+      <GeometryDrawing.Brush>
+       <RadialGradientBrush Center="0,0" GradientOrigin="0,0" RadiusX="0.55" RadiusY="1.1">
+        <GradientStop Color="#16FFFFFF" Offset="0"/>
+        <GradientStop Color="#00FFFFFF" Offset="1"/>
+       </RadialGradientBrush>
+      </GeometryDrawing.Brush>
+     </GeometryDrawing>
+     <GeometryDrawing Geometry="M0,0 L100,0 L100,30 L0,30 Z">
+      <GeometryDrawing.Brush>
+       <LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
+        <GradientStop Color="#14FFFFFF" Offset="0"/>
+        <GradientStop Color="#00FFFFFF" Offset="1"/>
+       </LinearGradientBrush>
+      </GeometryDrawing.Brush>
+     </GeometryDrawing>
+     <GeometryDrawing Geometry="M0,0 L22,0 L22,100 L0,100 Z">
+      <GeometryDrawing.Brush>
+       <LinearGradientBrush StartPoint="0,0" EndPoint="1,0">
+        <GradientStop Color="#12FFFFFF" Offset="0"/>
+        <GradientStop Color="#00FFFFFF" Offset="1"/>
+       </LinearGradientBrush>
+      </GeometryDrawing.Brush>
+     </GeometryDrawing>
+    </DrawingGroup>
+   </DrawingBrush.Drawing>
+  </DrawingBrush>
+  <LinearGradientBrush x:Key="AMROverviewGlassEdgeBrush" StartPoint="0,0" EndPoint="1,1">
+   <GradientStop Color="#A6FFFFFF" Offset="0"/>
+   <GradientStop Color="#2EFFFFFF" Offset="0.22"/>
+   <GradientStop Color="#12FFFFFF" Offset="0.6"/>
+   <GradientStop Color="#3DFFFFFF" Offset="1"/>
+  </LinearGradientBrush>
 
   <!-- Windows Update Center controls: scoped premium glass template with hover/press motion. -->
   <Style x:Key="AMRUpdateGlassButtonStyle" TargetType="Button">
@@ -4297,27 +4571,27 @@ Write-AMRLog ("Catalog item model: {0} ({1} items)." -f $(if ($script:AMRCatalog
          </StackPanel>
         </Grid>
         <UniformGrid Columns="3" Margin="0,0,0,10">
-         <Border Background="{StaticResource OverviewOuterGlassBrush}" BorderBrush="{StaticResource OverviewOuterGlassBorder}" BorderThickness="1" CornerRadius="11" Padding="12" Margin="4">
+         <Border Background="{StaticResource AMROverviewGlassBrush}" BorderBrush="{StaticResource AMROverviewGlassEdgeBrush}" BorderThickness="1" CornerRadius="11" Padding="12" Margin="4">
           <StackPanel><TextBlock Text="WINDOWS" Foreground="#7DB7F0" FontSize="10" FontWeight="Bold"/><TextBlock Name="ovOS" Text="OS: Reading…" Foreground="#F1F5F9" FontSize="14" FontWeight="SemiBold" Margin="0,6,0,2" TextWrapping="Wrap"/><TextBlock Name="ovBuild" Text="Build: Reading…" Foreground="#AFC4DA" FontSize="10" TextWrapping="Wrap"/></StackPanel>
          </Border>
-         <Border Background="{StaticResource OverviewOuterGlassBrush}" BorderBrush="{StaticResource OverviewOuterGlassBorder}" BorderThickness="1" CornerRadius="11" Padding="12" Margin="4">
+         <Border Background="{StaticResource AMROverviewGlassBrush}" BorderBrush="{StaticResource AMROverviewGlassEdgeBrush}" BorderThickness="1" CornerRadius="11" Padding="12" Margin="4">
           <StackPanel><TextBlock Text="DEVICE" Foreground="#7DB7F0" FontSize="10" FontWeight="Bold"/><TextBlock Name="ovPCName" Text="Device: Reading…" Foreground="#F1F5F9" FontSize="14" FontWeight="SemiBold" Margin="0,6,0,2" TextWrapping="Wrap"/><TextBlock Name="ovDeviceModel" Text="Model: Reading…" Foreground="#AFC4DA" FontSize="10" TextWrapping="Wrap"/><TextBlock Name="ovArch" Text="Architecture: Reading…" Foreground="#AFC4DA" FontSize="10"/></StackPanel>
          </Border>
-         <Border Background="{StaticResource OverviewOuterGlassBrush}" BorderBrush="{StaticResource OverviewOuterGlassBorder}" BorderThickness="1" CornerRadius="11" Padding="12" Margin="4">
+         <Border Background="{StaticResource AMROverviewGlassBrush}" BorderBrush="{StaticResource AMROverviewGlassEdgeBrush}" BorderThickness="1" CornerRadius="11" Padding="12" Margin="4">
           <StackPanel><TextBlock Text="DEVICE CLASS" Foreground="#7DB7F0" FontSize="10" FontWeight="Bold"/><TextBlock Name="ovDeviceType" Text="Device type: Reading…" Foreground="#F1F5F9" FontSize="14" FontWeight="SemiBold" Margin="0,6,0,2" TextWrapping="Wrap"/><TextBlock Name="ovLastBoot" Text="Last boot: Reading…" Foreground="#AFC4DA" FontSize="10" TextWrapping="Wrap"/></StackPanel>
          </Border>
         </UniformGrid>
 
-        <Border Background="{StaticResource OverviewOuterGlassBrush}" BorderBrush="{StaticResource OverviewOuterGlassBorder}" BorderThickness="1" CornerRadius="13" Padding="11" Margin="4,0,4,10"><Border.Effect><DropShadowEffect Color="#07111F" BlurRadius="17" ShadowDepth="3" Opacity="0.30"/></Border.Effect>
+        <Border Background="{StaticResource AMROverviewGlassBrush}" BorderBrush="{StaticResource AMROverviewGlassEdgeBrush}" BorderThickness="1" CornerRadius="13" Padding="11" Margin="4,0,4,10"><Border.Effect><DropShadowEffect Color="#07111F" BlurRadius="17" ShadowDepth="3" Opacity="0.30"/></Border.Effect>
          <StackPanel>
           <TextBlock Text="PERFORMANCE" Foreground="#9CCCF5" FontSize="11" FontWeight="Bold" Margin="2,0,2,8"/>
           <UniformGrid Columns="4">
-           <Border Background="{StaticResource OverviewInnerGlassBrush}" BorderBrush="{StaticResource OverviewInnerGlassBorder}" BorderThickness="1" CornerRadius="9" Padding="10" Margin="3"><Border.Effect><DropShadowEffect Color="#020817" BlurRadius="10" ShadowDepth="1" Opacity="0.25"/></Border.Effect><StackPanel><TextBlock Text="CPU LOAD" Foreground="#9DB8D2" FontSize="9" FontWeight="Bold"/><TextBlock Name="ovCPUUsageValue" Text="--%" Foreground="#F4F8FC" FontSize="21" FontWeight="Bold" Margin="0,4,0,5"/><ProgressBar Name="ovCPUUsageBar" Height="6" Minimum="0" Maximum="100" Value="0" Background="#263B50" Foreground="#56A6E8" BorderThickness="0"/><TextBlock Name="ovCPUUsageDetail" Text="Waiting for sample" Foreground="#AFC4DA" FontSize="9" Margin="0,5,0,0" TextWrapping="Wrap"/></StackPanel></Border>
-           <Border Background="{StaticResource OverviewInnerGlassBrush}" BorderBrush="{StaticResource OverviewInnerGlassBorder}" BorderThickness="1" CornerRadius="9" Padding="10" Margin="3"><Border.Effect><DropShadowEffect Color="#020817" BlurRadius="10" ShadowDepth="1" Opacity="0.25"/></Border.Effect><StackPanel><TextBlock Text="MEMORY" Foreground="#9DB8D2" FontSize="9" FontWeight="Bold"/><TextBlock Name="ovMemoryUsageValue" Text="--%" Foreground="#F4F8FC" FontSize="21" FontWeight="Bold" Margin="0,4,0,5"/><ProgressBar Name="ovMemoryUsageBar" Height="6" Minimum="0" Maximum="100" Value="0" Background="#263B50" Foreground="#55C4A1" BorderThickness="0"/><TextBlock Name="ovMemoryUsageDetail" Text="Waiting for sample" Foreground="#AFC4DA" FontSize="9" Margin="0,5,0,0" TextWrapping="Wrap"/></StackPanel></Border>
-           <Border Background="{StaticResource OverviewInnerGlassBrush}" BorderBrush="{StaticResource OverviewInnerGlassBorder}" BorderThickness="1" CornerRadius="9" Padding="10" Margin="3"><Border.Effect><DropShadowEffect Color="#020817" BlurRadius="10" ShadowDepth="1" Opacity="0.25"/></Border.Effect><StackPanel><TextBlock Text="GPU LOAD" Foreground="#9DB8D2" FontSize="9" FontWeight="Bold"/><TextBlock Name="ovGPUUsageValue" Text="N/A" Foreground="#F4F8FC" FontSize="21" FontWeight="Bold" Margin="0,4,0,5"/><ProgressBar Name="ovGPUUsageBar" Height="6" Minimum="0" Maximum="100" Value="0" Background="#263B50" Foreground="#B69AE8" BorderThickness="0"/><TextBlock Name="ovGPUUsageDetail" Text="Waiting for GPU sample" Foreground="#AFC4DA" FontSize="9" Margin="0,5,0,0" TextWrapping="Wrap"/></StackPanel></Border>
-           <Border Background="{StaticResource OverviewInnerGlassBrush}" BorderBrush="{StaticResource OverviewInnerGlassBorder}" BorderThickness="1" CornerRadius="9" Padding="10" Margin="3"><Border.Effect><DropShadowEffect Color="#020817" BlurRadius="10" ShadowDepth="1" Opacity="0.25"/></Border.Effect><StackPanel><TextBlock Text="NETWORK" Foreground="#9DB8D2" FontSize="9" FontWeight="Bold"/><TextBlock Name="ovNetworkStatusValue" Text="--" Foreground="#F4F8FC" FontSize="17" FontWeight="Bold" Margin="0,6,0,7" TextWrapping="Wrap"/><TextBlock Name="ovNetworkStatusDetail" Text="Waiting for sample" Foreground="#AFC4DA" FontSize="9" TextWrapping="Wrap"/></StackPanel></Border>
+           <Border Background="{StaticResource AMROverviewGlassBrush}" BorderBrush="{StaticResource AMROverviewGlassEdgeBrush}" BorderThickness="1" CornerRadius="9" Padding="10" Margin="3"><Border.Effect><DropShadowEffect Color="#020817" BlurRadius="10" ShadowDepth="1" Opacity="0.25"/></Border.Effect><StackPanel><TextBlock Text="CPU LOAD" Foreground="#9DB8D2" FontSize="9" FontWeight="Bold"/><TextBlock Name="ovCPUUsageValue" Text="--%" Foreground="#F4F8FC" FontSize="21" FontWeight="Bold" Margin="0,4,0,5"/><ProgressBar Name="ovCPUUsageBar" Height="6" Minimum="0" Maximum="100" Value="0" Background="#263B50" Foreground="#56A6E8" BorderThickness="0"/><TextBlock Name="ovCPUUsageDetail" Text="Waiting for sample" Foreground="#AFC4DA" FontSize="9" Margin="0,5,0,0" TextWrapping="Wrap"/></StackPanel></Border>
+           <Border Background="{StaticResource AMROverviewGlassBrush}" BorderBrush="{StaticResource AMROverviewGlassEdgeBrush}" BorderThickness="1" CornerRadius="9" Padding="10" Margin="3"><Border.Effect><DropShadowEffect Color="#020817" BlurRadius="10" ShadowDepth="1" Opacity="0.25"/></Border.Effect><StackPanel><TextBlock Text="MEMORY" Foreground="#9DB8D2" FontSize="9" FontWeight="Bold"/><TextBlock Name="ovMemoryUsageValue" Text="--%" Foreground="#F4F8FC" FontSize="21" FontWeight="Bold" Margin="0,4,0,5"/><ProgressBar Name="ovMemoryUsageBar" Height="6" Minimum="0" Maximum="100" Value="0" Background="#263B50" Foreground="#55C4A1" BorderThickness="0"/><TextBlock Name="ovMemoryUsageDetail" Text="Waiting for sample" Foreground="#AFC4DA" FontSize="9" Margin="0,5,0,0" TextWrapping="Wrap"/></StackPanel></Border>
+           <Border Background="{StaticResource AMROverviewGlassBrush}" BorderBrush="{StaticResource AMROverviewGlassEdgeBrush}" BorderThickness="1" CornerRadius="9" Padding="10" Margin="3"><Border.Effect><DropShadowEffect Color="#020817" BlurRadius="10" ShadowDepth="1" Opacity="0.25"/></Border.Effect><StackPanel><TextBlock Text="GPU LOAD" Foreground="#9DB8D2" FontSize="9" FontWeight="Bold"/><TextBlock Name="ovGPUUsageValue" Text="N/A" Foreground="#F4F8FC" FontSize="21" FontWeight="Bold" Margin="0,4,0,5"/><ProgressBar Name="ovGPUUsageBar" Height="6" Minimum="0" Maximum="100" Value="0" Background="#263B50" Foreground="#B69AE8" BorderThickness="0"/><TextBlock Name="ovGPUUsageDetail" Text="Waiting for GPU sample" Foreground="#AFC4DA" FontSize="9" Margin="0,5,0,0" TextWrapping="Wrap"/></StackPanel></Border>
+           <Border Background="{StaticResource AMROverviewGlassBrush}" BorderBrush="{StaticResource AMROverviewGlassEdgeBrush}" BorderThickness="1" CornerRadius="9" Padding="10" Margin="3"><Border.Effect><DropShadowEffect Color="#020817" BlurRadius="10" ShadowDepth="1" Opacity="0.25"/></Border.Effect><StackPanel><TextBlock Text="NETWORK" Foreground="#9DB8D2" FontSize="9" FontWeight="Bold"/><TextBlock Name="ovNetworkStatusValue" Text="--" Foreground="#F4F8FC" FontSize="17" FontWeight="Bold" Margin="0,6,0,7" TextWrapping="Wrap"/><TextBlock Name="ovNetworkStatusDetail" Text="Waiting for sample" Foreground="#AFC4DA" FontSize="9" TextWrapping="Wrap"/></StackPanel></Border>
           </UniformGrid>
-          <Border Background="{StaticResource OverviewInnerGlassBrush}" BorderBrush="{StaticResource OverviewInnerGlassBorder}" BorderThickness="1" CornerRadius="9" Padding="10" Margin="3,7,3,0">
+          <Border Background="{StaticResource AMROverviewGlassBrush}" BorderBrush="{StaticResource AMROverviewGlassEdgeBrush}" BorderThickness="1" CornerRadius="9" Padding="10" Margin="3,7,3,0">
            <StackPanel>
             <Grid Margin="0,0,0,5"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><TextBlock Text="SYSTEM STORAGE · C:" Foreground="#9DB8D2" FontSize="9" FontWeight="Bold"/><TextBlock Name="ovSystemDriveStorageValue" Grid.Column="1" Text="N/A" Foreground="#D7E8F5" FontSize="10" FontWeight="Bold"/></Grid>
             <ProgressBar Name="ovSystemDriveStorageBar" Height="7" Minimum="0" Maximum="100" Value="0" Background="#263B50" Foreground="#6FA8C9" BorderThickness="0"/>
@@ -4328,16 +4602,16 @@ Write-AMRLog ("Catalog item model: {0} ({1} items)." -f $(if ($script:AMRCatalog
          </StackPanel>
         </Border>
 
-        <Border Background="{StaticResource OverviewOuterGlassBrush}" BorderBrush="{StaticResource OverviewOuterGlassBorder}" BorderThickness="1" CornerRadius="13" Padding="10" Margin="4,0,4,10"><Border.Effect><DropShadowEffect Color="#07111F" BlurRadius="17" ShadowDepth="3" Opacity="0.30"/></Border.Effect>
+        <Border Background="{StaticResource AMROverviewGlassBrush}" BorderBrush="{StaticResource AMROverviewGlassEdgeBrush}" BorderThickness="1" CornerRadius="13" Padding="10" Margin="4,0,4,10"><Border.Effect><DropShadowEffect Color="#07111F" BlurRadius="17" ShadowDepth="3" Opacity="0.30"/></Border.Effect>
          <StackPanel>
           <TextBlock Text="HARDWARE DETAILS" Foreground="#9CCCF5" FontSize="11" FontWeight="Bold" Margin="3,0,0,7"/>
           <UniformGrid Columns="3">
-           <Border Background="{StaticResource OverviewInnerGlassBrush}" BorderBrush="{StaticResource OverviewInnerGlassBorder}" BorderThickness="1" CornerRadius="9" Padding="10" Margin="3"><Border.Effect><DropShadowEffect Color="#020817" BlurRadius="10" ShadowDepth="1" Opacity="0.25"/></Border.Effect><StackPanel><TextBlock Text="PROCESSOR" Foreground="#78B9F0" FontSize="9" FontWeight="Bold" Margin="0,0,0,5"/><TextBlock Name="ovCPU" Text="Reading processor…" Foreground="#F1F5F9" FontSize="12" TextWrapping="Wrap"/><TextBlock Name="ovCPULoad" Text="CPU usage: --" Foreground="#B8C9D9" FontSize="10" Margin="0,4,0,0" TextWrapping="Wrap"/><TextBlock Name="ovThreads" Text="Cores / threads: --" Foreground="#B8C9D9" FontSize="10" Margin="0,3,0,0" TextWrapping="Wrap"/></StackPanel></Border>
-           <Border Background="{StaticResource OverviewInnerGlassBrush}" BorderBrush="{StaticResource OverviewInnerGlassBorder}" BorderThickness="1" CornerRadius="9" Padding="10" Margin="3"><Border.Effect><DropShadowEffect Color="#020817" BlurRadius="10" ShadowDepth="1" Opacity="0.25"/></Border.Effect><StackPanel><TextBlock Text="GRAPHICS" Foreground="#78B9F0" FontSize="9" FontWeight="Bold" Margin="0,0,0,5"/><TextBlock Name="ovGPU" Text="Reading graphics adapter…" Foreground="#F1F5F9" FontSize="12" TextWrapping="Wrap"/><TextBlock Name="ovOverviewGPUDetails" Text="Graphics details: --" Foreground="#B8C9D9" FontSize="10" Margin="0,4,0,0" TextWrapping="Wrap"/><TextBlock Name="ovOverviewDisplay" Text="Display: --" Foreground="#B8C9D9" FontSize="10" Margin="0,3,0,0" TextWrapping="Wrap"/></StackPanel></Border>
-           <Border Background="{StaticResource OverviewInnerGlassBrush}" BorderBrush="{StaticResource OverviewInnerGlassBorder}" BorderThickness="1" CornerRadius="9" Padding="10" Margin="3"><Border.Effect><DropShadowEffect Color="#020817" BlurRadius="10" ShadowDepth="1" Opacity="0.25"/></Border.Effect><StackPanel><TextBlock Text="MOTHERBOARD / BIOS" Foreground="#78B9F0" FontSize="9" FontWeight="Bold" Margin="0,0,0,5"/><TextBlock Name="ovMobo" Text="Reading board…" Foreground="#F1F5F9" FontSize="12" TextWrapping="Wrap"/><TextBlock Name="ovBIOS" Text="BIOS: --" Foreground="#B8C9D9" FontSize="10" Margin="0,4,0,0" TextWrapping="Wrap"/><TextBlock Name="ovBIOSDate" Text="BIOS date: --" Foreground="#B8C9D9" FontSize="10" Margin="0,3,0,0" TextWrapping="Wrap"/></StackPanel></Border>
-           <Border Background="{StaticResource OverviewInnerGlassBrush}" BorderBrush="{StaticResource OverviewInnerGlassBorder}" BorderThickness="1" CornerRadius="9" Padding="10" Margin="3"><Border.Effect><DropShadowEffect Color="#020817" BlurRadius="10" ShadowDepth="1" Opacity="0.25"/></Border.Effect><StackPanel><TextBlock Text="MEMORY (RAM)" Foreground="#78B9F0" FontSize="9" FontWeight="Bold" Margin="0,0,0,5"/><TextBlock Name="ovRAMTotal" Text="Total RAM: --" Foreground="#F1F5F9" FontSize="12" TextWrapping="Wrap"/><TextBlock Name="ovRAMUsage" Text="" Visibility="Collapsed" Foreground="#B8C9D9" FontSize="10" Margin="0,4,0,0" TextWrapping="Wrap"/><TextBlock Name="ovOverviewRAMAvailable" Text="" Visibility="Collapsed" Foreground="#B8C9D9" FontSize="10" Margin="0,3,0,0" TextWrapping="Wrap"/></StackPanel></Border>
-           <Border Background="{StaticResource OverviewInnerGlassBrush}" BorderBrush="{StaticResource OverviewInnerGlassBorder}" BorderThickness="1" CornerRadius="9" Padding="10" Margin="3"><Border.Effect><DropShadowEffect Color="#020817" BlurRadius="10" ShadowDepth="1" Opacity="0.25"/></Border.Effect><StackPanel><TextBlock Text="STORAGE" Foreground="#78B9F0" FontSize="9" FontWeight="Bold" Margin="0,0,0,5"/><TextBlock Text="FIXED PARTITIONS" Foreground="#9DB8D2" FontSize="9" FontWeight="Bold" Margin="0,2,0,5"/><TextBlock Name="ovDisksEmpty" Text="No fixed partitions detected" Foreground="#AFC4DA" FontSize="9" Margin="2,4,0,0" Visibility="Visible"/><ItemsControl Name="ovDisks"><ItemsControl.ItemTemplate><DataTemplate><Border Background="{StaticResource OverviewInnerGlassBrush}" BorderBrush="{StaticResource OverviewInnerGlassBorder}" BorderThickness="1" CornerRadius="6" Padding="7" Margin="0,3,0,2"><StackPanel><Grid Margin="0,0,0,4"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><TextBlock Text="{Binding Name}" Foreground="#DCE8F4" FontSize="10" FontWeight="SemiBold"/><TextBlock Text="{Binding UsedPercentText}" Grid.Column="1" Foreground="#9CCCF5" FontSize="10" FontWeight="Bold"/></Grid><ProgressBar Minimum="0" Maximum="100" Value="{Binding UsedPercent}" Height="6" Background="#263B50" Foreground="#6FA8C9" BorderThickness="0"/><TextBlock Text="{Binding DisplayText}" Foreground="#AFC4DA" FontSize="9" Margin="0,4,0,0" TextWrapping="Wrap"/></StackPanel></Border></DataTemplate></ItemsControl.ItemTemplate></ItemsControl></StackPanel></Border>
-           <Border Background="{StaticResource OverviewInnerGlassBrush}" BorderBrush="{StaticResource OverviewInnerGlassBorder}" BorderThickness="1" CornerRadius="9" Padding="10" Margin="3"><Border.Effect><DropShadowEffect Color="#020817" BlurRadius="10" ShadowDepth="1" Opacity="0.25"/></Border.Effect><StackPanel><TextBlock Text="SYSTEM ACTIVITY" Foreground="#78B9F0" FontSize="9" FontWeight="Bold" Margin="0,0,0,5"/><TextBlock Name="ovOverviewUptime" Text="Uptime: --" Foreground="#F1F5F9" FontSize="11" TextWrapping="Wrap"/><TextBlock Name="ovOverviewProcesses" Text="Processes: --" Foreground="#B8C9D9" FontSize="10" Margin="0,4,0,0" TextWrapping="Wrap"/></StackPanel></Border>
+           <Border Background="{StaticResource AMROverviewGlassBrush}" BorderBrush="{StaticResource AMROverviewGlassEdgeBrush}" BorderThickness="1" CornerRadius="9" Padding="10" Margin="3"><Border.Effect><DropShadowEffect Color="#020817" BlurRadius="10" ShadowDepth="1" Opacity="0.25"/></Border.Effect><StackPanel><TextBlock Text="PROCESSOR" Foreground="#78B9F0" FontSize="9" FontWeight="Bold" Margin="0,0,0,5"/><TextBlock Name="ovCPU" Text="Reading processor…" Foreground="#F1F5F9" FontSize="12" TextWrapping="Wrap"/><TextBlock Name="ovCPULoad" Text="CPU usage: --" Foreground="#B8C9D9" FontSize="10" Margin="0,4,0,0" TextWrapping="Wrap"/><TextBlock Name="ovThreads" Text="Cores / threads: --" Foreground="#B8C9D9" FontSize="10" Margin="0,3,0,0" TextWrapping="Wrap"/></StackPanel></Border>
+           <Border Background="{StaticResource AMROverviewGlassBrush}" BorderBrush="{StaticResource AMROverviewGlassEdgeBrush}" BorderThickness="1" CornerRadius="9" Padding="10" Margin="3"><Border.Effect><DropShadowEffect Color="#020817" BlurRadius="10" ShadowDepth="1" Opacity="0.25"/></Border.Effect><StackPanel><TextBlock Text="GRAPHICS" Foreground="#78B9F0" FontSize="9" FontWeight="Bold" Margin="0,0,0,5"/><TextBlock Name="ovGPU" Text="Reading graphics adapter…" Foreground="#F1F5F9" FontSize="12" TextWrapping="Wrap"/><TextBlock Name="ovOverviewGPUDetails" Text="Graphics details: --" Foreground="#B8C9D9" FontSize="10" Margin="0,4,0,0" TextWrapping="Wrap"/><TextBlock Name="ovOverviewDisplay" Text="Display: --" Foreground="#B8C9D9" FontSize="10" Margin="0,3,0,0" TextWrapping="Wrap"/></StackPanel></Border>
+           <Border Background="{StaticResource AMROverviewGlassBrush}" BorderBrush="{StaticResource AMROverviewGlassEdgeBrush}" BorderThickness="1" CornerRadius="9" Padding="10" Margin="3"><Border.Effect><DropShadowEffect Color="#020817" BlurRadius="10" ShadowDepth="1" Opacity="0.25"/></Border.Effect><StackPanel><TextBlock Text="MOTHERBOARD / BIOS" Foreground="#78B9F0" FontSize="9" FontWeight="Bold" Margin="0,0,0,5"/><TextBlock Name="ovMobo" Text="Reading board…" Foreground="#F1F5F9" FontSize="12" TextWrapping="Wrap"/><TextBlock Name="ovBIOS" Text="BIOS: --" Foreground="#B8C9D9" FontSize="10" Margin="0,4,0,0" TextWrapping="Wrap"/><TextBlock Name="ovBIOSDate" Text="BIOS date: --" Foreground="#B8C9D9" FontSize="10" Margin="0,3,0,0" TextWrapping="Wrap"/></StackPanel></Border>
+           <Border Background="{StaticResource AMROverviewGlassBrush}" BorderBrush="{StaticResource AMROverviewGlassEdgeBrush}" BorderThickness="1" CornerRadius="9" Padding="10" Margin="3"><Border.Effect><DropShadowEffect Color="#020817" BlurRadius="10" ShadowDepth="1" Opacity="0.25"/></Border.Effect><StackPanel><TextBlock Text="MEMORY (RAM)" Foreground="#78B9F0" FontSize="9" FontWeight="Bold" Margin="0,0,0,5"/><TextBlock Name="ovRAMTotal" Text="Total RAM: --" Foreground="#F1F5F9" FontSize="12" TextWrapping="Wrap"/><TextBlock Name="ovRAMUsage" Text="" Visibility="Collapsed" Foreground="#B8C9D9" FontSize="10" Margin="0,4,0,0" TextWrapping="Wrap"/><TextBlock Name="ovOverviewRAMAvailable" Text="" Visibility="Collapsed" Foreground="#B8C9D9" FontSize="10" Margin="0,3,0,0" TextWrapping="Wrap"/></StackPanel></Border>
+           <Border Background="{StaticResource AMROverviewGlassBrush}" BorderBrush="{StaticResource AMROverviewGlassEdgeBrush}" BorderThickness="1" CornerRadius="9" Padding="10" Margin="3"><Border.Effect><DropShadowEffect Color="#020817" BlurRadius="10" ShadowDepth="1" Opacity="0.25"/></Border.Effect><StackPanel><TextBlock Text="STORAGE" Foreground="#78B9F0" FontSize="9" FontWeight="Bold" Margin="0,0,0,5"/><TextBlock Text="FIXED PARTITIONS" Foreground="#9DB8D2" FontSize="9" FontWeight="Bold" Margin="0,2,0,5"/><TextBlock Name="ovDisksEmpty" Text="No fixed partitions detected" Foreground="#AFC4DA" FontSize="9" Margin="2,4,0,0" Visibility="Visible"/><ItemsControl Name="ovDisks"><ItemsControl.ItemTemplate><DataTemplate><Border Background="{StaticResource AMROverviewGlassBrush}" BorderBrush="{StaticResource AMROverviewGlassEdgeBrush}" BorderThickness="1" CornerRadius="6" Padding="7" Margin="0,3,0,2"><StackPanel><Grid Margin="0,0,0,4"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><TextBlock Text="{Binding Name}" Foreground="#DCE8F4" FontSize="10" FontWeight="SemiBold"/><TextBlock Text="{Binding UsedPercentText}" Grid.Column="1" Foreground="#9CCCF5" FontSize="10" FontWeight="Bold"/></Grid><ProgressBar Minimum="0" Maximum="100" Value="{Binding UsedPercent}" Height="6" Background="#263B50" Foreground="#6FA8C9" BorderThickness="0"/><TextBlock Text="{Binding DisplayText}" Foreground="#AFC4DA" FontSize="9" Margin="0,4,0,0" TextWrapping="Wrap"/></StackPanel></Border></DataTemplate></ItemsControl.ItemTemplate></ItemsControl></StackPanel></Border>
+           <Border Background="{StaticResource AMROverviewGlassBrush}" BorderBrush="{StaticResource AMROverviewGlassEdgeBrush}" BorderThickness="1" CornerRadius="9" Padding="10" Margin="3"><Border.Effect><DropShadowEffect Color="#020817" BlurRadius="10" ShadowDepth="1" Opacity="0.25"/></Border.Effect><StackPanel><TextBlock Text="SYSTEM ACTIVITY" Foreground="#78B9F0" FontSize="9" FontWeight="Bold" Margin="0,0,0,5"/><TextBlock Name="ovOverviewUptime" Text="Uptime: --" Foreground="#F1F5F9" FontSize="11" TextWrapping="Wrap"/><TextBlock Name="ovOverviewProcesses" Text="Processes: --" Foreground="#B8C9D9" FontSize="10" Margin="0,4,0,0" TextWrapping="Wrap"/></StackPanel></Border>
           </UniformGrid>
          </StackPanel>
         </Border>
@@ -4352,22 +4626,22 @@ Write-AMRLog ("Catalog item model: {0} ({1} items)." -f $(if ($script:AMRCatalog
         <Grid Margin="4,4,8,4" ClipToBounds="False"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><TextBlock Text="PERFORMANCE" FontSize="25" FontWeight="Bold" Foreground="#F8FAFC" VerticalAlignment="Center"/><Button Name="RefreshLivePerformanceBtn" Grid.Column="1" Content="↻ Refresh" Style="{StaticResource AMRSystemRefreshButtonStyle}" Margin="0,0,2,0" Padding="15,8" FontSize="11"/></Grid>
         <Grid Margin="4,0,0,14"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><TextBlock Text="Live Windows telemetry · real CPU, RAM, GPU and network samples · rolling 60-second history" Foreground="#94A3B8" FontSize="12"/><TextBlock Name="ovLiveRefreshStatus" Grid.Column="1" Text="" Visibility="Collapsed" Foreground="#8EA6BD" FontSize="9" HorizontalAlignment="Right"/></Grid>
         <UniformGrid Columns="3" Margin="0,0,0,8">
-         <Border Background="{StaticResource OverviewInnerGlassBrush}" BorderBrush="{StaticResource OverviewInnerGlassBorder}" BorderThickness="1" CornerRadius="12" Padding="13" Margin="4"><StackPanel><TextBlock Text="CPU LOAD" Foreground="#7DD3FC" FontSize="11" FontWeight="Bold"/><Grid Width="104" Height="104" Margin="0,8,0,5"><Ellipse Stroke="#344B63" StrokeThickness="8"/><Path Name="ovCpuGaugeArc" Stroke="#56A6E8" StrokeThickness="8" StrokeStartLineCap="Round" StrokeEndLineCap="Round" Data="M 52,4 A 48,48 0 0 1 52,100"/><TextBlock Name="ovLiveCPUValue" Text="N/A" Foreground="#F8FAFC" FontSize="20" FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center"/></Grid><TextBlock Name="ovLiveCPUDetail" Text="Waiting for valid CPU sample" Foreground="#AFC4DA" FontSize="10" TextWrapping="Wrap"/></StackPanel></Border>
-         <Border Background="{StaticResource OverviewInnerGlassBrush}" BorderBrush="{StaticResource OverviewInnerGlassBorder}" BorderThickness="1" CornerRadius="12" Padding="13" Margin="4"><StackPanel><TextBlock Text="MEMORY USAGE" Foreground="#7DD3FC" FontSize="11" FontWeight="Bold"/><Grid Width="104" Height="104" Margin="0,8,0,5"><Ellipse Stroke="#344B63" StrokeThickness="8"/><Path Name="ovMemoryGaugeArc" Stroke="#55C4A1" StrokeThickness="8" StrokeStartLineCap="Round" StrokeEndLineCap="Round" Data="M 52,4 A 48,48 0 0 1 52,100"/><TextBlock Name="ovLiveMemoryValue" Text="N/A" Foreground="#F8FAFC" FontSize="20" FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center"/></Grid><TextBlock Name="ovLiveMemoryDetail" Text="Waiting for physical memory sample" Foreground="#AFC4DA" FontSize="10" TextWrapping="Wrap"/><TextBlock Name="ovRAMAvailable" Text="Available RAM: unavailable" Foreground="#AFC4DA" FontSize="10" Margin="0,3,0,0" TextWrapping="Wrap"/></StackPanel></Border>
-         <Border Background="{StaticResource OverviewInnerGlassBrush}" BorderBrush="{StaticResource OverviewInnerGlassBorder}" BorderThickness="1" CornerRadius="12" Padding="13" Margin="4"><StackPanel><TextBlock Text="GPU LOAD" Foreground="#7DD3FC" FontSize="11" FontWeight="Bold"/><Grid Width="104" Height="104" Margin="0,8,0,5"><Ellipse Stroke="#344B63" StrokeThickness="8"/><Path Name="ovGpuGaugeArc" Stroke="#B69AE8" StrokeThickness="8" StrokeStartLineCap="Round" StrokeEndLineCap="Round" Data="M 52,4 A 48,48 0 0 1 52,100"/><TextBlock Name="ovLiveGPUValue" Text="N/A" Foreground="#F8FAFC" FontSize="20" FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center"/></Grid><TextBlock Name="ovLiveGPUDetail" Text="Waiting for GPU engine sample" Foreground="#AFC4DA" FontSize="10" TextWrapping="Wrap"/></StackPanel></Border>
+         <Border Background="{StaticResource AMRPerfGlassSoftBrush}" BorderBrush="{StaticResource AMRPerfGlassSoftEdgeBrush}" BorderThickness="1" CornerRadius="12" Padding="13" Margin="4"><StackPanel><TextBlock Text="CPU LOAD" Foreground="#7DD3FC" FontSize="11" FontWeight="Bold"/><Grid Width="104" Height="104" Margin="0,8,0,5"><Ellipse Stroke="#344B63" StrokeThickness="8"/><Path Name="ovCpuGaugeArc" Stroke="#56A6E8" StrokeThickness="8" StrokeStartLineCap="Round" StrokeEndLineCap="Round" Data="M 52,4 A 48,48 0 0 1 52,100"/><TextBlock Name="ovLiveCPUValue" Text="N/A" Foreground="#F8FAFC" FontSize="20" FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center"/></Grid><TextBlock Name="ovLiveCPUDetail" Text="Waiting for valid CPU sample" Foreground="#AFC4DA" FontSize="10" TextWrapping="Wrap"/></StackPanel></Border>
+         <Border Background="{StaticResource AMRPerfGlassSoftBrush}" BorderBrush="{StaticResource AMRPerfGlassSoftEdgeBrush}" BorderThickness="1" CornerRadius="12" Padding="13" Margin="4"><StackPanel><TextBlock Text="MEMORY USAGE" Foreground="#7DD3FC" FontSize="11" FontWeight="Bold"/><Grid Width="104" Height="104" Margin="0,8,0,5"><Ellipse Stroke="#344B63" StrokeThickness="8"/><Path Name="ovMemoryGaugeArc" Stroke="#55C4A1" StrokeThickness="8" StrokeStartLineCap="Round" StrokeEndLineCap="Round" Data="M 52,4 A 48,48 0 0 1 52,100"/><TextBlock Name="ovLiveMemoryValue" Text="N/A" Foreground="#F8FAFC" FontSize="20" FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center"/></Grid><TextBlock Name="ovLiveMemoryDetail" Text="Waiting for physical memory sample" Foreground="#AFC4DA" FontSize="10" TextWrapping="Wrap"/><TextBlock Name="ovRAMAvailable" Text="Available RAM: unavailable" Foreground="#AFC4DA" FontSize="10" Margin="0,3,0,0" TextWrapping="Wrap"/></StackPanel></Border>
+         <Border Background="{StaticResource AMRPerfGlassSoftBrush}" BorderBrush="{StaticResource AMRPerfGlassSoftEdgeBrush}" BorderThickness="1" CornerRadius="12" Padding="13" Margin="4"><StackPanel><TextBlock Text="GPU LOAD" Foreground="#7DD3FC" FontSize="11" FontWeight="Bold"/><Grid Width="104" Height="104" Margin="0,8,0,5"><Ellipse Stroke="#344B63" StrokeThickness="8"/><Path Name="ovGpuGaugeArc" Stroke="#B69AE8" StrokeThickness="8" StrokeStartLineCap="Round" StrokeEndLineCap="Round" Data="M 52,4 A 48,48 0 0 1 52,100"/><TextBlock Name="ovLiveGPUValue" Text="N/A" Foreground="#F8FAFC" FontSize="20" FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center"/></Grid><TextBlock Name="ovLiveGPUDetail" Text="Waiting for GPU engine sample" Foreground="#AFC4DA" FontSize="10" TextWrapping="Wrap"/></StackPanel></Border>
         </UniformGrid>
         <UniformGrid Columns="2" Margin="0,0,0,8">
-         <Border Background="{StaticResource OverviewInnerGlassBrush}" BorderBrush="{StaticResource OverviewInnerGlassBorder}" BorderThickness="1" CornerRadius="12" Padding="13" Margin="4"><StackPanel><TextBlock Text="CPU HISTORY · LAST 60 SECONDS" Foreground="#7DD3FC" FontSize="11" FontWeight="Bold"/><TextBlock Text="Real GetSystemTimes samples" Foreground="#94A3B8" FontSize="9" Margin="0,2,0,5"/><Canvas Name="ovCpuHistoryCanvas" Height="112" ClipToBounds="True"><Polyline Name="ovCpuHistoryLine" Stroke="#56A6E8" StrokeThickness="2" Points=""/></Canvas></StackPanel></Border>
-         <Border Background="{StaticResource OverviewInnerGlassBrush}" BorderBrush="{StaticResource OverviewInnerGlassBorder}" BorderThickness="1" CornerRadius="12" Padding="13" Margin="4"><StackPanel><TextBlock Text="NETWORK THROUGHPUT · LAST 60 SECONDS" Foreground="#7DD3FC" FontSize="11" FontWeight="Bold"/><TextBlock Name="ovNetworkRateDetail" Text="Download / Upload: waiting for byte counters" Foreground="#94A3B8" FontSize="9" Margin="0,2,0,5"/><Canvas Name="ovNetworkHistoryCanvas" Height="112" ClipToBounds="True"><Polyline Name="ovNetworkDownloadLine" Stroke="#55C4A1" StrokeThickness="2" Points=""/><Polyline Name="ovNetworkUploadLine" Stroke="#D8B56D" StrokeThickness="2" Points=""/></Canvas></StackPanel></Border>
+         <Border Background="{StaticResource AMRPerfGlassSoftBrush}" BorderBrush="{StaticResource AMRPerfGlassSoftEdgeBrush}" BorderThickness="1" CornerRadius="12" Padding="13" Margin="4"><StackPanel><TextBlock Text="CPU HISTORY · LAST 60 SECONDS" Foreground="#7DD3FC" FontSize="11" FontWeight="Bold"/><TextBlock Text="Real GetSystemTimes samples" Foreground="#94A3B8" FontSize="9" Margin="0,2,0,5"/><Canvas Name="ovCpuHistoryCanvas" Height="112" ClipToBounds="True"><Polyline Name="ovCpuHistoryLine" Stroke="#56A6E8" StrokeThickness="2" Points=""/></Canvas></StackPanel></Border>
+         <Border Background="{StaticResource AMRPerfGlassSoftBrush}" BorderBrush="{StaticResource AMRPerfGlassSoftEdgeBrush}" BorderThickness="1" CornerRadius="12" Padding="13" Margin="4"><StackPanel><TextBlock Text="NETWORK THROUGHPUT · LAST 60 SECONDS" Foreground="#7DD3FC" FontSize="11" FontWeight="Bold"/><TextBlock Name="ovNetworkRateDetail" Text="Download / Upload: waiting for byte counters" Foreground="#94A3B8" FontSize="9" Margin="0,2,0,5"/><Canvas Name="ovNetworkHistoryCanvas" Height="112" ClipToBounds="True"><Polyline Name="ovNetworkDownloadLine" Stroke="#55C4A1" StrokeThickness="2" Points=""/><Polyline Name="ovNetworkUploadLine" Stroke="#D8B56D" StrokeThickness="2" Points=""/></Canvas></StackPanel></Border>
         </UniformGrid>
         <UniformGrid Columns="2" Margin="0,0,0,8">
-         <Border Background="{StaticResource OverviewInnerGlassBrush}" BorderBrush="{StaticResource OverviewInnerGlassBorder}" BorderThickness="1" CornerRadius="12" Padding="13" Margin="4"><StackPanel><TextBlock Text="GPU HISTORY · LAST 60 SECONDS" Foreground="#7DD3FC" FontSize="11" FontWeight="Bold"/><TextBlock Text="Windows GPU engine utilization samples" Foreground="#94A3B8" FontSize="9" Margin="0,2,0,5"/><Canvas Name="ovGpuHistoryCanvas" Height="112" ClipToBounds="True"><Polyline Name="ovGpuHistoryLine" Stroke="#B69AE8" StrokeThickness="2" Points=""/></Canvas></StackPanel></Border>
-         <Border Background="{StaticResource OverviewInnerGlassBrush}" BorderBrush="{StaticResource OverviewInnerGlassBorder}" BorderThickness="1" CornerRadius="12" Padding="13" Margin="4"><StackPanel><TextBlock Text="SYSTEM ACTIVITY" Foreground="#7DD3FC" FontSize="11" FontWeight="Bold"/><TextBlock Name="ovUptime" Text="System uptime: Loading..." Foreground="#E4E4E7" FontSize="12" Margin="0,5"/><TextBlock Name="ovProcesses" Text="Processes: Loading..." Foreground="#E4E4E7" FontSize="12" Margin="0,4"/><TextBlock Name="ovLiveThreads" Text="Threads: Loading..." Foreground="#E4E4E7" FontSize="12" Margin="0,4"/><TextBlock Name="ovLiveActivityStatus" Text="Waiting for system activity sample" Foreground="#94A3B8" FontSize="10" Margin="0,4"/></StackPanel></Border>
-         <Border Background="{StaticResource OverviewInnerGlassBrush}" BorderBrush="{StaticResource OverviewInnerGlassBorder}" BorderThickness="1" CornerRadius="12" Padding="13" Margin="4"><StackPanel><TextBlock Text="NETWORK INTERFACE" Foreground="#7DD3FC" FontSize="11" FontWeight="Bold"/><TextBlock Name="ovLiveNetworkStatus" Text="Sensor unavailable" Foreground="#F8FAFC" FontSize="15" FontWeight="Bold" Margin="0,5"/><TextBlock Name="ovLiveNetworkAdapter" Text="Adapter: --" Foreground="#E4E4E7" FontSize="11" Margin="0,3" TextWrapping="Wrap"/><TextBlock Name="ovLiveNetworkIP" Text="IPv4: --" Foreground="#E4E4E7" FontSize="11" Margin="0,3" TextWrapping="Wrap"/><TextBlock Name="ovLiveNetworkGateway" Text="Gateway: --" Foreground="#E4E4E7" FontSize="11" Margin="0,3" TextWrapping="Wrap"/><TextBlock Name="ovLiveNetworkRates" Text="Download: N/A  ·  Upload: N/A" Foreground="#94A3B8" FontSize="10" Margin="0,4" TextWrapping="Wrap"/></StackPanel></Border>
+         <Border Background="{StaticResource AMRPerfGlassSoftBrush}" BorderBrush="{StaticResource AMRPerfGlassSoftEdgeBrush}" BorderThickness="1" CornerRadius="12" Padding="13" Margin="4"><StackPanel><TextBlock Text="GPU HISTORY · LAST 60 SECONDS" Foreground="#7DD3FC" FontSize="11" FontWeight="Bold"/><TextBlock Text="Windows GPU engine utilization samples" Foreground="#94A3B8" FontSize="9" Margin="0,2,0,5"/><Canvas Name="ovGpuHistoryCanvas" Height="112" ClipToBounds="True"><Polyline Name="ovGpuHistoryLine" Stroke="#B69AE8" StrokeThickness="2" Points=""/></Canvas></StackPanel></Border>
+         <Border Background="{StaticResource AMRPerfGlassSoftBrush}" BorderBrush="{StaticResource AMRPerfGlassSoftEdgeBrush}" BorderThickness="1" CornerRadius="12" Padding="13" Margin="4"><StackPanel><TextBlock Text="SYSTEM ACTIVITY" Foreground="#7DD3FC" FontSize="11" FontWeight="Bold"/><TextBlock Name="ovUptime" Text="System uptime: Loading..." Foreground="#E4E4E7" FontSize="12" Margin="0,5"/><TextBlock Name="ovProcesses" Text="Processes: Loading..." Foreground="#E4E4E7" FontSize="12" Margin="0,4"/><TextBlock Name="ovLiveThreads" Text="Threads: Loading..." Foreground="#E4E4E7" FontSize="12" Margin="0,4"/><TextBlock Name="ovLiveActivityStatus" Text="Waiting for system activity sample" Foreground="#94A3B8" FontSize="10" Margin="0,4"/></StackPanel></Border>
+         <Border Background="{StaticResource AMRPerfGlassSoftBrush}" BorderBrush="{StaticResource AMRPerfGlassSoftEdgeBrush}" BorderThickness="1" CornerRadius="12" Padding="13" Margin="4"><StackPanel><TextBlock Text="NETWORK INTERFACE" Foreground="#7DD3FC" FontSize="11" FontWeight="Bold"/><TextBlock Name="ovLiveNetworkStatus" Text="Sensor unavailable" Foreground="#F8FAFC" FontSize="15" FontWeight="Bold" Margin="0,5"/><TextBlock Name="ovLiveNetworkAdapter" Text="Adapter: --" Foreground="#E4E4E7" FontSize="11" Margin="0,3" TextWrapping="Wrap"/><TextBlock Name="ovLiveNetworkIP" Text="IPv4: --" Foreground="#E4E4E7" FontSize="11" Margin="0,3" TextWrapping="Wrap"/><TextBlock Name="ovLiveNetworkGateway" Text="Gateway: --" Foreground="#E4E4E7" FontSize="11" Margin="0,3" TextWrapping="Wrap"/><TextBlock Name="ovLiveNetworkRates" Text="Download: N/A  ·  Upload: N/A" Foreground="#94A3B8" FontSize="10" Margin="0,4" TextWrapping="Wrap"/></StackPanel></Border>
         </UniformGrid>
         <UniformGrid Columns="2" Margin="0,0,0,8">
-         <Border Background="{StaticResource OverviewInnerGlassBrush}" BorderBrush="{StaticResource OverviewInnerGlassBorder}" BorderThickness="1" CornerRadius="12" Padding="13" Margin="4"><StackPanel><TextBlock Text="DISPLAY &amp; GRAPHICS" Foreground="#7DD3FC" FontSize="11" FontWeight="Bold" Margin="0,0,0,8"/><TextBlock Name="ovDisplay" Text="Display: Loading..." Foreground="#E4E4E7" FontSize="12" Margin="0,4" TextWrapping="Wrap"/><TextBlock Name="ovGPUDetails" Text="Graphics details: Loading..." Foreground="#E4E4E7" FontSize="12" Margin="0,4" TextWrapping="Wrap"/></StackPanel></Border>
-         <Border Name="ovBatteryCard" Background="{StaticResource OverviewInnerGlassBrush}" BorderBrush="{StaticResource OverviewInnerGlassBorder}" BorderThickness="1" CornerRadius="12" Padding="13" Margin="4"><StackPanel><TextBlock Text="BATTERY" Foreground="#7DD3FC" FontSize="11" FontWeight="Bold" Margin="0,0,0,8"/><TextBlock Name="ovBatteryStatus" Text="Battery: Checking..." Foreground="#E4E4E7" FontSize="12" Margin="0,4"/><TextBlock Name="ovBatteryHealth" Text="Battery health: Checking..." Foreground="#E4E4E7" FontSize="12" Margin="0,4"/><TextBlock Name="ovBatteryCapacity" Text="Design / Full Charge: Checking..." Foreground="#E4E4E7" FontSize="12" Margin="0,4"/></StackPanel></Border>
+         <Border Background="{StaticResource AMRPerfGlassSoftBrush}" BorderBrush="{StaticResource AMRPerfGlassSoftEdgeBrush}" BorderThickness="1" CornerRadius="12" Padding="13" Margin="4"><StackPanel><TextBlock Text="DISPLAY &amp; GRAPHICS" Foreground="#7DD3FC" FontSize="11" FontWeight="Bold" Margin="0,0,0,8"/><TextBlock Name="ovDisplay" Text="Display: Loading..." Foreground="#E4E4E7" FontSize="12" Margin="0,4" TextWrapping="Wrap"/><TextBlock Name="ovGPUDetails" Text="Graphics details: Loading..." Foreground="#E4E4E7" FontSize="12" Margin="0,4" TextWrapping="Wrap"/></StackPanel></Border>
+         <Border Name="ovBatteryCard" Background="{StaticResource AMRPerfGlassSoftBrush}" BorderBrush="{StaticResource AMRPerfGlassSoftEdgeBrush}" BorderThickness="1" CornerRadius="12" Padding="13" Margin="4"><StackPanel><TextBlock Text="BATTERY" Foreground="#7DD3FC" FontSize="11" FontWeight="Bold" Margin="0,0,0,8"/><TextBlock Name="ovBatteryStatus" Text="Battery: Checking..." Foreground="#E4E4E7" FontSize="12" Margin="0,4"/><TextBlock Name="ovBatteryHealth" Text="Battery health: Checking..." Foreground="#E4E4E7" FontSize="12" Margin="0,4"/><TextBlock Name="ovBatteryCapacity" Text="Design / Full Charge: Checking..." Foreground="#E4E4E7" FontSize="12" Margin="0,4"/></StackPanel></Border>
         </UniformGrid>
        </StackPanel>
       </ScrollViewer>
@@ -5236,8 +5510,8 @@ Write-AMRLog ("Catalog item model: {0} ({1} items)." -f $(if ($script:AMRCatalog
         <ColumnDefinition Width="*"/>
         <ColumnDefinition Width="205"/>
        </Grid.ColumnDefinitions>
-       <Border Grid.Row="0" Grid.Column="1" VerticalAlignment="Stretch" Margin="12,5,0,5" Background="#38202B3B"
-               BorderBrush="#665F83A5" BorderThickness="1" CornerRadius="10" Padding="10">
+       <Border Grid.Row="0" Grid.Column="1" VerticalAlignment="Stretch" Margin="12,5,0,5" Background="#281A2634"
+               BorderBrush="#36516A" BorderThickness="1" CornerRadius="10" Padding="10">
         <DockPanel LastChildFill="True">
          <TextBlock DockPanel.Dock="Top" Text="CATEGORIES" FontSize="11"
                     FontWeight="Bold" Foreground="#8FB8E8" Margin="5,3,5,10"/>
@@ -5252,7 +5526,7 @@ Write-AMRLog ("Catalog item model: {0} ({1} items)." -f $(if ($script:AMRCatalog
           <ListBox.Resources>
            <Style TargetType="ListBoxItem">
             <Setter Property="Foreground" Value="#C9D8EA"/>
-            <Setter Property="Background" Value="#26364B"/>
+            <Setter Property="Background" Value="#3826364B"/>
             <Setter Property="Padding" Value="7,6"/>
             <Setter Property="Height" Value="38"/>
             <Setter Property="Margin" Value="0,0,0,8"/>
@@ -5262,14 +5536,15 @@ Write-AMRLog ("Catalog item model: {0} ({1} items)." -f $(if ($script:AMRCatalog
              <Setter.Value>
               <ControlTemplate TargetType="ListBoxItem">
                <Border Name="CategoryTileBorder" Background="{TemplateBinding Background}"
-                       BorderBrush="#344B68" BorderThickness="1" CornerRadius="7"
+                       BorderBrush="#3B526F" BorderThickness="1" CornerRadius="7"
                        Padding="{TemplateBinding Padding}">
                 <ContentPresenter HorizontalAlignment="Stretch" VerticalAlignment="Center"/>
                </Border>
                <ControlTemplate.Triggers>
                 <Trigger Property="IsMouseOver" Value="True">
-                 <Setter TargetName="CategoryTileBorder" Property="Background" Value="#304A6B"/>
+                 <Setter TargetName="CategoryTileBorder" Property="Background" Value="#58304A6B"/>
                  <Setter TargetName="CategoryTileBorder" Property="BorderBrush" Value="#527AA8"/>
+                 <Setter Property="Foreground" Value="#EAF2FF"/>
                 </Trigger>
                 <Trigger Property="IsSelected" Value="True">
                  <Setter TargetName="CategoryTileBorder" Property="Background" Value="#24558A"/>
@@ -5318,8 +5593,8 @@ Write-AMRLog ("Catalog item model: {0} ({1} items)." -f $(if ($script:AMRCatalog
               </Style.Triggers>
              </Style>
             </StackPanel.Style>
-            <Border Width="12" Height="2" CornerRadius="1" Background="#3B82F6" VerticalAlignment="Center" Margin="0,0,5,0"/>
-            <TextBlock Text="{Binding CategoryNumber}" Foreground="#8DBBFA" FontSize="9.5" FontWeight="SemiBold" VerticalAlignment="Center" Margin="0,0,0,0"/>
+            <Border Width="12" Height="2" CornerRadius="1" Background="#3B6FB8" VerticalAlignment="Center" Margin="0,0,5,0"/>
+            <TextBlock Text="{Binding CategoryNumber}" Foreground="#7E9CBE" FontSize="9.5" FontWeight="SemiBold" VerticalAlignment="Center" Margin="0,0,0,0"/>
            </StackPanel>
           <!-- Static shadow layer (no Effect): cheap to render and to scroll. -->
           <Border Grid.Row="1" IsHitTestVisible="False" HorizontalAlignment="Stretch" VerticalAlignment="Bottom" Height="63" Margin="2.5,0.5" CornerRadius="10.5" Background="#000000" Opacity="0.09"/>
@@ -5327,7 +5602,7 @@ Write-AMRLog ("Catalog item model: {0} ({1} items)." -f $(if ($script:AMRCatalog
           <Border Grid.Row="1" IsHitTestVisible="False" HorizontalAlignment="Stretch" VerticalAlignment="Bottom" Height="66" Margin="1,-1" CornerRadius="12" Background="#000000" Opacity="0.06"/>
           <!-- Static shadow layer (no Effect): cheap to render and to scroll. -->
           <Border Grid.Row="1" IsHitTestVisible="False" HorizontalAlignment="Stretch" VerticalAlignment="Bottom" Height="69" Margin="-0.5,-2.5" CornerRadius="13.5" Background="#000000" Opacity="0.035"/>
-          <Border x:Name="SoftwareCardSurface" Grid.Row="1" Background="#FF27272A" BorderBrush="#FF3F3F46" BorderThickness="1" CornerRadius="9" HorizontalAlignment="Stretch" VerticalAlignment="Bottom" RenderTransformOrigin="0.5,0.5">
+          <Border x:Name="SoftwareCardSurface" Grid.Row="1" Background="#FF222226" BorderBrush="#FF38383F" BorderThickness="1" CornerRadius="9" HorizontalAlignment="Stretch" VerticalAlignment="Bottom" RenderTransformOrigin="0.5,0.5">
            <Border.Style>
             <Style TargetType="Border">
              <Setter Property="Height" Value="60"/>
@@ -5341,7 +5616,7 @@ Write-AMRLog ("Catalog item model: {0} ({1} items)." -f $(if ($script:AMRCatalog
                <MultiTrigger.EnterActions>
                 <BeginStoryboard>
                  <Storyboard>
-                  <ColorAnimation Storyboard.TargetProperty="(Border.Background).(SolidColorBrush.Color)" To="#FF3B4652" Duration="0:0:0.16">
+                  <ColorAnimation Storyboard.TargetProperty="(Border.Background).(SolidColorBrush.Color)" To="#FF31353B" Duration="0:0:0.16">
                    <ColorAnimation.EasingFunction><CubicEase EasingMode="EaseOut"/></ColorAnimation.EasingFunction>
                   </ColorAnimation>
                   <ColorAnimation Storyboard.TargetProperty="(Border.BorderBrush).(SolidColorBrush.Color)" To="#FFFFE0AD" Duration="0:0:0.18">
@@ -5362,10 +5637,10 @@ Write-AMRLog ("Catalog item model: {0} ({1} items)." -f $(if ($script:AMRCatalog
                <MultiTrigger.ExitActions>
                 <BeginStoryboard>
                  <Storyboard>
-                  <ColorAnimation Storyboard.TargetProperty="(Border.Background).(SolidColorBrush.Color)" To="#FF27272A" Duration="0:0:0.21">
+                  <ColorAnimation Storyboard.TargetProperty="(Border.Background).(SolidColorBrush.Color)" To="#FF222226" Duration="0:0:0.21">
                    <ColorAnimation.EasingFunction><CubicEase EasingMode="EaseOut"/></ColorAnimation.EasingFunction>
                   </ColorAnimation>
-                  <ColorAnimation Storyboard.TargetProperty="(Border.BorderBrush).(SolidColorBrush.Color)" To="#FF3F3F46" Duration="0:0:0.21">
+                  <ColorAnimation Storyboard.TargetProperty="(Border.BorderBrush).(SolidColorBrush.Color)" To="#FF38383F" Duration="0:0:0.21">
                    <ColorAnimation.EasingFunction><CubicEase EasingMode="EaseOut"/></ColorAnimation.EasingFunction>
                   </ColorAnimation>
                   <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TransformGroup.Children)[1].(TranslateTransform.Y)" To="0" Duration="0:0:0.21">
@@ -5382,7 +5657,7 @@ Write-AMRLog ("Catalog item model: {0} ({1} items)." -f $(if ($script:AMRCatalog
                </MultiTrigger.ExitActions>
               </MultiTrigger>
               <DataTrigger Binding="{Binding IsSelected}" Value="True">
-               <Setter Property="Background" Value="#FF2C4054"/>
+               <Setter Property="Background" Value="#FF262E38"/>
                <Setter Property="BorderBrush" Value="#FFD7B77C"/>
                <Setter Property="BorderThickness" Value="1.4"/>
                </DataTrigger>
@@ -5390,15 +5665,15 @@ Write-AMRLog ("Catalog item model: {0} ({1} items)." -f $(if ($script:AMRCatalog
               <MultiDataTrigger><MultiDataTrigger.Conditions><Condition Binding="{Binding IsSelected}" Value="True"/><Condition Binding="{Binding RelativeSource={RelativeSource Self},Path=IsVisible}" Value="True"/></MultiDataTrigger.Conditions><MultiDataTrigger.EnterActions>
                 <BeginStoryboard>
                  <Storyboard>
-                  <ColorAnimation Storyboard.TargetProperty="(Border.Background).(SolidColorBrush.Color)" To="#FF31475B" Duration="0:0:0.18"/>
+                  <ColorAnimation Storyboard.TargetProperty="(Border.Background).(SolidColorBrush.Color)" To="#FF2A3340" Duration="0:0:0.18"/>
                   <ColorAnimation Storyboard.TargetProperty="(Border.BorderBrush).(SolidColorBrush.Color)" To="#FFFFDFA8" Duration="0:0:0.20"/>
                  </Storyboard>
                 </BeginStoryboard>
                </MultiDataTrigger.EnterActions><MultiDataTrigger.ExitActions>
                 <BeginStoryboard>
                  <Storyboard>
-                  <ColorAnimation Storyboard.TargetProperty="(Border.Background).(SolidColorBrush.Color)" To="#FF27272A" Duration="0:0:0.16"/>
-                  <ColorAnimation Storyboard.TargetProperty="(Border.BorderBrush).(SolidColorBrush.Color)" To="#FF3F3F46" Duration="0:0:0.16"/>
+                  <ColorAnimation Storyboard.TargetProperty="(Border.Background).(SolidColorBrush.Color)" To="#FF222226" Duration="0:0:0.16"/>
+                  <ColorAnimation Storyboard.TargetProperty="(Border.BorderBrush).(SolidColorBrush.Color)" To="#FF38383F" Duration="0:0:0.16"/>
                  </Storyboard>
                 </BeginStoryboard>
                </MultiDataTrigger.ExitActions></MultiDataTrigger>
@@ -5407,6 +5682,7 @@ Write-AMRLog ("Catalog item model: {0} ({1} items)." -f $(if ($script:AMRCatalog
            </Border.Style>
            <Grid>
             <Grid.RowDefinitions><RowDefinition Height="*"/></Grid.RowDefinitions>
+            <Border IsHitTestVisible="False" Grid.Row="0" Margin="-5,-3" CornerRadius="8" BorderThickness="1" Background="{StaticResource AMRSoftCardGlowBrush}" BorderBrush="{StaticResource AMRSoftCardHairBrush}"/>
             <Grid Grid.Row="0" VerticalAlignment="Center">
              <Grid.ColumnDefinitions>
               <ColumnDefinition Width="Auto"/>
@@ -5421,10 +5697,10 @@ Write-AMRLog ("Catalog item model: {0} ({1} items)." -f $(if ($script:AMRCatalog
               <CheckBox.Template>
                <ControlTemplate TargetType="CheckBox">
                 <Border x:Name="SelectionSurface" Width="18" Height="18" CornerRadius="5"
-                        Background="#FF202C3B" BorderBrush="#FF65758B" BorderThickness="1.2"
+                        Background="#FF1C222A" BorderBrush="#FF5B6573" BorderThickness="1.2"
                         SnapsToDevicePixels="True">
                  <Grid>
-                  <Path x:Name="SelectionTick" Data="M 3,9 L 7,13 L 15,4"
+                  <Path x:Name="SelectionTick" RenderTransformOrigin="0.5,0.5" Data="M 3,9 L 7,13 L 15,4"
                         Stroke="#FFFFFFFF" StrokeThickness="2.0" StrokeStartLineCap="Round"
                         StrokeEndLineCap="Round" StrokeLineJoin="Round" Visibility="Collapsed"
                         HorizontalAlignment="Center" VerticalAlignment="Center"/>
@@ -5433,7 +5709,7 @@ Write-AMRLog ("Catalog item model: {0} ({1} items)." -f $(if ($script:AMRCatalog
                 <ControlTemplate.Triggers>
                  <Trigger Property="IsMouseOver" Value="True">
                   <Setter TargetName="SelectionSurface" Property="BorderBrush" Value="#FFE0AD"/>
-                  <Setter TargetName="SelectionSurface" Property="Background" Value="#FF34465A"/>
+                  <Setter TargetName="SelectionSurface" Property="Background" Value="#FF2C3641"/>
                  </Trigger>
                  <Trigger Property="IsChecked" Value="True">
                   <Setter TargetName="SelectionSurface" Property="Background" Value="#FFB88D4D"/>
@@ -5448,7 +5724,7 @@ Write-AMRLog ("Catalog item model: {0} ({1} items)." -f $(if ($script:AMRCatalog
               </CheckBox.Template>
              </CheckBox>
              <Grid Grid.Column="1" Width="36" Height="36" Margin="0,0,8,0">
-              <Border Background="#3F3F46" CornerRadius="9"/>
+              <Border Background="{StaticResource AMRSoftTileBrush}" BorderBrush="{StaticResource AMRSoftTileEdgeBrush}" BorderThickness="1" CornerRadius="9"/>
               <TextBlock x:Name="SoftwareIconInitials" Text="{Binding Initials}" Foreground="#A1A1AA" FontSize="16" FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center">
                <TextBlock.Style>
                 <Style TargetType="TextBlock">
@@ -5462,7 +5738,7 @@ Write-AMRLog ("Catalog item model: {0} ({1} items)." -f $(if ($script:AMRCatalog
               <Image x:Name="SoftwareIconImage" Source="{Binding Icon, Mode=OneWay, TargetNullValue={x:Null}, FallbackValue={x:Null}}" Width="30" Height="30" Stretch="Uniform" HorizontalAlignment="Center" VerticalAlignment="Center" SnapsToDevicePixels="True" RenderOptions.BitmapScalingMode="LowQuality"/>
              </Grid>
              <StackPanel Grid.Column="2" VerticalAlignment="Center">
-              <TextBlock Text="{Binding Name}" FontSize="14" FontWeight="SemiBold" Foreground="#FFFFFF" TextWrapping="Wrap">
+              <TextBlock x:Name="SoftwareNameText" Text="{Binding Name}" FontSize="14" FontWeight="SemiBold" Foreground="#FFFFFF" TextWrapping="Wrap">
               </TextBlock>
               <TextBlock Text="{Binding Id}" FontSize="10" Foreground="#71717A" TextWrapping="Wrap" Margin="0,3,0,0">
               </TextBlock>
@@ -5548,8 +5824,7 @@ Write-AMRLog ("Catalog item model: {0} ({1} items)." -f $(if ($script:AMRCatalog
 <TabItem Header="Tweaks" IsSelected="True">
 <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Padding="8,0,4,8">
       <StackPanel Name="BasicTweaksPanel"><StackPanel.Resources><Style TargetType="CheckBox" BasedOn="{StaticResource AMRTweakCheckStyle}"/></StackPanel.Resources>
-       <Border BorderBrush="#4B83B8" BorderThickness="1" CornerRadius="13" Padding="13,11" Margin="0,8,0,12">
-        <Border.Background><LinearGradientBrush StartPoint="0,0" EndPoint="1,1"><GradientStop Color="#65305278" Offset="0"/><GradientStop Color="#4320395D" Offset="1"/></LinearGradientBrush></Border.Background>
+       <Border Background="{StaticResource AMRSoftGlassBrush}" BorderBrush="{StaticResource AMRSoftGlassEdgeBrush}" BorderThickness="1" CornerRadius="13" Padding="13,11" Margin="0,8,0,12">
         <StackPanel>
          <TextBlock Text="Windows Tweaks" FontSize="17" FontWeight="SemiBold" Foreground="#E5F1FF"/>
          <TextBlock Text="Choose a preset to pre-select options. Nothing runs until you press Apply." Foreground="#B8CDE4" FontSize="11" TextWrapping="Wrap" Margin="0,3,0,8"/>
@@ -5567,8 +5842,7 @@ Write-AMRLog ("Catalog item model: {0} ({1} items)." -f $(if ($script:AMRCatalog
         </StackPanel>
        </Border>
        <WrapPanel Orientation="Horizontal" HorizontalAlignment="Center" ItemWidth="256">
-       <Border  BorderBrush="#668FC0" BorderThickness="1.1" CornerRadius="12" Padding="10" Margin="5" Width="246" MinHeight="136" Opacity="0" RenderTransformOrigin="0.5,0.5">
-        <Border.Background><LinearGradientBrush StartPoint="0,0" EndPoint="1,1"><GradientStop Color="#D02A4565" Offset="0"/><GradientStop Color="#B51A304B" Offset="1"/></LinearGradientBrush></Border.Background>
+       <Border  Background="{StaticResource AMRSoftGlassBrush}" BorderBrush="{StaticResource AMRSoftGlassEdgeBrush}" BorderThickness="1.1" CornerRadius="12" Padding="10" Margin="5" Width="246" MinHeight="136" Opacity="0" RenderTransformOrigin="0.5,0.5">
         <Border.Effect><DropShadowEffect Color="#020A16" BlurRadius="14" ShadowDepth="2" Opacity="0.42"/></Border.Effect>
         <Border.RenderTransform><TranslateTransform Y="8"/></Border.RenderTransform>
         <Border.Triggers><EventTrigger RoutedEvent="FrameworkElement.Loaded"><BeginStoryboard><Storyboard><DoubleAnimation Storyboard.TargetProperty="Opacity" From="0" To="1" Duration="0:0:0.25"/><DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.Y)" From="8" To="0" Duration="0:0:0.25" DecelerationRatio="0.8"/></Storyboard></BeginStoryboard></EventTrigger></Border.Triggers>
@@ -5580,8 +5854,7 @@ Write-AMRLog ("Catalog item model: {0} ({1} items)." -f $(if ($script:AMRCatalog
          <CheckBox Name="btDisableTips" Content="Turn off Windows tips and suggestions" Foreground="#E5EFFB" FontSize="11" Margin="0,3"/>
         </StackPanel>
        </Border>
-       <Border  BorderBrush="#668FC0" BorderThickness="1.1" CornerRadius="12" Padding="10" Margin="5" Width="246" MinHeight="136" Opacity="0" RenderTransformOrigin="0.5,0.5">
-        <Border.Background><LinearGradientBrush StartPoint="0,0" EndPoint="1,1"><GradientStop Color="#D02A4565" Offset="0"/><GradientStop Color="#B51A304B" Offset="1"/></LinearGradientBrush></Border.Background>
+       <Border  Background="{StaticResource AMRSoftGlassBrush}" BorderBrush="{StaticResource AMRSoftGlassEdgeBrush}" BorderThickness="1.1" CornerRadius="12" Padding="10" Margin="5" Width="246" MinHeight="136" Opacity="0" RenderTransformOrigin="0.5,0.5">
         <Border.Effect><DropShadowEffect Color="#020A16" BlurRadius="14" ShadowDepth="2" Opacity="0.42"/></Border.Effect>
         <Border.RenderTransform><TranslateTransform Y="8"/></Border.RenderTransform>
         <Border.Triggers><EventTrigger RoutedEvent="FrameworkElement.Loaded"><BeginStoryboard><Storyboard><DoubleAnimation Storyboard.TargetProperty="Opacity" From="0" To="1" Duration="0:0:0.271"/><DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.Y)" From="8" To="0" Duration="0:0:0.271" DecelerationRatio="0.8"/></Storyboard></BeginStoryboard></EventTrigger></Border.Triggers>
@@ -5593,8 +5866,7 @@ Write-AMRLog ("Catalog item model: {0} ({1} items)." -f $(if ($script:AMRCatalog
          <CheckBox Name="btGameMode" Content="Enable Windows Game Mode" Foreground="#E5EFFB" FontSize="11" Margin="0,3"/>
         </StackPanel>
        </Border>
-       <Border  BorderBrush="#668FC0" BorderThickness="1.1" CornerRadius="12" Padding="10" Margin="5" Width="246" MinHeight="136" Opacity="0" RenderTransformOrigin="0.5,0.5">
-        <Border.Background><LinearGradientBrush StartPoint="0,0" EndPoint="1,1"><GradientStop Color="#D02A4565" Offset="0"/><GradientStop Color="#B51A304B" Offset="1"/></LinearGradientBrush></Border.Background>
+       <Border  Background="{StaticResource AMRSoftGlassBrush}" BorderBrush="{StaticResource AMRSoftGlassEdgeBrush}" BorderThickness="1.1" CornerRadius="12" Padding="10" Margin="5" Width="246" MinHeight="136" Opacity="0" RenderTransformOrigin="0.5,0.5">
         <Border.Effect><DropShadowEffect Color="#020A16" BlurRadius="14" ShadowDepth="2" Opacity="0.42"/></Border.Effect>
         <Border.RenderTransform><TranslateTransform Y="8"/></Border.RenderTransform>
         <Border.Triggers><EventTrigger RoutedEvent="FrameworkElement.Loaded"><BeginStoryboard><Storyboard><DoubleAnimation Storyboard.TargetProperty="Opacity" From="0" To="1" Duration="0:0:0.292"/><DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.Y)" From="8" To="0" Duration="0:0:0.292" DecelerationRatio="0.8"/></Storyboard></BeginStoryboard></EventTrigger></Border.Triggers>
@@ -5606,8 +5878,7 @@ Write-AMRLog ("Catalog item model: {0} ({1} items)." -f $(if ($script:AMRCatalog
          <CheckBox Name="btDisableRecent" Content="Hide recent and frequent items" Foreground="#E5EFFB" FontSize="11" Margin="0,3"/>
         </StackPanel>
        </Border>
-       <Border  BorderBrush="#668FC0" BorderThickness="1.1" CornerRadius="12" Padding="10" Margin="5" Width="246" MinHeight="136" Opacity="0" RenderTransformOrigin="0.5,0.5">
-        <Border.Background><LinearGradientBrush StartPoint="0,0" EndPoint="1,1"><GradientStop Color="#D02A4565" Offset="0"/><GradientStop Color="#B51A304B" Offset="1"/></LinearGradientBrush></Border.Background>
+       <Border  Background="{StaticResource AMRSoftGlassBrush}" BorderBrush="{StaticResource AMRSoftGlassEdgeBrush}" BorderThickness="1.1" CornerRadius="12" Padding="10" Margin="5" Width="246" MinHeight="136" Opacity="0" RenderTransformOrigin="0.5,0.5">
         <Border.Effect><DropShadowEffect Color="#020A16" BlurRadius="14" ShadowDepth="2" Opacity="0.42"/></Border.Effect>
         <Border.RenderTransform><TranslateTransform Y="8"/></Border.RenderTransform>
         <Border.Triggers><EventTrigger RoutedEvent="FrameworkElement.Loaded"><BeginStoryboard><Storyboard><DoubleAnimation Storyboard.TargetProperty="Opacity" From="0" To="1" Duration="0:0:0.313"/><DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.Y)" From="8" To="0" Duration="0:0:0.313" DecelerationRatio="0.8"/></Storyboard></BeginStoryboard></EventTrigger></Border.Triggers>
@@ -5619,8 +5890,7 @@ Write-AMRLog ("Catalog item model: {0} ({1} items)." -f $(if ($script:AMRCatalog
          <CheckBox Name="btDisableCortana" Content="Disable Cortana policy (where supported)" Foreground="#E5EFFB" FontSize="11" Margin="0,3"/>
         </StackPanel>
        </Border>
-       <Border  BorderBrush="#668FC0" BorderThickness="1.1" CornerRadius="12" Padding="10" Margin="5" Width="246" MinHeight="136" Opacity="0" RenderTransformOrigin="0.5,0.5">
-        <Border.Background><LinearGradientBrush StartPoint="0,0" EndPoint="1,1"><GradientStop Color="#D02A4565" Offset="0"/><GradientStop Color="#B51A304B" Offset="1"/></LinearGradientBrush></Border.Background>
+       <Border  Background="{StaticResource AMRSoftGlassBrush}" BorderBrush="{StaticResource AMRSoftGlassEdgeBrush}" BorderThickness="1.1" CornerRadius="12" Padding="10" Margin="5" Width="246" MinHeight="136" Opacity="0" RenderTransformOrigin="0.5,0.5">
         <Border.Effect><DropShadowEffect Color="#020A16" BlurRadius="14" ShadowDepth="2" Opacity="0.42"/></Border.Effect>
         <Border.RenderTransform><TranslateTransform Y="8"/></Border.RenderTransform>
         <Border.Triggers><EventTrigger RoutedEvent="FrameworkElement.Loaded"><BeginStoryboard><Storyboard><DoubleAnimation Storyboard.TargetProperty="Opacity" From="0" To="1" Duration="0:0:0.334"/><DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.Y)" From="8" To="0" Duration="0:0:0.334" DecelerationRatio="0.8"/></Storyboard></BeginStoryboard></EventTrigger></Border.Triggers>
@@ -5634,8 +5904,7 @@ Write-AMRLog ("Catalog item model: {0} ({1} items)." -f $(if ($script:AMRCatalog
          <CheckBox Name="btLockScreenTips" Content="Disable lock-screen tips and Spotlight suggestions" Foreground="#E5EFFB" FontSize="11" Margin="0,3"/>
         </StackPanel>
        </Border>
-       <Border  BorderBrush="#668FC0" BorderThickness="1.1" CornerRadius="12" Padding="10" Margin="5" Width="246" MinHeight="136" Opacity="0" RenderTransformOrigin="0.5,0.5">
-        <Border.Background><LinearGradientBrush StartPoint="0,0" EndPoint="1,1"><GradientStop Color="#D02A4565" Offset="0"/><GradientStop Color="#B51A304B" Offset="1"/></LinearGradientBrush></Border.Background>
+       <Border  Background="{StaticResource AMRSoftGlassBrush}" BorderBrush="{StaticResource AMRSoftGlassEdgeBrush}" BorderThickness="1.1" CornerRadius="12" Padding="10" Margin="5" Width="246" MinHeight="136" Opacity="0" RenderTransformOrigin="0.5,0.5">
         <Border.Effect><DropShadowEffect Color="#020A16" BlurRadius="14" ShadowDepth="2" Opacity="0.42"/></Border.Effect>
         <Border.RenderTransform><TranslateTransform Y="8"/></Border.RenderTransform>
         <Border.Triggers><EventTrigger RoutedEvent="FrameworkElement.Loaded"><BeginStoryboard><Storyboard><DoubleAnimation Storyboard.TargetProperty="Opacity" From="0" To="1" Duration="0:0:0.355"/><DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.Y)" From="8" To="0" Duration="0:0:0.355" DecelerationRatio="0.8"/></Storyboard></BeginStoryboard></EventTrigger></Border.Triggers>
@@ -5649,8 +5918,7 @@ Write-AMRLog ("Catalog item model: {0} ({1} items)." -f $(if ($script:AMRCatalog
          <CheckBox Name="btDisableHibernation" Content="Disable hibernation (removes hiberfil.sys; confirmation)" Foreground="#E5EFFB" FontSize="11" Margin="0,3"/>
         </StackPanel>
        </Border>
-       <Border  BorderBrush="#668FC0" BorderThickness="1.1" CornerRadius="12" Padding="10" Margin="5" Width="246" MinHeight="136" Opacity="0" RenderTransformOrigin="0.5,0.5">
-        <Border.Background><LinearGradientBrush StartPoint="0,0" EndPoint="1,1"><GradientStop Color="#D02A4565" Offset="0"/><GradientStop Color="#B51A304B" Offset="1"/></LinearGradientBrush></Border.Background>
+       <Border  Background="{StaticResource AMRSoftGlassBrush}" BorderBrush="{StaticResource AMRSoftGlassEdgeBrush}" BorderThickness="1.1" CornerRadius="12" Padding="10" Margin="5" Width="246" MinHeight="136" Opacity="0" RenderTransformOrigin="0.5,0.5">
         <Border.Effect><DropShadowEffect Color="#020A16" BlurRadius="14" ShadowDepth="2" Opacity="0.42"/></Border.Effect>
         <Border.RenderTransform><TranslateTransform Y="8"/></Border.RenderTransform>
         <Border.Triggers><EventTrigger RoutedEvent="FrameworkElement.Loaded"><BeginStoryboard><Storyboard><DoubleAnimation Storyboard.TargetProperty="Opacity" From="0" To="1" Duration="0:0:0.376"/><DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.Y)" From="8" To="0" Duration="0:0:0.376" DecelerationRatio="0.8"/></Storyboard></BeginStoryboard></EventTrigger></Border.Triggers>
@@ -5665,8 +5933,7 @@ Write-AMRLog ("Catalog item model: {0} ({1} items)." -f $(if ($script:AMRCatalog
          <CheckBox Name="btDisableHandwritingData" Content="Stop handwriting personalization data collection" Foreground="#E5EFFB" FontSize="11" Margin="0,3"/>
         </StackPanel>
        </Border>
-       <Border  BorderBrush="#668FC0" BorderThickness="1.1" CornerRadius="12" Padding="10" Margin="5" Width="246" MinHeight="136" Opacity="0" RenderTransformOrigin="0.5,0.5">
-        <Border.Background><LinearGradientBrush StartPoint="0,0" EndPoint="1,1"><GradientStop Color="#D02A4565" Offset="0"/><GradientStop Color="#B51A304B" Offset="1"/></LinearGradientBrush></Border.Background>
+       <Border  Background="{StaticResource AMRSoftGlassBrush}" BorderBrush="{StaticResource AMRSoftGlassEdgeBrush}" BorderThickness="1.1" CornerRadius="12" Padding="10" Margin="5" Width="246" MinHeight="136" Opacity="0" RenderTransformOrigin="0.5,0.5">
         <Border.Effect><DropShadowEffect Color="#020A16" BlurRadius="14" ShadowDepth="2" Opacity="0.42"/></Border.Effect>
         <Border.RenderTransform><TranslateTransform Y="8"/></Border.RenderTransform>
         <Border.Triggers><EventTrigger RoutedEvent="FrameworkElement.Loaded"><BeginStoryboard><Storyboard><DoubleAnimation Storyboard.TargetProperty="Opacity" From="0" To="1" Duration="0:0:0.397"/><DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.Y)" From="8" To="0" Duration="0:0:0.397" DecelerationRatio="0.8"/></Storyboard></BeginStoryboard></EventTrigger></Border.Triggers>
@@ -5682,8 +5949,7 @@ Write-AMRLog ("Catalog item model: {0} ({1} items)." -f $(if ($script:AMRCatalog
         </StackPanel>
        </Border>
 
-       <Border BorderBrush="#5D9FC8" BorderThickness="1.1" CornerRadius="12" Padding="10" Margin="5" Width="246" MinHeight="136" Opacity="0" RenderTransformOrigin="0.5,0.5">
-        <Border.Background><LinearGradientBrush StartPoint="0,0" EndPoint="1,1"><GradientStop Color="#D02B536D" Offset="0"/><GradientStop Color="#B51B354F" Offset="1"/></LinearGradientBrush></Border.Background>
+       <Border Background="{StaticResource AMRSoftGlassBrush}" BorderBrush="{StaticResource AMRSoftGlassEdgeBrush}" BorderThickness="1.1" CornerRadius="12" Padding="10" Margin="5" Width="246" MinHeight="136" Opacity="0" RenderTransformOrigin="0.5,0.5">
         <Border.Effect><DropShadowEffect Color="#020A16" BlurRadius="14" ShadowDepth="2" Opacity="0.42"/></Border.Effect>
         <Border.RenderTransform><TranslateTransform Y="8"/></Border.RenderTransform>
         <Border.Triggers><EventTrigger RoutedEvent="FrameworkElement.Loaded"><BeginStoryboard><Storyboard><DoubleAnimation Storyboard.TargetProperty="Opacity" From="0" To="1" Duration="0:0:0.418"/><DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.Y)" From="8" To="0" Duration="0:0:0.418" DecelerationRatio="0.8"/></Storyboard></BeginStoryboard></EventTrigger></Border.Triggers>
@@ -5692,8 +5958,7 @@ Write-AMRLog ("Catalog item model: {0} ({1} items)." -f $(if ($script:AMRCatalog
          <CheckBox Name="btDisableClipboardCloudSync" Content="Turn off cloud clipboard synchronization" Foreground="#E5EFFB" FontSize="11" Margin="0,3"/>
         </StackPanel>
        </Border>
-       <Border BorderBrush="#668FC0" BorderThickness="1.1" CornerRadius="12" Padding="10" Margin="5" Width="246" MinHeight="136" Opacity="0" RenderTransformOrigin="0.5,0.5">
-        <Border.Background><LinearGradientBrush StartPoint="0,0" EndPoint="1,1"><GradientStop Color="#D02B4F78" Offset="0"/><GradientStop Color="#B51A3154" Offset="1"/></LinearGradientBrush></Border.Background>
+       <Border Background="{StaticResource AMRSoftGlassBrush}" BorderBrush="{StaticResource AMRSoftGlassEdgeBrush}" BorderThickness="1.1" CornerRadius="12" Padding="10" Margin="5" Width="246" MinHeight="136" Opacity="0" RenderTransformOrigin="0.5,0.5">
         <Border.Effect><DropShadowEffect Color="#020A16" BlurRadius="14" ShadowDepth="2" Opacity="0.42"/></Border.Effect>
         <Border.RenderTransform><TranslateTransform Y="8"/></Border.RenderTransform>
         <Border.Triggers><EventTrigger RoutedEvent="FrameworkElement.Loaded"><BeginStoryboard><Storyboard><DoubleAnimation Storyboard.TargetProperty="Opacity" From="0" To="1" Duration="0:0:0.439"/><DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.Y)" From="8" To="0" Duration="0:0:0.439" DecelerationRatio="0.8"/></Storyboard></BeginStoryboard></EventTrigger></Border.Triggers>
@@ -5702,8 +5967,7 @@ Write-AMRLog ("Catalog item model: {0} ({1} items)." -f $(if ($script:AMRCatalog
          <CheckBox Name="btDisableLocationTracking" Content="Block Windows location access for this user" Foreground="#E5EFFB" FontSize="11" Margin="0,3"/>
         </StackPanel>
        </Border>
-       <Border BorderBrush="#7897C8" BorderThickness="1.1" CornerRadius="12" Padding="10" Margin="5" Width="246" MinHeight="136" Opacity="0" RenderTransformOrigin="0.5,0.5">
-        <Border.Background><LinearGradientBrush StartPoint="0,0" EndPoint="1,1"><GradientStop Color="#D02D426B" Offset="0"/><GradientStop Color="#B51C2D50" Offset="1"/></LinearGradientBrush></Border.Background>
+       <Border Background="{StaticResource AMRSoftGlassBrush}" BorderBrush="{StaticResource AMRSoftGlassEdgeBrush}" BorderThickness="1.1" CornerRadius="12" Padding="10" Margin="5" Width="246" MinHeight="136" Opacity="0" RenderTransformOrigin="0.5,0.5">
         <Border.Effect><DropShadowEffect Color="#020A16" BlurRadius="14" ShadowDepth="2" Opacity="0.42"/></Border.Effect>
         <Border.RenderTransform><TranslateTransform Y="8"/></Border.RenderTransform>
         <Border.Triggers><EventTrigger RoutedEvent="FrameworkElement.Loaded"><BeginStoryboard><Storyboard><DoubleAnimation Storyboard.TargetProperty="Opacity" From="0" To="1" Duration="0:0:0.46"/><DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.Y)" From="8" To="0" Duration="0:0:0.46" DecelerationRatio="0.8"/></Storyboard></BeginStoryboard></EventTrigger></Border.Triggers>
@@ -5720,8 +5984,7 @@ Write-AMRLog ("Catalog item model: {0} ({1} items)." -f $(if ($script:AMRCatalog
      <TabItem Header="Customization">
       <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Padding="6,2,8,10">
        <StackPanel Name="CustomizePanel" Margin="2"><StackPanel.Resources><Style TargetType="CheckBox" BasedOn="{StaticResource AMRTweakCheckStyle}"/></StackPanel.Resources>
-        <Border BorderBrush="#526F91" BorderThickness="1" CornerRadius="14" Padding="12,10" Margin="2,4,2,12">
-         <Border.Background><LinearGradientBrush StartPoint="0,0" EndPoint="1,1"><GradientStop Color="#B52B4968" Offset="0"/><GradientStop Color="#8F172B43" Offset="1"/></LinearGradientBrush></Border.Background>
+        <Border Background="{StaticResource AMRSoftGlassBrush}" BorderBrush="{StaticResource AMRSoftGlassEdgeBrush}" BorderThickness="1" CornerRadius="14" Padding="12,10" Margin="2,4,2,12">
          <Grid>
           <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
           <StackPanel Grid.Column="0" VerticalAlignment="Center" Margin="2,0,12,0">
@@ -5745,8 +6008,7 @@ Write-AMRLog ("Catalog item model: {0} ({1} items)." -f $(if ($script:AMRCatalog
          </Grid>
         </Border>
         <WrapPanel Name="CustomizationCardsPanel" Orientation="Horizontal" HorizontalAlignment="Center" ItemWidth="258">
-         <Border BorderBrush="#668FC0" BorderThickness="1.1" CornerRadius="13" Padding="10" Margin="5" Width="248" Height="258" Opacity="0" RenderTransformOrigin="0.5,0.5">
-          <Border.Background><LinearGradientBrush StartPoint="0,0" EndPoint="1,1"><GradientStop Color="#D02A4565" Offset="0"/><GradientStop Color="#B51A304B" Offset="1"/></LinearGradientBrush></Border.Background>
+         <Border Background="{StaticResource AMRSoftGlassBrush}" BorderBrush="{StaticResource AMRSoftGlassEdgeBrush}" BorderThickness="1.1" CornerRadius="13" Padding="10" Margin="5" Width="248" Height="258" Opacity="0" RenderTransformOrigin="0.5,0.5">
           <Border.Effect><DropShadowEffect Color="#020A16" BlurRadius="14" ShadowDepth="2" Opacity="0.38"/></Border.Effect>
           <Border.RenderTransform><TranslateTransform Y="8"/></Border.RenderTransform>
           <Border.Triggers><EventTrigger RoutedEvent="FrameworkElement.Loaded"><BeginStoryboard><Storyboard><DoubleAnimation Storyboard.TargetProperty="Opacity" From="0" To="1" Duration="0:0:0.25"/><DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.Y)" From="8" To="0" Duration="0:0:0.25" DecelerationRatio="0.8"/></Storyboard></BeginStoryboard></EventTrigger></Border.Triggers>
@@ -5763,8 +6025,7 @@ Write-AMRLog ("Catalog item model: {0} ({1} items)." -f $(if ($script:AMRCatalog
           </StackPanel>
          </ScrollViewer>
          </Border>
-         <Border BorderBrush="#668FC0" BorderThickness="1.1" CornerRadius="13" Padding="10" Margin="5" Width="248" Height="258" Opacity="0" RenderTransformOrigin="0.5,0.5">
-          <Border.Background><LinearGradientBrush StartPoint="0,0" EndPoint="1,1"><GradientStop Color="#D02B536D" Offset="0"/><GradientStop Color="#B51B354F" Offset="1"/></LinearGradientBrush></Border.Background>
+         <Border Background="{StaticResource AMRSoftGlassBrush}" BorderBrush="{StaticResource AMRSoftGlassEdgeBrush}" BorderThickness="1.1" CornerRadius="13" Padding="10" Margin="5" Width="248" Height="258" Opacity="0" RenderTransformOrigin="0.5,0.5">
           <Border.Effect><DropShadowEffect Color="#020A16" BlurRadius="14" ShadowDepth="2" Opacity="0.38"/></Border.Effect>
           <Border.RenderTransform><TranslateTransform Y="8"/></Border.RenderTransform>
           <Border.Triggers><EventTrigger RoutedEvent="FrameworkElement.Loaded"><BeginStoryboard><Storyboard><DoubleAnimation Storyboard.TargetProperty="Opacity" From="0" To="1" Duration="0:0:0.28"/><DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.Y)" From="8" To="0" Duration="0:0:0.28" DecelerationRatio="0.8"/></Storyboard></BeginStoryboard></EventTrigger></Border.Triggers>
@@ -5778,8 +6039,7 @@ Write-AMRLog ("Catalog item model: {0} ({1} items)." -f $(if ($script:AMRCatalog
            <CheckBox Name="chkHideSearchTaskbar" Content="Hide Taskbar Search Box" Foreground="#E5EFFB" FontSize="11.2" Margin="0,3" VerticalAlignment="Center"/>
           </StackPanel>
          </Border>
-         <Border BorderBrush="#668FC0" BorderThickness="1.1" CornerRadius="13" Padding="10" Margin="5" Width="248" Height="258" Opacity="0" RenderTransformOrigin="0.5,0.5">
-          <Border.Background><LinearGradientBrush StartPoint="0,0" EndPoint="1,1"><GradientStop Color="#D02B4F78" Offset="0"/><GradientStop Color="#B51A3154" Offset="1"/></LinearGradientBrush></Border.Background>
+         <Border Background="{StaticResource AMRSoftGlassBrush}" BorderBrush="{StaticResource AMRSoftGlassEdgeBrush}" BorderThickness="1.1" CornerRadius="13" Padding="10" Margin="5" Width="248" Height="258" Opacity="0" RenderTransformOrigin="0.5,0.5">
           <Border.Effect><DropShadowEffect Color="#020A16" BlurRadius="14" ShadowDepth="2" Opacity="0.38"/></Border.Effect>
           <Border.RenderTransform><TranslateTransform Y="8"/></Border.RenderTransform>
           <Border.Triggers><EventTrigger RoutedEvent="FrameworkElement.Loaded"><BeginStoryboard><Storyboard><DoubleAnimation Storyboard.TargetProperty="Opacity" From="0" To="1" Duration="0:0:0.32"/><DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.Y)" From="8" To="0" Duration="0:0:0.32" DecelerationRatio="0.8"/></Storyboard></BeginStoryboard></EventTrigger></Border.Triggers>
@@ -5797,8 +6057,7 @@ Write-AMRLog ("Catalog item model: {0} ({1} items)." -f $(if ($script:AMRCatalog
           </StackPanel>
          </ScrollViewer>
          </Border>
-         <Border BorderBrush="#668FC0" BorderThickness="1.1" CornerRadius="13" Padding="10" Margin="5" Width="248" Height="258" Opacity="0" RenderTransformOrigin="0.5,0.5">
-          <Border.Background><LinearGradientBrush StartPoint="0,0" EndPoint="1,1"><GradientStop Color="#D02D426B" Offset="0"/><GradientStop Color="#B51C2D50" Offset="1"/></LinearGradientBrush></Border.Background>
+         <Border Background="{StaticResource AMRSoftGlassBrush}" BorderBrush="{StaticResource AMRSoftGlassEdgeBrush}" BorderThickness="1.1" CornerRadius="13" Padding="10" Margin="5" Width="248" Height="258" Opacity="0" RenderTransformOrigin="0.5,0.5">
           <Border.Effect><DropShadowEffect Color="#020A16" BlurRadius="14" ShadowDepth="2" Opacity="0.38"/></Border.Effect>
           <Border.RenderTransform><TranslateTransform Y="8"/></Border.RenderTransform>
           <Border.Triggers><EventTrigger RoutedEvent="FrameworkElement.Loaded"><BeginStoryboard><Storyboard><DoubleAnimation Storyboard.TargetProperty="Opacity" From="0" To="1" Duration="0:0:0.35"/><DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.Y)" From="8" To="0" Duration="0:0:0.35" DecelerationRatio="0.8"/></Storyboard></BeginStoryboard></EventTrigger></Border.Triggers>
@@ -5810,8 +6069,7 @@ Write-AMRLog ("Catalog item model: {0} ({1} items)." -f $(if ($script:AMRCatalog
            <CheckBox Name="chkAddTakeOwnership" Content="Add Take Ownership to Context Menu" Foreground="#E5EFFB" FontSize="11.2" Margin="0,3" VerticalAlignment="Center"/>
           </StackPanel>
          </Border>
-         <Border BorderBrush="#668FC0" BorderThickness="1.1" CornerRadius="13" Padding="10" Margin="5" Width="248" Height="258" Opacity="0" RenderTransformOrigin="0.5,0.5">
-          <Border.Background><LinearGradientBrush StartPoint="0,0" EndPoint="1,1"><GradientStop Color="#D02A4E69" Offset="0"/><GradientStop Color="#B51A3047" Offset="1"/></LinearGradientBrush></Border.Background>
+         <Border Background="{StaticResource AMRSoftGlassBrush}" BorderBrush="{StaticResource AMRSoftGlassEdgeBrush}" BorderThickness="1.1" CornerRadius="13" Padding="10" Margin="5" Width="248" Height="258" Opacity="0" RenderTransformOrigin="0.5,0.5">
           <Border.Effect><DropShadowEffect Color="#020A16" BlurRadius="14" ShadowDepth="2" Opacity="0.38"/></Border.Effect>
           <Border.RenderTransform><TranslateTransform Y="8"/></Border.RenderTransform>
           <Border.Triggers><EventTrigger RoutedEvent="FrameworkElement.Loaded"><BeginStoryboard><Storyboard><DoubleAnimation Storyboard.TargetProperty="Opacity" From="0" To="1" Duration="0:0:0.39"/><DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.Y)" From="8" To="0" Duration="0:0:0.39" DecelerationRatio="0.8"/></Storyboard></BeginStoryboard></EventTrigger></Border.Triggers>
@@ -5823,8 +6081,7 @@ Write-AMRLog ("Catalog item model: {0} ({1} items)." -f $(if ($script:AMRCatalog
            <CheckBox Name="chkDisableTailoredExperiences" Content="Disable Tailored Experiences" Foreground="#E5EFFB" FontSize="11.2" Margin="0,3" VerticalAlignment="Center"/>
           </StackPanel>
          </Border>
-         <Border BorderBrush="#668FC0" BorderThickness="1.1" CornerRadius="13" Padding="10" Margin="5" Width="248" Height="258" Opacity="0" RenderTransformOrigin="0.5,0.5">
-          <Border.Background><LinearGradientBrush StartPoint="0,0" EndPoint="1,1"><GradientStop Color="#D02C4B70" Offset="0"/><GradientStop Color="#B51B304D" Offset="1"/></LinearGradientBrush></Border.Background>
+         <Border Background="{StaticResource AMRSoftGlassBrush}" BorderBrush="{StaticResource AMRSoftGlassEdgeBrush}" BorderThickness="1.1" CornerRadius="13" Padding="10" Margin="5" Width="248" Height="258" Opacity="0" RenderTransformOrigin="0.5,0.5">
           <Border.Effect><DropShadowEffect Color="#020A16" BlurRadius="14" ShadowDepth="2" Opacity="0.38"/></Border.Effect>
           <Border.RenderTransform><TranslateTransform Y="8"/></Border.RenderTransform>
           <Border.Triggers><EventTrigger RoutedEvent="FrameworkElement.Loaded"><BeginStoryboard><Storyboard><DoubleAnimation Storyboard.TargetProperty="Opacity" From="0" To="1" Duration="0:0:0.42"/><DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.Y)" From="8" To="0" Duration="0:0:0.42" DecelerationRatio="0.8"/></Storyboard></BeginStoryboard></EventTrigger></Border.Triggers>
@@ -5835,8 +6092,7 @@ Write-AMRLog ("Catalog item model: {0} ({1} items)." -f $(if ($script:AMRCatalog
            <CheckBox Name="chkDisableHibernation" Content="Disable Hibernation" Foreground="#E5EFFB" FontSize="11.2" Margin="0,3" VerticalAlignment="Center"/>
           </StackPanel>
          </Border>
-         <Border BorderBrush="#668FC0" BorderThickness="1.1" CornerRadius="13" Padding="10" Margin="5" Width="248" Height="258" Opacity="0" RenderTransformOrigin="0.5,0.5">
-          <Border.Background><LinearGradientBrush StartPoint="0,0" EndPoint="1,1"><GradientStop Color="#D02D4565" Offset="0"/><GradientStop Color="#B51A2E49" Offset="1"/></LinearGradientBrush></Border.Background>
+         <Border Background="{StaticResource AMRSoftGlassBrush}" BorderBrush="{StaticResource AMRSoftGlassEdgeBrush}" BorderThickness="1.1" CornerRadius="13" Padding="10" Margin="5" Width="248" Height="258" Opacity="0" RenderTransformOrigin="0.5,0.5">
           <Border.Effect><DropShadowEffect Color="#020A16" BlurRadius="14" ShadowDepth="2" Opacity="0.38"/></Border.Effect>
           <Border.RenderTransform><TranslateTransform Y="8"/></Border.RenderTransform>
           <Border.Triggers><EventTrigger RoutedEvent="FrameworkElement.Loaded"><BeginStoryboard><Storyboard><DoubleAnimation Storyboard.TargetProperty="Opacity" From="0" To="1" Duration="0:0:0.46"/><DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.Y)" From="8" To="0" Duration="0:0:0.46" DecelerationRatio="0.8"/></Storyboard></BeginStoryboard></EventTrigger></Border.Triggers>
@@ -6525,7 +6781,7 @@ Write-AMRLog ("Catalog item model: {0} ({1} items)." -f $(if ($script:AMRCatalog
         </StackPanel>
         <Button Name="CleanupScanBtn" Grid.Row="1" Content="⌕  Scan Now" Width="112" Height="34" Margin="0,0,2,7" HorizontalAlignment="Right"
                 Background="#263B36" Foreground="#A7F3D0" BorderBrush="#36594D" FontWeight="SemiBold"/>
-        <Border Grid.Row="2" Background="#19191F" BorderBrush="#34343D" BorderThickness="1" CornerRadius="12" Padding="14">
+        <Border Grid.Row="2" Background="{StaticResource AMRSoftGlassBrush}" BorderBrush="{StaticResource AMRSoftGlassEdgeBrush}" BorderThickness="1" CornerRadius="12" Padding="14">
          <Grid>
           <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
           <Grid Grid.Row="0" Margin="0,0,0,10">
@@ -6544,15 +6800,15 @@ Write-AMRLog ("Catalog item model: {0} ({1} items)." -f $(if ($script:AMRCatalog
           </Grid>
           <ScrollViewer Name="CleanupSmartItemsScrollViewer" Grid.Row="2" VerticalScrollBarVisibility="Auto">
            <StackPanel>
-            <Border Background="#202027" BorderBrush="#383842" BorderThickness="1" CornerRadius="8" Padding="10" Margin="0,0,0,7"><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><StackPanel><CheckBox Name="CleanupUserTempCheck" Style="{StaticResource AMRCleanupCheckStyle}" Content="User temporary files" Foreground="#F1F5F9" FontSize="12" FontWeight="SemiBold"/><TextBlock Text="Temporary files in your Windows user profile." Foreground="#CBD5E1" FontSize="11" Margin="22,3,0,0"/></StackPanel><TextBlock Name="CleanupUserTempInfo" Grid.Column="1" Text="Not scanned" Foreground="#D1D5DB" VerticalAlignment="Center" Margin="8,0,0,0" FontSize="10"/></Grid></Border>
-            <Border Background="#202027" BorderBrush="#383842" BorderThickness="1" CornerRadius="8" Padding="10" Margin="0,0,0,7"><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><StackPanel><CheckBox Name="CleanupWindowsTempCheck" Style="{StaticResource AMRCleanupCheckStyle}" Content="Windows temporary files" Foreground="#F1F5F9" FontSize="12" FontWeight="SemiBold"/><TextBlock Text="Temporary files under the Windows Temp folder." Foreground="#CBD5E1" FontSize="11" Margin="22,3,0,0"/></StackPanel><TextBlock Name="CleanupWindowsTempInfo" Grid.Column="1" Text="Not scanned" Foreground="#D1D5DB" VerticalAlignment="Center" Margin="8,0,0,0" FontSize="10"/></Grid></Border>
-            <Border Background="#202027" BorderBrush="#383842" BorderThickness="1" CornerRadius="8" Padding="10" Margin="0,0,0,7"><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><StackPanel><CheckBox Name="CleanupUpdateCheck" Style="{StaticResource AMRCleanupCheckStyle}" Content="Windows &amp; NVIDIA update leftovers" Foreground="#F1F5F9" FontSize="12" FontWeight="SemiBold"/><TextBlock Text="Windows Update downloads and old NVIDIA app update artifacts (30+ days)." Foreground="#CBD5E1" FontSize="11" Margin="22,3,0,0"/></StackPanel><TextBlock Name="CleanupUpdateInfo" Grid.Column="1" Text="Not scanned" Foreground="#D1D5DB" VerticalAlignment="Center" Margin="8,0,0,0" FontSize="10"/></Grid></Border>
-            <Border Background="#202027" BorderBrush="#383842" BorderThickness="1" CornerRadius="8" Padding="10" Margin="0,0,0,7"><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><StackPanel><CheckBox Name="CleanupWerCheck" Style="{StaticResource AMRCleanupCheckStyle}" Content="Windows error reports" Foreground="#F1F5F9" FontSize="12" FontWeight="SemiBold"/><TextBlock Text="Archived and queued Windows Error Reporting files." Foreground="#CBD5E1" FontSize="11" Margin="22,3,0,0"/></StackPanel><TextBlock Name="CleanupWerInfo" Grid.Column="1" Text="Not scanned" Foreground="#D1D5DB" VerticalAlignment="Center" Margin="8,0,0,0" FontSize="10"/></Grid></Border>
-            <Border Background="#202027" BorderBrush="#383842" BorderThickness="1" CornerRadius="8" Padding="10" Margin="0,0,0,7"><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><StackPanel><CheckBox Name="CleanupShaderCheck" Style="{StaticResource AMRCleanupCheckStyle}" Content="GPU shader cache" Foreground="#F1F5F9" FontSize="12" FontWeight="SemiBold"/><TextBlock Text="Rebuildable DirectX, NVIDIA, AMD and Intel shader caches (7+ days)." Foreground="#CBD5E1" FontSize="11" Margin="22,3,0,0"/></StackPanel><TextBlock Name="CleanupShaderInfo" Grid.Column="1" Text="Not scanned" Foreground="#D1D5DB" VerticalAlignment="Center" Margin="8,0,0,0" FontSize="10"/></Grid></Border>
-            <Border Background="#202027" BorderBrush="#383842" BorderThickness="1" CornerRadius="8" Padding="10" Margin="0,0,0,7"><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><StackPanel><CheckBox Name="CleanupAppCacheCheck" Style="{StaticResource AMRCleanupCheckStyle}" Content="Application caches" Foreground="#F1F5F9" FontSize="12" FontWeight="SemiBold"/><TextBlock Text="Recognized rebuildable caches for common browsers, chat, media, gaming and developer apps (7+ days)." Foreground="#CBD5E1" FontSize="11" Margin="22,3,0,0"/></StackPanel><TextBlock Name="CleanupAppCacheInfo" Grid.Column="1" Text="Not scanned" Foreground="#D1D5DB" VerticalAlignment="Center" Margin="8,0,0,0" FontSize="10"/></Grid></Border>
-            <Border Background="#202027" BorderBrush="#383842" BorderThickness="1" CornerRadius="8" Padding="10" Margin="0,0,0,7"><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><StackPanel><CheckBox Name="CleanupDeliveryCheck" Style="{StaticResource AMRCleanupCheckStyle}" Content="Delivery Optimization cache" Foreground="#F1F5F9" FontSize="12" FontWeight="SemiBold"/><TextBlock Text="Cached update delivery files that Windows can download again." Foreground="#CBD5E1" FontSize="11" Margin="22,3,0,0"/></StackPanel><TextBlock Name="CleanupDeliveryInfo" Grid.Column="1" Text="Not scanned" Foreground="#D1D5DB" VerticalAlignment="Center" Margin="8,0,0,0" FontSize="10"/></Grid></Border>
+            <Border Background="{StaticResource AMRSoftGlassBrush}" BorderBrush="{StaticResource AMRSoftGlassEdgeBrush}" BorderThickness="1" CornerRadius="8" Padding="10" Margin="0,0,0,7"><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><StackPanel><CheckBox Name="CleanupUserTempCheck" Style="{StaticResource AMRCleanupCheckStyle}" Content="User temporary files" Foreground="#F1F5F9" FontSize="12" FontWeight="SemiBold"/><TextBlock Text="Temporary files in your Windows user profile." Foreground="#CBD5E1" FontSize="11" Margin="22,3,0,0"/></StackPanel><TextBlock Name="CleanupUserTempInfo" Grid.Column="1" Text="Not scanned" Foreground="#D1D5DB" VerticalAlignment="Center" Margin="8,0,0,0" FontSize="10"/></Grid></Border>
+            <Border Background="{StaticResource AMRSoftGlassBrush}" BorderBrush="{StaticResource AMRSoftGlassEdgeBrush}" BorderThickness="1" CornerRadius="8" Padding="10" Margin="0,0,0,7"><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><StackPanel><CheckBox Name="CleanupWindowsTempCheck" Style="{StaticResource AMRCleanupCheckStyle}" Content="Windows temporary files" Foreground="#F1F5F9" FontSize="12" FontWeight="SemiBold"/><TextBlock Text="Temporary files under the Windows Temp folder." Foreground="#CBD5E1" FontSize="11" Margin="22,3,0,0"/></StackPanel><TextBlock Name="CleanupWindowsTempInfo" Grid.Column="1" Text="Not scanned" Foreground="#D1D5DB" VerticalAlignment="Center" Margin="8,0,0,0" FontSize="10"/></Grid></Border>
+            <Border Background="{StaticResource AMRSoftGlassBrush}" BorderBrush="{StaticResource AMRSoftGlassEdgeBrush}" BorderThickness="1" CornerRadius="8" Padding="10" Margin="0,0,0,7"><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><StackPanel><CheckBox Name="CleanupUpdateCheck" Style="{StaticResource AMRCleanupCheckStyle}" Content="Windows &amp; NVIDIA update leftovers" Foreground="#F1F5F9" FontSize="12" FontWeight="SemiBold"/><TextBlock Text="Windows Update downloads and old NVIDIA app update artifacts (30+ days)." Foreground="#CBD5E1" FontSize="11" Margin="22,3,0,0"/></StackPanel><TextBlock Name="CleanupUpdateInfo" Grid.Column="1" Text="Not scanned" Foreground="#D1D5DB" VerticalAlignment="Center" Margin="8,0,0,0" FontSize="10"/></Grid></Border>
+            <Border Background="{StaticResource AMRSoftGlassBrush}" BorderBrush="{StaticResource AMRSoftGlassEdgeBrush}" BorderThickness="1" CornerRadius="8" Padding="10" Margin="0,0,0,7"><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><StackPanel><CheckBox Name="CleanupWerCheck" Style="{StaticResource AMRCleanupCheckStyle}" Content="Windows error reports" Foreground="#F1F5F9" FontSize="12" FontWeight="SemiBold"/><TextBlock Text="Archived and queued Windows Error Reporting files." Foreground="#CBD5E1" FontSize="11" Margin="22,3,0,0"/></StackPanel><TextBlock Name="CleanupWerInfo" Grid.Column="1" Text="Not scanned" Foreground="#D1D5DB" VerticalAlignment="Center" Margin="8,0,0,0" FontSize="10"/></Grid></Border>
+            <Border Background="{StaticResource AMRSoftGlassBrush}" BorderBrush="{StaticResource AMRSoftGlassEdgeBrush}" BorderThickness="1" CornerRadius="8" Padding="10" Margin="0,0,0,7"><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><StackPanel><CheckBox Name="CleanupShaderCheck" Style="{StaticResource AMRCleanupCheckStyle}" Content="GPU shader cache" Foreground="#F1F5F9" FontSize="12" FontWeight="SemiBold"/><TextBlock Text="Rebuildable DirectX, NVIDIA, AMD and Intel shader caches (7+ days)." Foreground="#CBD5E1" FontSize="11" Margin="22,3,0,0"/></StackPanel><TextBlock Name="CleanupShaderInfo" Grid.Column="1" Text="Not scanned" Foreground="#D1D5DB" VerticalAlignment="Center" Margin="8,0,0,0" FontSize="10"/></Grid></Border>
+            <Border Background="{StaticResource AMRSoftGlassBrush}" BorderBrush="{StaticResource AMRSoftGlassEdgeBrush}" BorderThickness="1" CornerRadius="8" Padding="10" Margin="0,0,0,7"><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><StackPanel><CheckBox Name="CleanupAppCacheCheck" Style="{StaticResource AMRCleanupCheckStyle}" Content="Application caches" Foreground="#F1F5F9" FontSize="12" FontWeight="SemiBold"/><TextBlock Text="Recognized rebuildable caches for common browsers, chat, media, gaming and developer apps (7+ days)." Foreground="#CBD5E1" FontSize="11" Margin="22,3,0,0"/></StackPanel><TextBlock Name="CleanupAppCacheInfo" Grid.Column="1" Text="Not scanned" Foreground="#D1D5DB" VerticalAlignment="Center" Margin="8,0,0,0" FontSize="10"/></Grid></Border>
+            <Border Background="{StaticResource AMRSoftGlassBrush}" BorderBrush="{StaticResource AMRSoftGlassEdgeBrush}" BorderThickness="1" CornerRadius="8" Padding="10" Margin="0,0,0,7"><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><StackPanel><CheckBox Name="CleanupDeliveryCheck" Style="{StaticResource AMRCleanupCheckStyle}" Content="Delivery Optimization cache" Foreground="#F1F5F9" FontSize="12" FontWeight="SemiBold"/><TextBlock Text="Cached update delivery files that Windows can download again." Foreground="#CBD5E1" FontSize="11" Margin="22,3,0,0"/></StackPanel><TextBlock Name="CleanupDeliveryInfo" Grid.Column="1" Text="Not scanned" Foreground="#D1D5DB" VerticalAlignment="Center" Margin="8,0,0,0" FontSize="10"/></Grid></Border>
 
-            <Border Background="#202027" BorderBrush="#52647A" BorderThickness="1" CornerRadius="8" Padding="10" Margin="0,2,0,8">
+            <Border Background="{StaticResource AMRSoftGlassBrush}" BorderBrush="{StaticResource AMRSoftGlassEdgeBrush}" BorderThickness="1" CornerRadius="8" Padding="10" Margin="0,2,0,8">
              <StackPanel>
               <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                <StackPanel><TextBlock Text="Recycle Bin (system drive only)" Foreground="#F1F5F9" FontSize="12" FontWeight="SemiBold"/><TextBlock Name="CleanupRecycleBinInfo" Text="Not scanned" Foreground="#CBD5E1" FontSize="11" Margin="0,3,0,0"/></StackPanel>
@@ -6564,7 +6820,7 @@ Write-AMRLog ("Catalog item model: {0} ({1} items)." -f $(if ($script:AMRCatalog
               <TextBlock Text="Only the Windows system drive is included. Emptying requires a separate confirmation." Foreground="#A1A1AA" FontSize="10" Margin="0,5,0,0"/>
              </StackPanel>
             </Border>
-            <Border Background="#202027" BorderBrush="#52647A" BorderThickness="1" CornerRadius="8" Padding="10" Margin="0,0,0,8">
+            <Border Background="{StaticResource AMRSoftGlassBrush}" BorderBrush="{StaticResource AMRSoftGlassEdgeBrush}" BorderThickness="1" CornerRadius="8" Padding="10" Margin="0,0,0,8">
              <StackPanel>
               <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                <StackPanel><TextBlock Text="Crash Dumps &amp; Windows Upgrade Leftovers" Foreground="#F1F5F9" FontSize="12" FontWeight="SemiBold"/><TextBlock Text="Read-only discovery: crash dumps, Windows.old, upgrade staging and update remnants." Foreground="#CBD5E1" FontSize="11" Margin="0,3,0,0"/></StackPanel>
@@ -6574,7 +6830,7 @@ Write-AMRLog ("Catalog item model: {0} ({1} items)." -f $(if ($script:AMRCatalog
               <TextBox Name="CleanupDiscoveryReport" Text="Inspection results will appear here. These findings are never included in Clean Selected." IsReadOnly="True" TextWrapping="Wrap" AcceptsReturn="True" VerticalScrollBarVisibility="Auto" MaxHeight="150" Background="#0B1220" Foreground="#DCE7F3" BorderBrush="#40566D" FontFamily="Consolas" FontSize="10" Padding="7"/>
              </StackPanel>
             </Border>
-            <Border Background="#202027" BorderBrush="#52647A" BorderThickness="1" CornerRadius="8" Padding="10" Margin="0,0,0,4">
+            <Border Background="{StaticResource AMRSoftGlassBrush}" BorderBrush="{StaticResource AMRSoftGlassEdgeBrush}" BorderThickness="1" CornerRadius="8" Padding="10" Margin="0,0,0,4">
              <StackPanel>
               <TextBlock Text="Large Files Review (read-only)" Foreground="#F1F5F9" FontSize="12" FontWeight="SemiBold"/>
               <TextBlock Text="Finds files of 512 MB or larger in common folders on the system drive. Review manually; no delete action is provided." Foreground="#CBD5E1" FontSize="11" Margin="0,3,0,5"/>
@@ -6602,7 +6858,7 @@ Write-AMRLog ("Catalog item model: {0} ({1} items)." -f $(if ($script:AMRCatalog
          <TextBlock Text="DISK TOOLS &amp; DIAGNOSTICS" FontSize="21" FontWeight="Bold" Foreground="#F4F4F5"/>
          <TextBlock Text="Analyze fixed drives and Windows components. Analysis is read-only unless a clearly marked repair action is selected." FontSize="12" Foreground="#A1A1AA" TextWrapping="Wrap" Margin="0,4,0,0"/>
         </StackPanel>
-        <Border Grid.Row="1" Background="#19191F" BorderBrush="#34343D" BorderThickness="1" CornerRadius="12" Padding="14">
+        <Border Grid.Row="1" Background="{StaticResource AMRSoftGlassBrush}" BorderBrush="{StaticResource AMRSoftGlassEdgeBrush}" BorderThickness="1" CornerRadius="12" Padding="14">
          <Grid>
           <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
           <StackPanel Grid.Row="0" Margin="0,0,0,12">
@@ -6633,7 +6889,7 @@ Write-AMRLog ("Catalog item model: {0} ({1} items)." -f $(if ($script:AMRCatalog
          <Button Name="CleanupDiskOrganizerStorageBtn" Content="Storage Settings" Height="32" MinWidth="122" Margin="0,0,8,0" Background="#343044" Foreground="#DDD2F5" BorderBrush="#51466A"/>
          <Button Name="CleanupDiskOrganizerOptimizeBtn" Content="Optimize Drives" Height="32" MinWidth="118" Background="#493B2B" Foreground="#F4DFC0" BorderBrush="#70583A"/>
         </StackPanel>
-        <Border Grid.Row="2" Background="#19191F" BorderBrush="#34343D" BorderThickness="1" CornerRadius="12" Padding="12">
+        <Border Grid.Row="2" Background="{StaticResource AMRSoftGlassBrush}" BorderBrush="{StaticResource AMRSoftGlassEdgeBrush}" BorderThickness="1" CornerRadius="12" Padding="12">
          <Grid><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
           <TextBlock Grid.Row="0" Text="AVAILABLE VOLUMES" FontSize="12" FontWeight="SemiBold" Foreground="#DCE7F5" Margin="2,0,0,8"/>
           <ListBox Name="CleanupDiskOrganizerList" Grid.Row="1" Background="#0B1220" Foreground="#E5EDF7" BorderBrush="#34465B" FontFamily="Consolas" FontSize="12" Padding="8"/>
@@ -6653,7 +6909,7 @@ Write-AMRLog ("Catalog item model: {0} ({1} items)." -f $(if ($script:AMRCatalog
          </StackPanel>
          <Button Name="CleanupBrowserGoToScanBtn" Grid.Column="1" Content="Open Cleanup Scan" Height="34" MinWidth="150" Margin="12,0,0,0" Padding="12,0" VerticalAlignment="Center" Background="#293746" Foreground="#C7DDF5" BorderBrush="#40566D" ToolTip="Open the main Clean Up scan"/>
         </Grid>
-        <Border Grid.Row="1" Background="#19191F" BorderBrush="#34343D" BorderThickness="1" CornerRadius="12" Padding="14" Margin="0,0,0,10">
+        <Border Grid.Row="1" Background="{StaticResource AMRSoftGlassBrush}" BorderBrush="{StaticResource AMRSoftGlassEdgeBrush}" BorderThickness="1" CornerRadius="12" Padding="14" Margin="0,0,0,10">
          <StackPanel>
           <TextBlock Text="BROWSER CLEANUP" FontSize="13" FontWeight="SemiBold" Foreground="#E4E4E7" Margin="0,0,0,9"/>
           <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
@@ -6774,7 +7030,7 @@ Write-AMRLog ("Catalog item model: {0} ({1} items)." -f $(if ($script:AMRCatalog
           </Grid>
          </StackPanel>
         </Border>
-        <Border Name="CleanupBrowserInfoPanel" Grid.Row="2" Background="#19191F" BorderBrush="#34343D" BorderThickness="1" CornerRadius="12" Padding="14">
+        <Border Name="CleanupBrowserInfoPanel" Grid.Row="2" Background="{StaticResource AMRSoftGlassBrush}" BorderBrush="{StaticResource AMRSoftGlassEdgeBrush}" BorderThickness="1" CornerRadius="12" Padding="14">
          <StackPanel>
           <TextBlock Text="WHAT AMR CLEANS" FontSize="13" FontWeight="SemiBold" Foreground="#E4E4E7" Margin="0,0,0,8"/>
           <TextBlock Text="• Rebuildable browser cache folders (where detected)
@@ -6792,7 +7048,7 @@ Write-AMRLog ("Catalog item model: {0} ({1} items)." -f $(if ($script:AMRCatalog
          <TextBlock Text="ORPHAN CLEANUP" FontSize="21" FontWeight="Bold" Foreground="#F4F4F5"/>
          <TextBlock Text="Analyze leftovers. Review before quarantine; restore anytime." FontSize="11" Foreground="#A1A1AA" Margin="0,3,0,0"/>
         </StackPanel>
-        <Border Grid.Row="1" Background="#19191F" BorderBrush="#34343D" BorderThickness="1" CornerRadius="10" Padding="10" Margin="0,0,0,8">
+        <Border Grid.Row="1" Background="{StaticResource AMRSoftGlassBrush}" BorderBrush="{StaticResource AMRSoftGlassEdgeBrush}" BorderThickness="1" CornerRadius="10" Padding="10" Margin="0,0,0,8">
          <WrapPanel VerticalAlignment="Center">
           <Button Name="CleanupOrphanScanBtn" Content="Analyze" Height="32" MinWidth="88" Margin="0,0,7,0" Background="#263B36" Foreground="#A7F3D0" BorderBrush="#36594D"/>
           <Button Name="CleanupOrphanQuarantineBtn" Content="Quarantine Selected" Height="32" MinWidth="132" Margin="0,0,7,0" Background="#493A27" Foreground="#E8D7B5" BorderBrush="#806744"/>
@@ -6803,7 +7059,7 @@ Write-AMRLog ("Catalog item model: {0} ({1} items)." -f $(if ($script:AMRCatalog
         </Border>
         <Grid Name="CleanupOrphanListsPanel" Grid.Row="2">
          <Grid.ColumnDefinitions><ColumnDefinition Width="1.25*"/><ColumnDefinition Width="12"/><ColumnDefinition Width="0.85*"/></Grid.ColumnDefinitions>
-         <Border Grid.Column="0" Background="#19191F" BorderBrush="#34343D" BorderThickness="1" CornerRadius="10" Padding="9">
+         <Border Grid.Column="0" Background="{StaticResource AMRSoftGlassBrush}" BorderBrush="{StaticResource AMRSoftGlassEdgeBrush}" BorderThickness="1" CornerRadius="10" Padding="9">
           <Grid><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
            <TextBlock Text="ANALYSIS RESULTS · SELECT TO QUARANTINE" Foreground="#D9BD8B" FontSize="10" FontWeight="SemiBold" Margin="2,0,0,7"/>
            <ListBox Name="CleanupOrphanResults" Grid.Row="1" SelectionMode="Extended" Background="#0B1220" Foreground="#E5EDF7" BorderBrush="#34465B" FontSize="10" Padding="6">
@@ -6842,7 +7098,7 @@ Write-AMRLog ("Catalog item model: {0} ({1} items)." -f $(if ($script:AMRCatalog
            </ListBox>
           </Grid>
          </Border>
-         <Border Grid.Column="2" Background="#19191F" BorderBrush="#34343D" BorderThickness="1" CornerRadius="10" Padding="9">
+         <Border Grid.Column="2" Background="{StaticResource AMRSoftGlassBrush}" BorderBrush="{StaticResource AMRSoftGlassEdgeBrush}" BorderThickness="1" CornerRadius="10" Padding="9">
           <Grid><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
            <TextBlock Text="QUARANTINE · RESTORE" Foreground="#D9BD8B" FontSize="10" FontWeight="SemiBold" Margin="2,0,0,7"/>
            <ListBox Name="CleanupOrphanQuarantineList" Grid.Row="1" SelectionMode="Extended" Background="#0B1220" Foreground="#E5EDF7" BorderBrush="#34465B" FontSize="10" Padding="6">
@@ -6892,7 +7148,7 @@ Write-AMRLog ("Catalog item model: {0} ({1} items)." -f $(if ($script:AMRCatalog
          <TextBlock Text="WINDOWS COMPONENT CLEANUP" FontSize="21" FontWeight="Bold" Foreground="#F4F4F5"/>
          <TextBlock Text="Analyze and clean the Windows component store." FontSize="12" Foreground="#A1A1AA" TextWrapping="Wrap" Margin="0,4,0,0"/>
         </StackPanel>
-        <Border Grid.Row="1" Background="#19191F" BorderBrush="#34343D" BorderThickness="1" CornerRadius="12" Padding="14" Margin="0,0,0,10">
+        <Border Grid.Row="1" Background="{StaticResource AMRSoftGlassBrush}" BorderBrush="{StaticResource AMRSoftGlassEdgeBrush}" BorderThickness="1" CornerRadius="12" Padding="14" Margin="0,0,0,10">
          <StackPanel>
           <TextBlock Text="COMPONENT STORE" FontSize="13" FontWeight="SemiBold" Foreground="#E4E4E7" Margin="0,0,0,9"/>
           <StackPanel Orientation="Horizontal">
@@ -6903,7 +7159,7 @@ Write-AMRLog ("Catalog item model: {0} ({1} items)." -f $(if ($script:AMRCatalog
           <TextBlock Name="CleanupComponentStatusNew" Text="Ready. Analyze before cleanup." Foreground="#AEB8C8" FontSize="11" TextWrapping="Wrap" Margin="0,8,0,0"/>
          </StackPanel>
         </Border>
-        <Border Grid.Row="2" Background="#19191F" BorderBrush="#34343D" BorderThickness="1" CornerRadius="12" Padding="12">
+        <Border Grid.Row="2" Background="{StaticResource AMRSoftGlassBrush}" BorderBrush="{StaticResource AMRSoftGlassEdgeBrush}" BorderThickness="1" CornerRadius="12" Padding="12">
          <Grid><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
           <TextBlock Grid.Row="0" Text="REPORT" FontSize="11" FontWeight="SemiBold" Foreground="#A1A1AA" Margin="0,0,0,7"/>
           <TextBox Name="CleanupComponentReportNew" Grid.Row="1" Text="Component store analysis has not been run." IsReadOnly="True" TextWrapping="Wrap" AcceptsReturn="True" VerticalScrollBarVisibility="Auto" Background="#0B1220" Foreground="#F1F5F9" BorderBrush="#526176" FontFamily="Consolas" FontSize="12" Padding="10"/>
@@ -6944,7 +7200,7 @@ Write-AMRLog ("Catalog item model: {0} ({1} items)." -f $(if ($script:AMRCatalog
        </StackPanel>
       </Grid>
       
-      <Border Grid.Row="1" Background="#A8172638" BorderBrush="#526F91" BorderThickness="1" CornerRadius="14" Padding="8" Opacity="0">
+      <Border Grid.Row="1" Background="{StaticResource AMRSoftGlassBrush}" BorderBrush="{StaticResource AMRSoftGlassEdgeBrush}" BorderThickness="1" CornerRadius="14" Padding="8" Opacity="0">
       <Border.RenderTransform><TranslateTransform Y="16"/></Border.RenderTransform>
       <Border.Triggers><EventTrigger RoutedEvent="FrameworkElement.Loaded"><BeginStoryboard><Storyboard>
        <DoubleAnimation Storyboard.TargetProperty="Opacity" From="0" To="1" Duration="0:0:0.936" BeginTime="0:0:0.10" DecelerationRatio="0.86"/>
@@ -6958,8 +7214,8 @@ Write-AMRLog ("Catalog item model: {0} ({1} items)." -f $(if ($script:AMRCatalog
          <Setter Property="Margin" Value="5,3,5,7"/>
          <Setter Property="Padding" Value="10,6"/>
          <Setter Property="Foreground" Value="#DCEBFA"/>
-         <Setter Property="Background" Value="#263B52"/>
-         <Setter Property="BorderBrush" Value="#526F91"/>
+         <Setter Property="Background" Value="{StaticResource AMRSoftGlassBrush}"/>
+         <Setter Property="BorderBrush" Value="{StaticResource AMRSoftGlassEdgeBrush}"/>
          <Setter Property="BorderThickness" Value="1"/>
          <Setter Property="FontSize" Value="11"/>
          <Setter Property="FontWeight" Value="SemiBold"/>
@@ -7001,87 +7257,87 @@ Write-AMRLog ("Catalog item model: {0} ({1} items)." -f $(if ($script:AMRCatalog
          </Style.Triggers>
         </Style>
        </TabControl.Resources>
-       <TabItem Background="#263B52" Foreground="#DCEBFA" BorderBrush="#526F91" BorderThickness="1" Padding="10,6" Margin="5,3,5,7" Header="🌐 All Logs">
+       <TabItem Background="{StaticResource AMRSoftGlassBrush}" Foreground="#DCEBFA" BorderBrush="{StaticResource AMRSoftGlassEdgeBrush}" BorderThickness="1" Padding="10,6" Margin="5,3,5,7" Header="🌐 All Logs">
         <Grid Background="Transparent"><Grid.RenderTransform><TranslateTransform Y="7"/></Grid.RenderTransform>
         <Grid.Triggers><EventTrigger RoutedEvent="FrameworkElement.Loaded"><BeginStoryboard><Storyboard>
          <DoubleAnimation Storyboard.TargetProperty="Opacity" From="0" To="1" Duration="0:0:0.52" DecelerationRatio="0.84"/>
          <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.Y)" From="7" To="0" Duration="0:0:0.52" DecelerationRatio="0.84"/>
         </Storyboard></BeginStoryboard></EventTrigger></Grid.Triggers>
-         <TextBox Name="LogConsoleAll" IsReadOnly="True" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" Background="#B20B1727" BorderBrush="#3D5875" BorderThickness="1" Foreground="#10B981" FontFamily="Consolas" FontSize="13" Padding="15,44,15,15" AcceptsReturn="True"/>
+         <TextBox Name="LogConsoleAll" IsReadOnly="True" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" Background="{StaticResource AMRSoftGlassBrush}" BorderBrush="{StaticResource AMRSoftGlassEdgeBrush}" BorderThickness="1" Foreground="#10B981" FontFamily="Consolas" FontSize="13" Padding="15,44,15,15" AcceptsReturn="True"/>
          <Button Name="LogCopyAllBtn" Content="▢  Copy" Width="82" Height="28" HorizontalAlignment="Left" VerticalAlignment="Top" Margin="8,8,0,0" Padding="8,3" Background="#202B3A" Foreground="#DCE8F5" BorderBrush="#52657B" BorderThickness="1" Opacity="0.90" FontSize="10" FontWeight="SemiBold" Cursor="Hand"/>
         </Grid>
        </TabItem>
-       <TabItem Background="#263B52" Foreground="#DCEBFA" BorderBrush="#526F91" BorderThickness="1" Padding="10,6" Margin="5,3,5,7" Header="⚙️ System &amp; Utility">
+       <TabItem Background="{StaticResource AMRSoftGlassBrush}" Foreground="#DCEBFA" BorderBrush="{StaticResource AMRSoftGlassEdgeBrush}" BorderThickness="1" Padding="10,6" Margin="5,3,5,7" Header="⚙️ System &amp; Utility">
         <Grid Background="Transparent"><Grid.RenderTransform><TranslateTransform Y="7"/></Grid.RenderTransform>
         <Grid.Triggers><EventTrigger RoutedEvent="FrameworkElement.Loaded"><BeginStoryboard><Storyboard>
          <DoubleAnimation Storyboard.TargetProperty="Opacity" From="0" To="1" Duration="0:0:0.52" DecelerationRatio="0.84"/>
          <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.Y)" From="7" To="0" Duration="0:0:0.52" DecelerationRatio="0.84"/>
         </Storyboard></BeginStoryboard></EventTrigger></Grid.Triggers>
-         <TextBox Name="LogConsoleSystem" IsReadOnly="True" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" Background="#B20B1727" BorderBrush="#3D5875" BorderThickness="1" Foreground="#3B82F6" FontFamily="Consolas" FontSize="13" Padding="15,44,15,15" AcceptsReturn="True"/>
+         <TextBox Name="LogConsoleSystem" IsReadOnly="True" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" Background="{StaticResource AMRSoftGlassBrush}" BorderBrush="{StaticResource AMRSoftGlassEdgeBrush}" BorderThickness="1" Foreground="#3B82F6" FontFamily="Consolas" FontSize="13" Padding="15,44,15,15" AcceptsReturn="True"/>
          <Button Name="LogCopySystemBtn" Content="▢  Copy" Width="82" Height="28" HorizontalAlignment="Left" VerticalAlignment="Top" Margin="8,8,0,0" Padding="8,3" Background="#202B3A" Foreground="#DCE8F5" BorderBrush="#52657B" BorderThickness="1" Opacity="0.90" FontSize="10" FontWeight="SemiBold" Cursor="Hand"/>
         </Grid>
        </TabItem>
-       <TabItem Background="#263B52" Foreground="#DCEBFA" BorderBrush="#526F91" BorderThickness="1" Padding="10,6" Margin="5,3,5,7" Header="🧰 Tools">
+       <TabItem Background="{StaticResource AMRSoftGlassBrush}" Foreground="#DCEBFA" BorderBrush="{StaticResource AMRSoftGlassEdgeBrush}" BorderThickness="1" Padding="10,6" Margin="5,3,5,7" Header="🧰 Tools">
         <Grid Background="Transparent"><Grid.RenderTransform><TranslateTransform Y="7"/></Grid.RenderTransform>
         <Grid.Triggers><EventTrigger RoutedEvent="FrameworkElement.Loaded"><BeginStoryboard><Storyboard>
          <DoubleAnimation Storyboard.TargetProperty="Opacity" From="0" To="1" Duration="0:0:0.52" DecelerationRatio="0.84"/>
          <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.Y)" From="7" To="0" Duration="0:0:0.52" DecelerationRatio="0.84"/>
         </Storyboard></BeginStoryboard></EventTrigger></Grid.Triggers>
-         <TextBox Name="LogConsoleTools" IsReadOnly="True" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" Background="#B20B1727" BorderBrush="#3D5875" BorderThickness="1" Foreground="#7DD3FC" FontFamily="Consolas" FontSize="13" Padding="15,44,15,15" AcceptsReturn="True"/>
+         <TextBox Name="LogConsoleTools" IsReadOnly="True" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" Background="{StaticResource AMRSoftGlassBrush}" BorderBrush="{StaticResource AMRSoftGlassEdgeBrush}" BorderThickness="1" Foreground="#7DD3FC" FontFamily="Consolas" FontSize="13" Padding="15,44,15,15" AcceptsReturn="True"/>
          <Button Name="LogCopyToolsBtn" Content="▢  Copy" Width="82" Height="28" HorizontalAlignment="Left" VerticalAlignment="Top" Margin="8,8,0,0" Padding="8,3" Background="#202B3A" Foreground="#DCE8F5" BorderBrush="#52657B" BorderThickness="1" Opacity="0.90" FontSize="10" FontWeight="SemiBold" Cursor="Hand"/>
         </Grid>
        </TabItem>
-       <TabItem Background="#263B52" Foreground="#DCEBFA" BorderBrush="#526F91" BorderThickness="1" Padding="10,6" Margin="5,3,5,7" Header="📊 Overview">
+       <TabItem Background="{StaticResource AMRSoftGlassBrush}" Foreground="#DCEBFA" BorderBrush="{StaticResource AMRSoftGlassEdgeBrush}" BorderThickness="1" Padding="10,6" Margin="5,3,5,7" Header="📊 Overview">
         <Grid Background="Transparent"><Grid.RenderTransform><TranslateTransform Y="7"/></Grid.RenderTransform>
         <Grid.Triggers><EventTrigger RoutedEvent="FrameworkElement.Loaded"><BeginStoryboard><Storyboard>
          <DoubleAnimation Storyboard.TargetProperty="Opacity" From="0" To="1" Duration="0:0:0.52" DecelerationRatio="0.84"/>
          <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.Y)" From="7" To="0" Duration="0:0:0.52" DecelerationRatio="0.84"/>
         </Storyboard></BeginStoryboard></EventTrigger></Grid.Triggers>
-         <TextBox Name="LogConsoleOverview" IsReadOnly="True" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" Background="#B20B1727" BorderBrush="#3D5875" BorderThickness="1" Foreground="#F59E0B" FontFamily="Consolas" FontSize="13" Padding="15,44,15,15" AcceptsReturn="True"/>
+         <TextBox Name="LogConsoleOverview" IsReadOnly="True" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" Background="{StaticResource AMRSoftGlassBrush}" BorderBrush="{StaticResource AMRSoftGlassEdgeBrush}" BorderThickness="1" Foreground="#F59E0B" FontFamily="Consolas" FontSize="13" Padding="15,44,15,15" AcceptsReturn="True"/>
          <Button Name="LogCopyOverviewBtn" Content="▢  Copy" Width="82" Height="28" HorizontalAlignment="Left" VerticalAlignment="Top" Margin="8,8,0,0" Padding="8,3" Background="#202B3A" Foreground="#DCE8F5" BorderBrush="#52657B" BorderThickness="1" Opacity="0.90" FontSize="10" FontWeight="SemiBold" Cursor="Hand"/>
         </Grid>
        </TabItem>
-       <TabItem Background="#263B52" Foreground="#DCEBFA" BorderBrush="#526F91" BorderThickness="1" Padding="10,6" Margin="5,3,5,7" Header="📦 Software Engine">
+       <TabItem Background="{StaticResource AMRSoftGlassBrush}" Foreground="#DCEBFA" BorderBrush="{StaticResource AMRSoftGlassEdgeBrush}" BorderThickness="1" Padding="10,6" Margin="5,3,5,7" Header="📦 Software Engine">
         <Grid Background="Transparent"><Grid.RenderTransform><TranslateTransform Y="7"/></Grid.RenderTransform>
         <Grid.Triggers><EventTrigger RoutedEvent="FrameworkElement.Loaded"><BeginStoryboard><Storyboard>
          <DoubleAnimation Storyboard.TargetProperty="Opacity" From="0" To="1" Duration="0:0:0.52" DecelerationRatio="0.84"/>
          <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.Y)" From="7" To="0" Duration="0:0:0.52" DecelerationRatio="0.84"/>
         </Storyboard></BeginStoryboard></EventTrigger></Grid.Triggers>
-         <TextBox Name="LogConsoleSoftware" IsReadOnly="True" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" Background="#B20B1727" BorderBrush="#3D5875" BorderThickness="1" Foreground="#EC4899" FontFamily="Consolas" FontSize="13" Padding="15,44,15,15" AcceptsReturn="True"/>
+         <TextBox Name="LogConsoleSoftware" IsReadOnly="True" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" Background="{StaticResource AMRSoftGlassBrush}" BorderBrush="{StaticResource AMRSoftGlassEdgeBrush}" BorderThickness="1" Foreground="#EC4899" FontFamily="Consolas" FontSize="13" Padding="15,44,15,15" AcceptsReturn="True"/>
          <Button Name="LogCopySoftwareBtn" Content="▢  Copy" Width="82" Height="28" HorizontalAlignment="Left" VerticalAlignment="Top" Margin="8,8,0,0" Padding="8,3" Background="#202B3A" Foreground="#DCE8F5" BorderBrush="#52657B" BorderThickness="1" Opacity="0.90" FontSize="10" FontWeight="SemiBold" Cursor="Hand"/>
         </Grid>
        </TabItem>
-       <TabItem Background="#263B52" Foreground="#DCEBFA" BorderBrush="#526F91" BorderThickness="1" Padding="10,6" Margin="5,3,5,7" Header="⚡ Customize Engine">
+       <TabItem Background="{StaticResource AMRSoftGlassBrush}" Foreground="#DCEBFA" BorderBrush="{StaticResource AMRSoftGlassEdgeBrush}" BorderThickness="1" Padding="10,6" Margin="5,3,5,7" Header="⚡ Customize Engine">
         <Grid Background="Transparent"><Grid.RenderTransform><TranslateTransform Y="7"/></Grid.RenderTransform>
         <Grid.Triggers><EventTrigger RoutedEvent="FrameworkElement.Loaded"><BeginStoryboard><Storyboard>
          <DoubleAnimation Storyboard.TargetProperty="Opacity" From="0" To="1" Duration="0:0:0.52" DecelerationRatio="0.84"/>
          <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.Y)" From="7" To="0" Duration="0:0:0.52" DecelerationRatio="0.84"/>
         </Storyboard></BeginStoryboard></EventTrigger></Grid.Triggers>
-         <TextBox Name="LogConsoleCustomize" IsReadOnly="True" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" Background="#B20B1727" BorderBrush="#3D5875" BorderThickness="1" Foreground="#8B5CF6" FontFamily="Consolas" FontSize="13" Padding="15,44,15,15" AcceptsReturn="True"/>
+         <TextBox Name="LogConsoleCustomize" IsReadOnly="True" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" Background="{StaticResource AMRSoftGlassBrush}" BorderBrush="{StaticResource AMRSoftGlassEdgeBrush}" BorderThickness="1" Foreground="#8B5CF6" FontFamily="Consolas" FontSize="13" Padding="15,44,15,15" AcceptsReturn="True"/>
          <Button Name="LogCopyCustomizeBtn" Content="▢  Copy" Width="82" Height="28" HorizontalAlignment="Left" VerticalAlignment="Top" Margin="8,8,0,0" Padding="8,3" Background="#202B3A" Foreground="#DCE8F5" BorderBrush="#52657B" BorderThickness="1" Opacity="0.90" FontSize="10" FontWeight="SemiBold" Cursor="Hand"/>
         </Grid>
        </TabItem>
-       <TabItem Background="#263B52" Foreground="#DCEBFA" BorderBrush="#526F91" BorderThickness="1" Padding="10,6" Margin="5,3,5,7" Header="🧪 Tweaks Audit">
+       <TabItem Background="{StaticResource AMRSoftGlassBrush}" Foreground="#DCEBFA" BorderBrush="{StaticResource AMRSoftGlassEdgeBrush}" BorderThickness="1" Padding="10,6" Margin="5,3,5,7" Header="🧪 Tweaks Audit">
         <Grid Background="Transparent"><Grid.RenderTransform><TranslateTransform Y="7"/></Grid.RenderTransform>
         <Grid.Triggers><EventTrigger RoutedEvent="FrameworkElement.Loaded"><BeginStoryboard><Storyboard>
          <DoubleAnimation Storyboard.TargetProperty="Opacity" From="0" To="1" Duration="0:0:0.52" DecelerationRatio="0.84"/>
          <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.Y)" From="7" To="0" Duration="0:0:0.52" DecelerationRatio="0.84"/>
         </Storyboard></BeginStoryboard></EventTrigger></Grid.Triggers>
-         <TextBox Name="LogConsoleTweaks" IsReadOnly="True" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" Background="#B20B1727" BorderBrush="#3D5875" BorderThickness="1" Foreground="#34D399" FontFamily="Consolas" FontSize="13" Padding="15,44,15,15" AcceptsReturn="True"/>
+         <TextBox Name="LogConsoleTweaks" IsReadOnly="True" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" Background="{StaticResource AMRSoftGlassBrush}" BorderBrush="{StaticResource AMRSoftGlassEdgeBrush}" BorderThickness="1" Foreground="#34D399" FontFamily="Consolas" FontSize="13" Padding="15,44,15,15" AcceptsReturn="True"/>
          <Button Name="LogCopyTweaksBtn" Content="▢  Copy" Width="82" Height="28" HorizontalAlignment="Left" VerticalAlignment="Top" Margin="8,8,0,0" Padding="8,3" Background="#202B3A" Foreground="#DCE8F5" BorderBrush="#52657B" BorderThickness="1" Opacity="0.90" FontSize="10" FontWeight="SemiBold" Cursor="Hand"/>
         </Grid>
        </TabItem>
-       <TabItem Background="#263B52" Foreground="#DCEBFA" BorderBrush="#526F91" BorderThickness="1" Padding="10,6" Margin="5,3,5,7" Header="🧹 Cleanup Logs">
+       <TabItem Background="{StaticResource AMRSoftGlassBrush}" Foreground="#DCEBFA" BorderBrush="{StaticResource AMRSoftGlassEdgeBrush}" BorderThickness="1" Padding="10,6" Margin="5,3,5,7" Header="🧹 Cleanup Logs">
         <Grid Background="Transparent"><Grid.RenderTransform><TranslateTransform Y="7"/></Grid.RenderTransform>
         <Grid.Triggers><EventTrigger RoutedEvent="FrameworkElement.Loaded"><BeginStoryboard><Storyboard>
          <DoubleAnimation Storyboard.TargetProperty="Opacity" From="0" To="1" Duration="0:0:0.52" DecelerationRatio="0.84"/>
          <DoubleAnimation Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.Y)" From="7" To="0" Duration="0:0:0.52" DecelerationRatio="0.84"/>
         </Storyboard></BeginStoryboard></EventTrigger></Grid.Triggers>
-         <TextBox Name="LogConsoleCleanup" IsReadOnly="True" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" Background="#B20B1727" BorderBrush="#3D5875" BorderThickness="1" Foreground="#22D3EE" FontFamily="Consolas" FontSize="13" Padding="15,44,15,15" AcceptsReturn="True"/>
+         <TextBox Name="LogConsoleCleanup" IsReadOnly="True" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" Background="{StaticResource AMRSoftGlassBrush}" BorderBrush="{StaticResource AMRSoftGlassEdgeBrush}" BorderThickness="1" Foreground="#22D3EE" FontFamily="Consolas" FontSize="13" Padding="15,44,15,15" AcceptsReturn="True"/>
          <Button Name="LogCopyCleanupBtn" Content="▢  Copy" Width="82" Height="28" HorizontalAlignment="Left" VerticalAlignment="Top" Margin="8,8,0,0" Padding="8,3" Background="#202B3A" Foreground="#DCE8F5" BorderBrush="#52657B" BorderThickness="1" Opacity="0.90" FontSize="10" FontWeight="SemiBold" Cursor="Hand"/>
         </Grid>
        </TabItem>
-       <TabItem Background="#263B52" Foreground="#DCEBFA" BorderBrush="#526F91" BorderThickness="1" Padding="10,6" Margin="5,3,5,7" Header="🧩 Drivers">
+       <TabItem Background="{StaticResource AMRSoftGlassBrush}" Foreground="#DCEBFA" BorderBrush="{StaticResource AMRSoftGlassEdgeBrush}" BorderThickness="1" Padding="10,6" Margin="5,3,5,7" Header="🧩 Drivers">
         <Grid Background="Transparent" Margin="4"><Grid.RenderTransform><TranslateTransform Y="7"/></Grid.RenderTransform>
         <Grid.Triggers><EventTrigger RoutedEvent="FrameworkElement.Loaded"><BeginStoryboard><Storyboard>
          <DoubleAnimation Storyboard.TargetProperty="Opacity" From="0" To="1" Duration="0:0:0.52" DecelerationRatio="0.84"/>
@@ -7147,7 +7403,7 @@ Write-AMRLog ("Catalog item model: {0} ({1} items)." -f $(if ($script:AMRCatalog
           <Button Name="DriverLogCopyBtn" Content="Copy Visible" Padding="12,5" Margin="0,0,8,0"/>
           <Button Name="DriverLogExportBtn" Content="Export Drivers Log" Padding="12,5"/>
          </DockPanel>
-         <TextBox Grid.Row="1" Name="DriverLogConsole" IsReadOnly="True" TextWrapping="NoWrap" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" Background="#B20B1727" BorderBrush="#3D5875" BorderThickness="1" Foreground="#A7F3D0" FontFamily="Consolas" FontSize="12" Padding="12" AcceptsReturn="True"/>
+         <TextBox Grid.Row="1" Name="DriverLogConsole" IsReadOnly="True" TextWrapping="NoWrap" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto" Background="{StaticResource AMRSoftGlassBrush}" BorderBrush="{StaticResource AMRSoftGlassEdgeBrush}" BorderThickness="1" Foreground="#A7F3D0" FontFamily="Consolas" FontSize="12" Padding="12" AcceptsReturn="True"/>
         </Grid>
        </TabItem>
       </TabControl>
@@ -7158,7 +7414,7 @@ Write-AMRLog ("Catalog item model: {0} ({1} items)." -f $(if ($script:AMRCatalog
 <TabItem Header="About">
     <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Padding="22" Background="Transparent">
      <StackPanel HorizontalAlignment="Center" Width="800">
-      <Border CornerRadius="20" Padding="1" Margin="0,0,0,18" BorderThickness="1" BorderBrush="#997FB8E8" Background="#553B6388">
+      <Border CornerRadius="20" Padding="1" Margin="0,0,0,18" BorderThickness="1" BorderBrush="#807FB8E8" Background="#1A3B6388">
        <Border CornerRadius="19" Padding="30,28,30,26" Background="Transparent" BorderThickness="0" BorderBrush="Transparent">
         <Border.RenderTransform><TranslateTransform Y="14"/></Border.RenderTransform>
         <Border.Triggers>
@@ -7181,7 +7437,7 @@ Write-AMRLog ("Catalog item model: {0} ({1} items)." -f $(if ($script:AMRCatalog
 
       <Grid Margin="0,0,0,14">
        <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="14"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-       <Border Grid.Column="0" Background="#B21B2B40" BorderBrush="#456486" BorderThickness="1" CornerRadius="15" Padding="20" MinHeight="220">
+       <Border Grid.Column="0" Background="{StaticResource AMRSoftGlassBrush}" BorderBrush="{StaticResource AMRSoftGlassEdgeBrush}" BorderThickness="1" CornerRadius="15" Padding="20" MinHeight="220">
         <Border.RenderTransform><TranslateTransform Y="18"/></Border.RenderTransform>
         <Border.Triggers><EventTrigger RoutedEvent="FrameworkElement.Loaded"><BeginStoryboard><Storyboard>
          <DoubleAnimation Storyboard.TargetProperty="Opacity" From="0" To="1" Duration="0:0:0.7" BeginTime="0:0:0.12"/>
@@ -7195,7 +7451,7 @@ Write-AMRLog ("Catalog item model: {0} ({1} items)." -f $(if ($script:AMRCatalog
         </StackPanel>
        </Border>
 
-       <Border Grid.Column="2" Background="#B21B2B40" BorderBrush="#456486" BorderThickness="1" CornerRadius="15" Padding="20" MinHeight="220">
+       <Border Grid.Column="2" Background="{StaticResource AMRSoftGlassBrush}" BorderBrush="{StaticResource AMRSoftGlassEdgeBrush}" BorderThickness="1" CornerRadius="15" Padding="20" MinHeight="220">
         <Border.RenderTransform><TranslateTransform Y="18"/></Border.RenderTransform>
         <Border.Triggers><EventTrigger RoutedEvent="FrameworkElement.Loaded"><BeginStoryboard><Storyboard>
          <DoubleAnimation Storyboard.TargetProperty="Opacity" From="0" To="1" Duration="0:0:0.7" BeginTime="0:0:0.22"/>
@@ -7213,7 +7469,7 @@ Write-AMRLog ("Catalog item model: {0} ({1} items)." -f $(if ($script:AMRCatalog
        </Border>
       </Grid>
 
-      <Border Background="#8F142338" BorderBrush="#34516F" BorderThickness="1" CornerRadius="13" Padding="15,12" Margin="0,0,0,12">
+      <Border Background="{StaticResource AMRSoftGlassBrush}" BorderBrush="{StaticResource AMRSoftGlassEdgeBrush}" BorderThickness="1" CornerRadius="13" Padding="15,12" Margin="0,0,0,12">
        <Border.RenderTransform><TranslateTransform Y="12"/></Border.RenderTransform>
        <Border.Triggers><EventTrigger RoutedEvent="FrameworkElement.Loaded"><BeginStoryboard><Storyboard>
         <DoubleAnimation Storyboard.TargetProperty="Opacity" From="0" To="1" Duration="0:0:0.8" BeginTime="0:0:0.32"/>
@@ -7263,6 +7519,41 @@ $reader = New-Object System.Xml.XmlNodeReader $xaml
 $script:Window = [Windows.Markup.XamlReader]::Load($reader)
 try { $controlCenterTab = $script:Window.FindName('ToolKitControlTab'); if ($controlCenterTab) { $controlCenterTab.Header = ([string]$script:AMRControlTabName + '  ' + [string][char]0x25B8) } } catch {}
 $script:AMRStartupPhaseTimings['XamlLoadedMs'] = [int]$script:AMRStartupStopwatch.ElapsedMilliseconds
+
+# --- Software cards: freeze shared overlay brushes; tiny check-mark pop on user-initiated check (visual only, guarded) ---
+try {
+    foreach ($amrBrushKey in @('AMRSoftCardGlowBrush','AMRSoftCardHairBrush','AMRSoftTileBrush','AMRSoftTileEdgeBrush','AMRCopyBtnGlassBrush','AMRCopyBtnEdgeBrush')) {
+        $amrBrush = $script:Window.TryFindResource($amrBrushKey)
+        if ($amrBrush -and $amrBrush.CanFreeze -and -not $amrBrush.IsFrozen) { $amrBrush.Freeze() }
+    }
+} catch {}
+try {
+    $amrSoftwareScrollForPop = $script:Window.FindName('SoftwareScrollViewer')
+    if ($amrSoftwareScrollForPop) {
+        $amrSoftwareScrollForPop.AddHandler([System.Windows.Controls.Primitives.ToggleButton]::CheckedEvent, [System.Windows.RoutedEventHandler]{
+            param($amrSender, $amrArgs)
+            try {
+                $amrCheck = $amrArgs.OriginalSource
+                if ($amrCheck -is [System.Windows.Controls.CheckBox] -and ($amrCheck.IsMouseOver -or $amrCheck.IsKeyboardFocusWithin)) {
+                    $amrTick = $amrCheck.Template.FindName('SelectionTick', $amrCheck)
+                    if ($amrTick) {
+                        $amrScale = $amrTick.RenderTransform
+                        if (-not ($amrScale -is [System.Windows.Media.ScaleTransform]) -or $amrScale.IsFrozen) {
+                            $amrScale = New-Object System.Windows.Media.ScaleTransform(1.0, 1.0)
+                            $amrTick.RenderTransform = $amrScale
+                        }
+                        $amrPop = New-Object System.Windows.Media.Animation.DoubleAnimation(0.55, 1.0, [TimeSpan]::FromMilliseconds(140))
+                        $amrEase = New-Object System.Windows.Media.Animation.CubicEase
+                        $amrEase.EasingMode = [System.Windows.Media.Animation.EasingMode]::EaseOut
+                        $amrPop.EasingFunction = $amrEase
+                        $amrScale.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleXProperty, $amrPop)
+                        $amrScale.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleYProperty, $amrPop)
+                    }
+                }
+            } catch {}
+        })
+    }
+} catch {}
 
 # --- AMR application identity: custom icon + restrained Windows glass caption ---
 # The icon is embedded so the online launcher remains a single-script download.
@@ -8936,7 +9227,8 @@ function Set-AMRTweaksPointerMotion {
             $hdrSettle.EasingFunction.EasingMode = [System.Windows.Media.Animation.EasingMode]::EaseOut
             $headerMove.BeginAnimation([System.Windows.Media.TranslateTransform]::YProperty,$hdrSettle)
             $hdrGlowDown = New-Object System.Windows.Media.Animation.DoubleAnimation(0.0,[System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(200)))
-            $hdrGlowDown.Add_Completed({ if (-not $headerBox.IsMouseOver) { $headerBox.Effect = $null } }.GetNewClosure())
+            $hdrBoxLocal = $headerBox  # the nested closure cannot see the outer closure's variables, so pass a local copy
+            $hdrGlowDown.Add_Completed({ if (-not $hdrBoxLocal.IsMouseOver) { $hdrBoxLocal.Effect = $null } }.GetNewClosure())
             $headerGlow.BeginAnimation([System.Windows.Media.Effects.DropShadowEffect]::OpacityProperty,$hdrGlowDown)
             if ($headerBrush -and $headerBaseColor) {
                 $hdrEdgeDown = New-Object System.Windows.Media.Animation.ColorAnimation($headerBaseColor,[System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(180)))
@@ -10625,6 +10917,37 @@ function Get-AMRToolKitEffectiveSub {
     if (-not $kit -or -not $kit.SelectedItem) { return 'Tweaks' }
     return [string]$kit.SelectedItem.Header
 }
+# Logs page search. The shared top search box filters the in-app log consoles (All Logs, System, Tools, Overview, Software, Customize, Tweaks, Cleanup).
+# The Drivers sub-tab keeps its own search box and severity filter. The disk log is never filtered.
+function Get-AMRLogSubTabs {
+    if ($script:LogSubTabsCtl) { return $script:LogSubTabsCtl }
+    try {
+        $node = C 'LogConsoleAll'
+        for ($hop = 0; $hop -lt 12 -and $node; $hop++) {
+            $node = [System.Windows.LogicalTreeHelper]::GetParent($node)
+            if ($node -is [System.Windows.Controls.TabControl]) {
+                $hasDrivers = $false
+                foreach ($tabItem in $node.Items) { if ([string]$tabItem.Header -match 'Drivers') { $hasDrivers = $true } }
+                if ($hasDrivers) { $script:LogSubTabsCtl = $node; return $node }
+                return $null
+            }
+        }
+    } catch {}
+    return $null
+}
+function Test-AMRLogDriversSubTab {
+    $subTabs = Get-AMRLogSubTabs
+    if (-not $subTabs -or -not $subTabs.SelectedItem) { return $true }
+    return ([string]$subTabs.SelectedItem.Header -match 'Drivers')
+}
+function Set-AMRLogSearchFilter {
+    param([string]$Query)
+    $text = if ($null -eq $Query) { '' } else { $Query.Trim() }
+    if ($text -ceq [string]$script:LogUISearch) { return }
+    $script:LogUISearch = $text
+    foreach ($dirtyKey in @('All','System','Overview','Software','Customize','Tweaks','Cleanup','Tools')) { $script:LogUIDirty[$dirtyKey] = $true }
+    try { Invoke-AMRLogUIPumpTick } catch {}
+}
 function Get-AMRSmartSearchTarget {
     $main = C 'MainNavigationTabs'
     if (-not $main -or -not $main.SelectedItem) { return $null }
@@ -10635,7 +10958,7 @@ function Get-AMRSmartSearchTarget {
         if ($overview -and $overview.SelectedItem -and [string]$overview.SelectedItem.Header -eq 'Backups') { return '__ContentFilter' }
     }
     if ($page -eq 'Software') { return 'SearchBox' }
-    if ($page -eq 'Logs') { return 'DriverLogSearchBox' }
+    if ($page -eq 'Logs') { if (Test-AMRLogDriversSubTab) { return 'DriverLogSearchBox' } else { return '__LogFilter' } }
     if ($page -eq 'System' -or $page -eq 'Overview' -or $page -eq 'About' -or $page -eq 'Activation') { return '__ContentFilter' }
     if ($page -eq 'Backups' -or ($page -eq 'System' -and (C 'OverviewSubTabs') -and (C 'OverviewSubTabs').SelectedItem -and [string](C 'OverviewSubTabs').SelectedItem.Header -eq 'Backups')) {
         $backup = C 'BackupSubTabs'
@@ -10762,6 +11085,7 @@ function Update-AMRSmartSearchContextCore {
         '^Overview' { $placeholder = 'Search within this overview...'; break }
         '^About$' { $placeholder = 'Search about this application...'; break }
     }
+    if ($targetName -eq '__LogFilter') { $placeholder = 'Filter log lines by text, area or level...' }
     $script:SmartSearchBox.Tag = $placeholder
     $script:SmartSearchBox.ToolTip = 'Smart Search — ' + $page + ' | ' + $placeholder
 
@@ -10805,6 +11129,12 @@ function Update-AMRSmartSearchContextCore {
             }
         } finally { $script:SmartCategoryRouting = $false }
     }
+    if ($targetName -eq '__LogFilter') {
+        Set-AMRLogSearchFilter -Query ([string]$script:SmartSearchBox.Text)
+        $script:SmartSearchBox.IsEnabled = $true
+        return
+    }
+    if ([string]$script:LogUISearch -ne '') { Set-AMRLogSearchFilter -Query '' }
     if ($targetName -eq '__DriverSearch') {
         Update-AMRDriverSearchView -Query ([string]$script:SmartSearchBox.Text)
         $script:SmartSearchBox.IsEnabled = $true
@@ -10878,6 +11208,10 @@ try {
                     }
                 }
                 $targetName = Get-AMRSmartSearchTarget
+                if ($targetName -eq '__LogFilter') {
+                    Set-AMRLogSearchFilter -Query $searchText
+                    return
+                }
                 if ($targetName -eq '__DriverSearch') {
                     Update-AMRDriverSearchView -Query ([string]$script:SmartSearchBox.Text)
                     return
@@ -10902,6 +11236,16 @@ try {
             if ($_.OriginalSource -ne $this) { return }
             Update-AMRSmartSearchContext
         })
+        # Logs sub-tabs: re-route the shared search box when the sub-tab changes (Drivers keeps its own box; the others use the log filter).
+        try {
+            $logSubTabsCtl = Get-AMRLogSubTabs
+            if ($logSubTabsCtl) {
+                $logSubTabsCtl.Add_SelectionChanged({
+                    if ($_.OriginalSource -ne $this) { return }
+                    Update-AMRSmartSearchContext
+                })
+            }
+        } catch { try { Write-AMRLog ('Could not attach the Logs sub-tab search routing: ' + $_.Exception.Message) WARNING System } catch {} }
     }
     function Invoke-AMRNavigationTilePressAnimation {
         param([object]$Element)
@@ -14252,20 +14596,27 @@ $AE = [System.Windows.Automation.AutomationElement]
 $CT = [System.Windows.Automation.ControlType]
 $TS = [System.Windows.Automation.TreeScope]
 $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSec)
-$seenWindow = $false; $radioDone = $false; $nextDone = $false; $radioAt = [DateTime]::UtcNow; $nextAt = [DateTime]::UtcNow; $moreDone = $false; $zeroScans = 0
+$seenWindow = $false; $radioDone = $false; $nextDone = $false; $radioAt = [DateTime]::UtcNow; $nextAt = [DateTime]::UtcNow; $moreDone = $false; $zeroScans = 0; $introDone = $false; $introAttempts = 0; $introPolls = 0; $introAt = [DateTime]::UtcNow
 while ([DateTime]::UtcNow -lt $deadline -and -not $State.Cancel) {
     try {
+        # Several top-level windows can belong to rstrui.exe (a hidden or empty one may come first): use the one that has the most controls.
         $win = $null
+        $winBest = -1
         foreach ($proc in @(Get-Process -Name rstrui -ErrorAction SilentlyContinue)) {
             $cond = New-Object System.Windows.Automation.PropertyCondition($AE::ProcessIdProperty,[int]$proc.Id)
-            $win = $AE::RootElement.FindFirst($TS::Children,$cond)
-            if ($win) { break }
+            foreach ($cand in $AE::RootElement.FindAll($TS::Children,$cond)) {
+                $candCount = 0
+                try { $candCount = $cand.FindAll($TS::Descendants,[System.Windows.Automation.Condition]::TrueCondition).Count } catch {}
+                if ($candCount -gt $winBest) { $win = $cand; $winBest = $candCount }
+            }
         }
         if (-not $win) { if ($seenWindow) { break } else { Start-Sleep -Milliseconds 400; continue } }
         $seenWindow = $true
         $listCond = New-Object System.Windows.Automation.PropertyCondition($AE::ControlTypeProperty,$CT::ListItem)
         $items = $win.FindAll($TS::Descendants,$listCond)
         if ($items.Count -gt 0) {
+            # No AMR point name (none was created): Windows is now on its list page; nothing is marked and nothing more is pressed.
+            if ([string]::IsNullOrWhiteSpace($Description)) { $State.Stage = 'list-no-point'; break }
             $rowMatches = New-Object System.Collections.ArrayList
             foreach ($item in $items) {
                 $texts = New-Object System.Collections.ArrayList
@@ -14311,6 +14662,48 @@ while ([DateTime]::UtcNow -lt $deadline -and -not $State.Cancel) {
                     $State.Stage = 'radio-selected'
                     $radioAt = [DateTime]::UtcNow
                 } else { $State.Detail = 'second radio option has no selection pattern' }
+            } elseif ($radios.Count -eq 0) {
+                # Intro page of the wizard (no radio options, Next and Cancel only; shown when Windows has no recommended point). Press Next once.
+                # Only a button that is really named Next (or has the wizard Next id) is pressed, and never while a Finish button is enabled
+                # (that is the confirmation page). No default-button guess and no Enter key here.
+                $introPolls++
+                # Try on polls 3, 5, 7 ... up to 6 times (about 6 s), so a slow-loading page is still found. Every try logs what the window contains.
+                if (-not $introDone -and $introPolls -ge 3 -and (($introPolls - 3) % 2) -eq 0) {
+                    $introAttempts++
+                    $pickI = New-Object System.Collections.ArrayList
+                    $dumpI = New-Object System.Collections.ArrayList
+                    $finishSeen = $false
+                    $elCount = 0
+                    foreach ($elI in $win.FindAll($TS::Descendants,[System.Windows.Automation.Condition]::TrueCondition)) {
+                        try {
+                            $curI = $elI.Current
+                            $elCount++
+                            $typeI = ([string]$curI.ControlType.ProgrammaticName) -replace '^ControlType\.',''
+                            $nameI = [string]$curI.Name
+                            $idI = [string]$curI.AutomationId
+                            $enI = [bool]$curI.IsEnabled
+                            if ($dumpI.Count -lt 60) { [void]$dumpI.Add(('{0}|{1}|id={2}|cls={3}|en={4}' -f $typeI,$nameI.Substring(0,[Math]::Min(40,$nameI.Length)),$idI,[string]$curI.ClassName,$enI)) }
+                            if ($enI) {
+                                if ($nameI -match '(?i)^\s*&?finish') { $finishSeen = $true }
+                                if ($nameI -match '(?i)^\s*&?next\b' -or ($typeI -eq 'Button' -and $idI -eq '12324')) { [void]$pickI.Add($elI) }
+                            }
+                        } catch {}
+                    }
+                    $winI = ''
+                    try { $winI = ('window name="{0}" class={1} pid={2} rect={3}' -f [string]$win.Current.Name,[string]$win.Current.ClassName,[int]$win.Current.ProcessId,[string]$win.Current.BoundingRectangle) } catch {}
+                    $State.Detail = ('intro page try {0}; {1}; controls={2}; Next candidates={3}; Finish enabled={4}; all: {5}' -f $introAttempts,$winI,$elCount,$pickI.Count,$finishSeen,($dumpI -join ' ; '))
+                    $pressedI = $false
+                    if (-not $finishSeen -and $pickI.Count -eq 1) {
+                        $invokeI = $null
+                        if ($pickI[0].TryGetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern,[ref]$invokeI)) {
+                            try { $invokeI.Invoke(); $pressedI = $true } catch {}
+                        }
+                    }
+                    if ($pressedI) { $introDone = $true; $State.Method = 'intro-next'; $State.Stage = 'next-pressed'; $nextAt = [DateTime]::UtcNow }
+                    elseif ($introAttempts -ge 6) { $introDone = $true; $State.Stage = 'next-manual' }
+                } elseif ($introDone -and $State.Stage -eq 'next-pressed' -and ([DateTime]::UtcNow - $nextAt).TotalSeconds -ge 8) {
+                    $State.Stage = 'next-manual'
+                }
             } elseif ($radios.Count -gt 0) { $State.Detail = 'page 1 shows ' + $radios.Count + ' radio option(s), expected 2' }
         } elseif (-not $nextDone -and ([DateTime]::UtcNow - $radioAt).TotalMilliseconds -ge 700) {
             # Page 1 only (two radio options, no list yet, second option selected): press the wizard's default button, which is Next here.
@@ -14392,7 +14785,7 @@ if ($State.Stage -eq 'radio-selected' -or $State.Stage -eq 'next-pressed' -or $S
 
 function Start-AMRRestoreWindowAssist {
     param([string]$Description)
-    if ([string]::IsNullOrWhiteSpace($Description)) { return }
+    if ($null -eq $Description) { $Description = '' }
     if ($script:AMRRestoreAssist -and $script:AMRRestoreAssist.State) { try { $script:AMRRestoreAssist.State.Cancel = $true } catch {} }
     $assistState = [hashtable]::Synchronized(@{ Stage = ''; Cancel = $false; Closed = $false; Detail = ''; Method = '' })
     $assistShell = [powershell]::Create()
@@ -14401,6 +14794,7 @@ function Start-AMRRestoreWindowAssist {
     # Closures made inside a function read $script: variables as empty, so keep the window and the log state in locals.
     $assistWindow = $script:AMRRecoveryPointWindow
     $assistLog = @{ Last = ''; Detail = '' }
+    $assistHasPoint = (-not [string]::IsNullOrWhiteSpace($Description))
     try {
         $assistAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
         Write-AMRLog ('Recovery helper started (AMR elevated={0}).' -f $assistAdmin) INFO Backup
@@ -14423,7 +14817,8 @@ function Start-AMRRestoreWindowAssist {
             if ($note) {
                 switch -Wildcard ($stage) {
                     'radio-selected' { $note.Text = 'Windows is open. The second option is selected for you.'; $note.Visibility = 'Visible' }
-                    'next-pressed'   { $note.Text = 'Windows is moving to the list. Your restore point will be selected for you.'; $note.Visibility = 'Visible' }
+                    'next-pressed'   { if ($assistHasPoint) { $note.Text = 'Windows is moving to the list. Your restore point will be selected for you.' } else { $note.Text = 'Windows is moving to the list. No AMR restore point exists yet, so choose one yourself.' }; $note.Visibility = 'Visible' }
+                    'list-no-point'  { $note.Text = 'No AMR restore point exists yet, so nothing is marked. Choose a point in the Windows list.'; $note.Visibility = 'Visible' }
                     'next-manual'    { $note.Text = 'The second option is selected for you. Click Next and your point will be selected in the list.'; $note.Visibility = 'Visible' }
                     'row-selected'   { $note.Text = 'Your restore point is selected in the Windows list. Check that the name and time match, then continue in Windows.'; $note.Visibility = 'Visible' }
                     'row-not-found'  { $note.Text = 'Could not mark the point automatically. Choose the one that matches the name and time shown above.'; $note.Visibility = 'Visible' }
@@ -14599,7 +14994,8 @@ function Show-AMRRecoveryPointWindow {
             # Never sit on top of the Windows window: drop Topmost once it is launched.
             try { $win.Topmost = $false } catch {}
             Write-AMRLog 'Opened Windows System Restore from the Recovery Center.' INFO Overview
-            if (-not [string]::IsNullOrWhiteSpace([string]$win.Tag)) { Start-AMRRestoreWindowAssist -Description ([string]$win.Tag) }
+            # The helper always starts: with an AMR point it marks that point; without one it only presses Next on the first page.
+            Start-AMRRestoreWindowAssist -Description ([string]$win.Tag)
         } catch {
             $note.Text = 'Windows System Restore could not be opened: ' + $_.Exception.Message
             $note.Visibility = 'Visible'
@@ -22781,6 +23177,7 @@ $script:SoftwareCategories = @(
 )
 # Compact category navigation: keep category tiles plain and small.
 $categoryTextFactory = New-Object System.Windows.FrameworkElementFactory([System.Windows.Controls.TextBlock])
+$categoryTextFactory.Name = 'AMRCategoryLabel'
 $categoryTextFactory.SetBinding([System.Windows.Controls.TextBlock]::TextProperty, [System.Windows.Data.Binding]::new('DisplayText'))
 $categoryTextFactory.SetValue([System.Windows.Controls.TextBlock]::TextWrappingProperty, [System.Windows.TextWrapping]::NoWrap)
 $categoryTextFactory.SetValue([System.Windows.Controls.TextBlock]::TextTrimmingProperty, [System.Windows.TextTrimming]::CharacterEllipsis)
@@ -26985,25 +27382,505 @@ $script:SoftwareSearchDebounceTimer.Add_Tick({
         $isExpanded = [bool]$toggle.IsChecked
         # Popup is hosted in its own WPF window, so it renders above every
         # neighboring item container without changing the card/grid layout.
-        $popup.IsOpen = $isExpanded
+        # SetCurrentValue keeps the XAML IsOpen binding alive (a plain assignment removed it, so recycled cards showed stale popups).
+        $popup.SetCurrentValue([System.Windows.Controls.Primitives.Popup]::IsOpenProperty, [bool]$isExpanded)
         # The popup body is a lazy Control template (built on first open): realize it now so the copy button exists.
         try { if ($isExpanded -and $popup.Child -is [System.Windows.FrameworkElement]) { [void]$popup.Child.ApplyTemplate() } } catch {}
         $copyButton = Find-AMRNamedVisualChild -Parent $popup.Child -Name 'InstalledCopyPathBtn'
         if ($null -ne $copyButton -and $copyButton.Uid -ne 'AMR_COPY_HANDLER_ATTACHED') {
             $copyButton.Uid = 'AMR_COPY_HANDLER_ATTACHED'
+            # Same hover lift, glow and press pop as the Activation copy button (reuses its motion helpers; Activation itself is not modified).
+            try { Set-AMRActivationCopyButtonMotion -Button $copyButton } catch {}
+            # Round 20: the glyph becomes a TextBlock with its own RotateTransform so it can spin on copy without touching the button's hover scale transform.
+            try {
+                $copyGlyph = New-Object System.Windows.Controls.TextBlock
+                $copyGlyph.Text = [string]$copyButton.Content
+                $copyGlyph.FontSize = [double]$copyButton.FontSize
+                $copyGlyph.FontWeight = $copyButton.FontWeight
+                $copyGlyph.Foreground = $copyButton.Foreground
+                $copyGlyph.HorizontalAlignment = [System.Windows.HorizontalAlignment]::Center
+                $copyGlyph.VerticalAlignment = [System.Windows.VerticalAlignment]::Center
+                $copyGlyph.RenderTransformOrigin = New-Object System.Windows.Point(0.5, 0.5)
+                $copyGlyph.RenderTransform = New-Object System.Windows.Media.RotateTransform(0.0)
+                $copyButton.Content = $copyGlyph
+            } catch {}
             $copyButton.AddHandler([System.Windows.Controls.Button]::ClickEvent, [System.Windows.RoutedEventHandler]{
                 param($copySender, $copyEvent)
                 $pathToCopy = [string]$copySender.Tag
                 if ([string]::IsNullOrWhiteSpace($pathToCopy) -or $pathToCopy -eq 'Not recorded by Windows') { return }
-                try { [System.Windows.Clipboard]::SetText($pathToCopy) } catch { Show-AMRMessageGlass ('Could not copy installation path: ' + [string]$_.Exception.Message) 'Copy Install Path' OK Warning | Out-Null }
+                try { [System.Windows.Clipboard]::SetText($pathToCopy); Invoke-AMRPopupCopyButtonFeedback -Button $copySender } catch { Show-AMRMessageGlass ('Could not copy installation path: ' + [string]$_.Exception.Message) 'Copy Install Path' OK Warning | Out-Null }
             }, $true)
         }
         $toggle.Content = if ($isExpanded) { '⌃' } else { '⌄' }
         $toggle.ToolTip = if ($isExpanded) { 'Hide installation details' } else { 'Show installation details' }
         $item = $toggle.DataContext
         if ($null -ne $item -and $item.PSObject.Properties['DetailsExpanded']) { $item.DetailsExpanded = $isExpanded }
+        # Only one details popup is open at a time; remember it so scroll/resize can close it.
+        if ($isExpanded) {
+            if ($null -ne $script:AMRDetailsOpenToggle -and -not [object]::ReferenceEquals($script:AMRDetailsOpenToggle,$toggle)) { Close-AMRInstalledDetails }
+            $script:AMRDetailsOpenToggle = $toggle
+            $script:AMRDetailsOpenPopup = $popup
+        } elseif ([object]::ReferenceEquals($script:AMRDetailsOpenToggle,$toggle)) {
+            $script:AMRDetailsOpenToggle = $null
+            $script:AMRDetailsOpenPopup = $null
+        }
+        Start-AMRDetailsArrowTurn -Toggle $toggle
     } catch { Write-AMRLog ("Could not toggle installed application details: $($_.Exception.Message)") WARNING Software }
 }, $true)
+
+# --- Show Installed details arrow: close-on-scroll popup handling, small arrow turn, hover marquee for long names ---
+$script:AMRDetailsOpenToggle = $null
+$script:AMRDetailsOpenPopup = $null
+$script:AMRMarqueeTb = $null
+$script:AMRMarqueeLastSrc = $null
+
+function Close-AMRInstalledDetails {
+    $closeToggle = $script:AMRDetailsOpenToggle
+    $script:AMRDetailsOpenToggle = $null
+    $script:AMRDetailsOpenPopup = $null
+    if ($null -eq $closeToggle) { return }
+    try {
+        if ($closeToggle.IsChecked) { $closeToggle.IsChecked = $false }
+        $closeToggle.Content = [string][char]0x2304
+        $closeToggle.ToolTip = 'Show installation details'
+        $closeItem = $closeToggle.DataContext
+        if ($null -ne $closeItem -and $closeItem.PSObject.Properties['DetailsExpanded']) { $closeItem.DetailsExpanded = $false }
+    } catch {}
+}
+
+function Start-AMRDetailsArrowTurn {
+    param($Toggle)
+    # One short turn of the arrow glyph (about 160 ms). The new glyph is already set, so it turns from the old direction.
+    try {
+        $glyph = $Toggle.Template.FindName('ArrowGlyph', $Toggle)
+        if ($null -eq $glyph) { return }
+        $turn = $glyph.RenderTransform
+        if (-not ($turn -is [System.Windows.Media.RotateTransform]) -or $turn.IsFrozen) {
+            $turn = New-Object System.Windows.Media.RotateTransform(0.0)
+            $glyph.RenderTransform = $turn
+        }
+        $turnAnim = New-Object System.Windows.Media.Animation.DoubleAnimation(180.0, 0.0, [TimeSpan]::FromMilliseconds(160))
+        $turnEase = New-Object System.Windows.Media.Animation.CubicEase
+        $turnEase.EasingMode = [System.Windows.Media.Animation.EasingMode]::EaseOut
+        $turnAnim.EasingFunction = $turnEase
+        $turn.BeginAnimation([System.Windows.Media.RotateTransform]::AngleProperty, $turnAnim)
+    } catch {}
+}
+
+function Find-AMRFirstTextBlock {
+    # Template elements built with FrameworkElementFactory keep an empty Name property, so the category label is found by type.
+    param([System.Windows.DependencyObject]$Parent)
+    if ($null -eq $Parent) { return $null }
+    try {
+        $count = [System.Windows.Media.VisualTreeHelper]::GetChildrenCount($Parent)
+        for ($i = 0; $i -lt $count; $i++) {
+            $child = [System.Windows.Media.VisualTreeHelper]::GetChild($Parent, $i)
+            if ($child -is [System.Windows.Controls.TextBlock]) { return $child }
+            $found = Find-AMRFirstTextBlock -Parent $child
+            if ($null -ne $found) { return $found }
+        }
+    } catch {}
+    return $null
+}
+
+function Invoke-AMRPopupCopyButtonFeedback {
+    # Popup copy button: r17 press pop + amber glow pulse (same values as the Activation copy button, but they settle on the hover values
+    # while the pointer is still over the button) plus a 360 degree glyph spin (620 ms, ease out) on the glyph's own RotateTransform.
+    # No button translate/tilt wobble: the button has only the hover ScaleTransform, so the three motions never share a transform.
+    param([System.Windows.Controls.Button]$Button)
+    if (-not $Button) { return }
+    $hovered = [bool]$Button.IsMouseOver
+    if ($Button.RenderTransform -is [System.Windows.Media.ScaleTransform] -and -not $Button.RenderTransform.IsFrozen) {
+        $popScale = $Button.RenderTransform
+        $popEnd = 1.0; if ($hovered) { $popEnd = 1.055 }
+        $press = [System.Windows.Media.Animation.DoubleAnimation]::new(0.93, $popEnd, [System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(175)))
+        $press.EasingFunction = [System.Windows.Media.Animation.QuadraticEase]::new()
+        $press.EasingFunction.EasingMode = [System.Windows.Media.Animation.EasingMode]::EaseOut
+        $popScale.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleXProperty, $press)
+        $popScale.BeginAnimation([System.Windows.Media.ScaleTransform]::ScaleYProperty, $press)
+    }
+    $popEffect = $Button.Effect
+    if ($popEffect -is [System.Windows.Media.Effects.DropShadowEffect] -and -not $popEffect.IsFrozen) {
+        $glowEnd = 0.12; if ($hovered) { $glowEnd = 0.62 }
+        $pulse = [System.Windows.Media.Animation.DoubleAnimation]::new(0.9, $glowEnd, [System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(210)))
+        $popEffect.BeginAnimation([System.Windows.Media.Effects.DropShadowEffect]::OpacityProperty, $pulse)
+    }
+    $popGlyph = $Button.Content
+    if ($popGlyph -is [System.Windows.Controls.TextBlock] -and $popGlyph.RenderTransform -is [System.Windows.Media.RotateTransform] -and -not $popGlyph.RenderTransform.IsFrozen) {
+        $spin = [System.Windows.Media.Animation.DoubleAnimation]::new(0.0, 360.0, [System.Windows.Duration]::new([TimeSpan]::FromMilliseconds(620)))
+        $spin.EasingFunction = [System.Windows.Media.Animation.CubicEase]::new()
+        $spin.EasingFunction.EasingMode = [System.Windows.Media.Animation.EasingMode]::EaseOut
+        $popGlyph.RenderTransform.BeginAnimation([System.Windows.Media.RotateTransform]::AngleProperty, $spin)
+    }
+}
+
+# --- Hidden "delete" command (About page): wipes C:\ProgramData\AMR-Utility only (nothing else), after a glass confirmation. ---
+function Remove-AMRWipeTree {
+    # Deletes everything inside $Directory. Links/junctions are removed as links and never followed, so nothing outside the tree can be touched.
+    param([System.IO.DirectoryInfo]$Directory,$State)
+    foreach ($entry in @($Directory.GetFileSystemInfos())) {
+        $isLink = (([int]$entry.Attributes -band [int][System.IO.FileAttributes]::ReparsePoint) -ne 0)
+        $isDir = ($entry -is [System.IO.DirectoryInfo])
+        try {
+            if ($isDir -and -not $isLink) {
+                $failedBefore = [int]$State.FailedCount
+                Remove-AMRWipeTree -Directory $entry -State $State
+                if ([int]$State.FailedCount -gt $failedBefore) { continue }
+                try { [System.IO.File]::SetAttributes($entry.FullName, [System.IO.FileAttributes]::Directory) } catch {}
+                $entry.Delete()
+            } elseif ($isDir) {
+                [System.IO.Directory]::Delete($entry.FullName)
+            } else {
+                try { [System.IO.File]::SetAttributes($entry.FullName, [System.IO.FileAttributes]::Normal) } catch {}
+                $entry.Delete()
+            }
+            $State.Deleted = [int]$State.Deleted + 1
+        } catch {
+            $State.FailedCount = [int]$State.FailedCount + 1
+            if ($State.Failed.Count -lt 40) { [void]$State.Failed.Add([string]$entry.FullName + '  (' + [string]$_.Exception.Message + ')') }
+        }
+    }
+}
+
+function Invoke-AMRWipeAppData {
+    param([string]$Root,[string]$ExpectedRoot)
+    $result = [pscustomobject]@{ Aborted = $false; Reason = ''; Deleted = 0; FailedCount = 0; Failed = (New-Object 'System.Collections.Generic.List[string]') }
+    try {
+        if ([string]::IsNullOrWhiteSpace($Root) -or [string]::IsNullOrWhiteSpace($ExpectedRoot)) { $result.Aborted = $true; $result.Reason = 'The data folder path is empty.'; return $result }
+        $full = [System.IO.Path]::GetFullPath($Root).TrimEnd([char]'\',[char]'/')
+        $expected = [System.IO.Path]::GetFullPath($ExpectedRoot).TrimEnd([char]'\',[char]'/')
+        if (-not [string]::Equals($full, $expected, [System.StringComparison]::OrdinalIgnoreCase)) { $result.Aborted = $true; $result.Reason = 'The target path does not match the expected data folder.'; return $result }
+        if ([System.IO.Path]::GetFileName($expected) -ne 'AMR-Utility') { $result.Aborted = $true; $result.Reason = 'The target folder name is not AMR-Utility.'; return $result }
+        $parent = [System.IO.Path]::GetDirectoryName($expected)
+        if ([string]::IsNullOrWhiteSpace($parent)) { $result.Aborted = $true; $result.Reason = 'The target has no parent folder.'; return $result }
+        if (-not [System.IO.Directory]::Exists($full)) { return $result }
+        $rootInfo = New-Object System.IO.DirectoryInfo($full)
+        if (([int]$rootInfo.Attributes -band [int][System.IO.FileAttributes]::ReparsePoint) -ne 0) { $result.Aborted = $true; $result.Reason = 'The data folder is a link; nothing was deleted.'; return $result }
+        Remove-AMRWipeTree -Directory $rootInfo -State $result
+    } catch {
+        $result.Aborted = $true; $result.Reason = [string]$_.Exception.Message
+    }
+    return $result
+}
+
+function Show-AMRWipeConfirmDialog {
+    # Glass confirmation in the About / S1 glass family. Enter confirms only as a fresh key press (not a repeat) at least 1 s after the dialog is shown;
+    # Esc or Cancel aborts. No button is focusable, so a stray Space cannot press one.
+    param([string]$TargetPath)
+    $state = @{ Accepted = $false; Watch = $null }
+    $window = New-Object System.Windows.Window
+    $window.WindowStyle = 'None'; $window.ResizeMode = 'NoResize'; $window.ShowInTaskbar = $false; $window.SizeToContent = 'Height'; $window.Width = 560
+    $window.WindowStartupLocation = 'CenterScreen'
+    try { if ($script:Window -and $script:Window.IsVisible) { $window.Owner = $script:Window; $window.WindowStartupLocation = 'CenterOwner' } } catch {}
+    $glassFill = $null; $glassEdge = $null
+    try { $glassFill = $script:Window.TryFindResource('AMRSoftGlassBrush'); $glassEdge = $script:Window.TryFindResource('AMRSoftGlassEdgeBrush') } catch {}
+    $transparentOk = $true
+    try { if (([int]([System.Windows.Media.RenderCapability]::Tier -shr 16)) -lt 2) { $transparentOk = $false } } catch {}
+    $root = New-Object System.Windows.Controls.Border
+    $root.CornerRadius = New-Object System.Windows.CornerRadius(14)
+    $root.BorderThickness = New-Object System.Windows.Thickness(1)
+    $root.Padding = New-Object System.Windows.Thickness(22,18,22,18)
+    if ($transparentOk) {
+        $window.AllowsTransparency = $true
+        $window.Background = [System.Windows.Media.Brushes]::Transparent
+        $root.Margin = New-Object System.Windows.Thickness(6)
+        if ($null -ne $glassFill) { $root.Background = $glassFill } else { $root.Background = New-AMRGlassBrush '#F0191C21' }
+    } else {
+        $window.Background = New-AMRGlassBrush '#FF191C21'
+        $root.Background = New-AMRGlassBrush '#FF1A1D22'
+    }
+    if ($null -ne $glassEdge) { $root.BorderBrush = $glassEdge } else { $root.BorderBrush = New-AMRGlassBrush '#33FFFFFF' }
+    $stack = New-Object System.Windows.Controls.StackPanel
+    $title = New-Object System.Windows.Controls.TextBlock
+    $title.Text = ([string][char]0x26A0) + '  Delete all AMR data'; $title.FontSize = 17; $title.FontWeight = 'SemiBold'; $title.Foreground = New-AMRGlassBrush '#F2CDD0'
+    $title.Margin = New-Object System.Windows.Thickness(0,0,0,10)
+    $ask = New-Object System.Windows.Controls.TextBlock
+    $ask.Text = 'Do you agree to delete all data?'; $ask.FontSize = 14; $ask.FontWeight = 'SemiBold'; $ask.Foreground = New-AMRGlassBrush '#E5F1FF'
+    $ask.Margin = New-Object System.Windows.Thickness(0,0,0,6)
+    $what = New-Object System.Windows.Controls.TextBlock
+    $what.Text = 'This permanently deletes everything inside this folder:'; $what.FontSize = 12; $what.Foreground = New-AMRGlassBrush '#B8CDE4'; $what.TextWrapping = 'Wrap'
+    $what.Margin = New-Object System.Windows.Thickness(0,0,0,8)
+    $pathBox = New-Object System.Windows.Controls.Border
+    $pathBox.Background = New-AMRGlassBrush '#33000000'; $pathBox.BorderBrush = New-AMRGlassBrush '#26FFFFFF'; $pathBox.BorderThickness = New-Object System.Windows.Thickness(1)
+    $pathBox.CornerRadius = New-Object System.Windows.CornerRadius(8); $pathBox.Padding = New-Object System.Windows.Thickness(10,8,10,8)
+    $pathText = New-Object System.Windows.Controls.TextBlock
+    $pathText.Text = $TargetPath; $pathText.FontFamily = New-Object System.Windows.Media.FontFamily('Consolas'); $pathText.FontSize = 12.5; $pathText.Foreground = New-AMRGlassBrush '#F4EAD5'; $pathText.TextWrapping = 'Wrap'
+    $pathBox.Child = $pathText
+    $detail = New-Object System.Windows.Controls.TextBlock
+    $detail.Text = 'All backups and restore data (driver and Windows Update backups, the Tweaks baseline, quarantined items), logs, exports, icons and downloaded installers are included. This cannot be undone.'
+    $detail.FontSize = 12; $detail.Foreground = New-AMRGlassBrush '#C7DDF4'; $detail.TextWrapping = 'Wrap'; $detail.LineHeight = 18
+    $detail.Margin = New-Object System.Windows.Thickness(0,10,0,10)
+    $hint = New-Object System.Windows.Controls.TextBlock
+    $hint.Text = 'Press Enter to delete   |   Esc to cancel'; $hint.FontSize = 11; $hint.Foreground = New-AMRGlassBrush '#8FA3B8'
+    $hint.VerticalAlignment = 'Center'
+    $buttonRow = New-Object System.Windows.Controls.DockPanel
+    $buttonRow.LastChildFill = $false
+    $buttonRow.Margin = New-Object System.Windows.Thickness(0,4,0,0)
+    $makeButton = {
+        param([string]$Text,[string]$Role)
+        $b = New-Object System.Windows.Controls.Button
+        $b.Content = $Text; $b.MinWidth = 120; $b.Height = 32; $b.Margin = New-Object System.Windows.Thickness(8,0,0,0)
+        $b.Foreground = New-AMRGlassBrush '#F4F7FA'; $b.Cursor = [System.Windows.Input.Cursors]::Hand
+        $b.Focusable = $false; $b.IsTabStop = $false; $b.IsDefault = $false; $b.IsCancel = $false
+        try { $b.Style = New-AMRGlassButtonStyle -Role $Role -Animated } catch { $b.Background = New-AMRGlassBrush '#FF303846'; $b.BorderBrush = New-AMRGlassBrush '#FF526176' }
+        return $b
+    }
+    $cancelButton = & $makeButton 'Cancel' 'Blue'
+    $deleteButton = & $makeButton 'Delete all data' 'Red'
+    [System.Windows.Controls.DockPanel]::SetDock($deleteButton, [System.Windows.Controls.Dock]::Right)
+    [System.Windows.Controls.DockPanel]::SetDock($cancelButton, [System.Windows.Controls.Dock]::Right)
+    [System.Windows.Controls.DockPanel]::SetDock($hint, [System.Windows.Controls.Dock]::Left)
+    [void]$buttonRow.Children.Add($hint); [void]$buttonRow.Children.Add($deleteButton); [void]$buttonRow.Children.Add($cancelButton)
+    foreach ($child in @($title,$ask,$what,$pathBox,$detail,$buttonRow)) { [void]$stack.Children.Add($child) }
+    $root.Child = $stack
+    $window.Content = $root
+    $window.Focusable = $true
+    $cancelButton.Add_Click({ param($s,$e) [System.Windows.Window]::GetWindow($s).Close() })
+    $deleteButton.Add_Click({
+        param($s,$e)
+        $w = $state['Watch']
+        if ($null -ne $w -and $w.ElapsedMilliseconds -ge 1000) { $state['Accepted'] = $true; [System.Windows.Window]::GetWindow($s).Close() }
+    }.GetNewClosure())
+    $window.Add_PreviewKeyDown({
+        param($s,$e)
+        if ($e.Key -eq [System.Windows.Input.Key]::Escape) { $e.Handled = $true; $s.Close(); return }
+        if ($e.Key -eq [System.Windows.Input.Key]::Enter -or $e.Key -eq [System.Windows.Input.Key]::Return) {
+            $e.Handled = $true
+            $w = $state['Watch']
+            if (-not $e.IsRepeat -and $null -ne $w -and $w.ElapsedMilliseconds -ge 1000) { $state['Accepted'] = $true; $s.Close() }
+            return
+        }
+        if ($e.Key -eq [System.Windows.Input.Key]::Space) { $e.Handled = $true }
+    }.GetNewClosure())
+    $window.Add_ContentRendered({
+        param($s,$e)
+        $state['Watch'] = [System.Diagnostics.Stopwatch]::StartNew()
+        try { [void]$s.Focus() } catch {}
+    }.GetNewClosure())
+    $root.Add_MouseLeftButtonDown({ param($s,$e) try { if ($e.OriginalSource -isnot [System.Windows.Controls.Primitives.ButtonBase]) { [System.Windows.Window]::GetWindow($s).DragMove() } } catch {} })
+    [void]$window.ShowDialog()
+    return [bool]$state['Accepted']
+}
+
+function Start-AMRWipeFinishHelper {
+    # Used only when something stayed locked after the in-process delete: a hidden PowerShell waits for this process to exit, retries the same guarded delete, then removes the empty folder.
+    param([string]$Target)
+    try {
+        $quotedTarget = "'" + $Target.Replace("'", "''") + "'"
+        $helperText = "function Remove-AMRWipeTree {`n" + ${function:Remove-AMRWipeTree}.ToString() + "`n}`nfunction Invoke-AMRWipeAppData {`n" + ${function:Invoke-AMRWipeAppData}.ToString() + "`n}`n" +
+            '$ErrorActionPreference = ''SilentlyContinue''' + "`n" +
+            ('$p = Get-Process -Id {0} -ErrorAction SilentlyContinue; if ($p) {{ [void]$p.WaitForExit(120000) }}' -f $PID) + "`n" +
+            ('for ($i = 0; $i -lt 14; $i++) {{ $r = Invoke-AMRWipeAppData -Root {0} -ExpectedRoot {0}; if ($r.Aborted -or $r.FailedCount -eq 0) {{ break }}; Start-Sleep -Milliseconds 700 }}' -f $quotedTarget) + "`n" +
+            ('try {{ if ([System.IO.Directory]::Exists({0})) {{ [System.IO.Directory]::Delete({0}) }} }} catch {{}}' -f $quotedTarget) + "`n"
+        $encoded = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($helperText))
+        if ($encoded.Length -gt 30000) { return $false }
+        Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-WindowStyle','Hidden','-EncodedCommand',$encoded) -WindowStyle Hidden -ErrorAction Stop | Out-Null
+        return $true
+    } catch { return $false }
+}
+
+function Invoke-AMRWipeFromHotkey {
+    $programData = [string]$env:ProgramData
+    if ([string]::IsNullOrWhiteSpace($programData)) { [void](Show-AMRMessageGlass 'ProgramData could not be resolved. Nothing was deleted.' 'Delete all data' OK Warning); return }
+    $target = Join-Path $programData 'AMR-Utility'
+    if (-not [string]::Equals([System.IO.Path]::GetFullPath($target).TrimEnd('\','/'), [System.IO.Path]::GetFullPath([string]$script:AppRoot).TrimEnd('\','/'), [System.StringComparison]::OrdinalIgnoreCase)) {
+        [void](Show-AMRMessageGlass 'The data folder does not match the expected location. Nothing was deleted.' 'Delete all data' OK Warning); return
+    }
+    if (-not (Show-AMRWipeConfirmDialog -TargetPath $target)) { return }
+    try { [AMRLogDiskWriter]::FlushNow() } catch {}
+    $previousCursor = $null
+    try { $previousCursor = $script:Window.Cursor; $script:Window.Cursor = [System.Windows.Input.Cursors]::Wait } catch {}
+    $wipe = $null
+    try { $wipe = Invoke-AMRWipeAppData -Root $target -ExpectedRoot $target } finally { try { $script:Window.Cursor = $previousCursor } catch {} }
+    if ($wipe.Aborted) {
+        [void](Show-AMRMessageGlass ("Nothing was deleted (or the delete stopped early): " + [string]$wipe.Reason + "`n`nItems removed before it stopped: " + [string]$wipe.Deleted) 'Delete all data' OK Warning)
+        return
+    }
+    if ([int]$wipe.FailedCount -eq 0) {
+        # Empty standard folders are recreated (exactly what startup does) so the running app keeps working; no file is restored.
+        try { New-Item -ItemType Directory -Force -Path $script:BackupDir,$script:LogDir,$script:ExportDir,$script:IconDir,$script:DownloadDir | Out-Null } catch {}
+        [void](Show-AMRMessageGlass ("All data was deleted from:`n" + $target + "`n`nItems removed: " + [string]$wipe.Deleted + "`n`nThe app is still running, so it may write new log lines and cache files again. Close and reopen it for a fully clean start.") 'Delete all data' OK Information)
+        return
+    }
+    $listText = (@($wipe.Failed | Select-Object -First 8) -join "`n")
+    $helperStarted = Start-AMRWipeFinishHelper -Target $target
+    if ($helperStarted) {
+        [void](Show-AMRMessageGlass ("Not everything could be deleted now. Items removed: " + [string]$wipe.Deleted + ". Items still in use or protected: " + [string]$wipe.FailedCount + ".`n`n" + $listText + "`n`nThe app will close now. A background helper will retry the delete after it exits and remove the empty folder. If you reopen the app straight away, run the delete again to check.") 'Delete all data' OK Warning)
+        try { $script:Window.Close() } catch {}
+    } else {
+        [void](Show-AMRMessageGlass ("Not everything could be deleted. Items removed: " + [string]$wipe.Deleted + ". Items still in use or protected: " + [string]$wipe.FailedCount + ".`n`n" + $listText + "`n`nThe background helper could not be started. Close the app and use the delete command again.") 'Delete all data' OK Warning)
+    }
+}
+
+function Stop-AMRMarquee {
+    $stopTb = $script:AMRMarqueeTb
+    $script:AMRMarqueeTb = $null
+    $script:AMRMarqueeLastSrc = $null
+    if ($null -eq $stopTb) { return }
+    try {
+        $stopTransform = $stopTb.RenderTransform
+        if ($stopTransform -is [System.Windows.Media.TranslateTransform] -and -not $stopTransform.IsFrozen) {
+            $stopTransform.BeginAnimation([System.Windows.Media.TranslateTransform]::XProperty, $null)
+        }
+        $stopClip = $stopTb.Clip
+        if ($stopClip -is [System.Windows.Media.RectangleGeometry] -and $stopClip.Transform -is [System.Windows.Media.TranslateTransform] -and -not $stopClip.Transform.IsFrozen) {
+            $stopClip.Transform.BeginAnimation([System.Windows.Media.TranslateTransform]::XProperty, $null)
+        }
+        $stopTb.Clip = $null
+        $stopTb.RenderTransform = [System.Windows.Media.Transform]::Identity
+        $stopTb.TextTrimming = [System.Windows.TextTrimming]::CharacterEllipsis
+    } catch {}
+}
+
+function New-AMRMarqueeKeyFrames {
+    param([double]$Distance, [double]$SlideSeconds)
+    $marqueeAnim = New-Object System.Windows.Media.Animation.DoubleAnimationUsingKeyFrames
+    $marqueeAnim.RepeatBehavior = [System.Windows.Media.Animation.RepeatBehavior]::Forever
+    $holdStart = 0.45; $holdEnd = 0.35
+    $marqueeTimes = @(0.0, $holdStart, ($holdStart + $SlideSeconds), ($holdStart + $SlideSeconds + $holdEnd))
+    $marqueeValues = @(0.0, 0.0, $Distance, $Distance)
+    for ($frameIndex = 0; $frameIndex -lt 4; $frameIndex++) {
+        $frameKey = [System.Windows.Media.Animation.KeyTime]::FromTimeSpan([TimeSpan]::FromSeconds([double]$marqueeTimes[$frameIndex]))
+        [void]$marqueeAnim.KeyFrames.Add((New-Object System.Windows.Media.Animation.LinearDoubleKeyFrame([double]$marqueeValues[$frameIndex], $frameKey)))
+    }
+    return $marqueeAnim
+}
+
+function Start-AMRMarquee {
+    param($Tb)
+    if ($null -eq $Tb -or [object]::ReferenceEquals($Tb, $script:AMRMarqueeTb)) { return }
+    Stop-AMRMarquee
+    try {
+        # Only single-line text that is really cut off, left-to-right, and only while the pointer is over its card/row.
+        if ($Tb.TextWrapping -ne [System.Windows.TextWrapping]::NoWrap) { return }
+        if ($Tb.FlowDirection -ne [System.Windows.FlowDirection]::LeftToRight) { return }
+        if ($Tb.ActualWidth -lt 8 -or [string]::IsNullOrEmpty($Tb.Text)) { return }
+        $pixelsPerDip = 1.0
+        try { $pixelsPerDip = [System.Windows.Media.VisualTreeHelper]::GetDpi($Tb).PixelsPerDip } catch {}
+        $typeface = New-Object System.Windows.Media.Typeface($Tb.FontFamily, $Tb.FontStyle, $Tb.FontWeight, $Tb.FontStretch)
+        $formatted = New-Object System.Windows.Media.FormattedText($Tb.Text, [System.Globalization.CultureInfo]::CurrentUICulture, [System.Windows.FlowDirection]::LeftToRight, $typeface, [double]$Tb.FontSize, [System.Windows.Media.Brushes]::White, [double]$pixelsPerDip)
+        $overflow = [double]$formatted.WidthIncludingTrailingWhitespace - [double]$Tb.ActualWidth
+        if ($overflow -le 2.0) { return }
+        $travel = [Math]::Ceiling($overflow + 6.0)
+        $slideSeconds = [Math]::Max(0.7, $travel / 45.0)
+        $marqueeShift = New-Object System.Windows.Media.TranslateTransform(0.0, 0.0)
+        $marqueeClip = New-Object System.Windows.Media.RectangleGeometry((New-Object System.Windows.Rect(0.0, 0.0, [double]$Tb.ActualWidth, [double]$Tb.ActualHeight)))
+        $clipShift = New-Object System.Windows.Media.TranslateTransform(0.0, 0.0)
+        $marqueeClip.Transform = $clipShift
+        $Tb.TextTrimming = [System.Windows.TextTrimming]::None
+        $Tb.RenderTransform = $marqueeShift
+        $Tb.Clip = $marqueeClip
+        # The clip moves with the text, so it is shifted the opposite way to stay on the original box.
+        $marqueeShift.BeginAnimation([System.Windows.Media.TranslateTransform]::XProperty, (New-AMRMarqueeKeyFrames -Distance (-$travel) -SlideSeconds $slideSeconds))
+        $clipShift.BeginAnimation([System.Windows.Media.TranslateTransform]::XProperty, (New-AMRMarqueeKeyFrames -Distance $travel -SlideSeconds $slideSeconds))
+        $script:AMRMarqueeTb = $Tb
+    } catch { try { Stop-AMRMarquee } catch {} }
+}
+
+try {
+    $detailsScroll = C 'SoftwareScrollViewer'
+    # Scroll or resize closes any open details popup (it is a floating window and cannot follow its card) and stops the marquee.
+    $detailsScroll.Add_ScrollChanged({
+        param($sender, $eventArgs)
+        if ($eventArgs.VerticalChange -ne 0 -or $eventArgs.HorizontalChange -ne 0) {
+            if ($null -ne $script:AMRDetailsOpenToggle) { Close-AMRInstalledDetails }
+            if ($null -ne $script:AMRMarqueeTb) { Stop-AMRMarquee }
+        }
+    })
+    $detailsScroll.Add_SizeChanged({
+        if ($null -ne $script:AMRDetailsOpenToggle) { Close-AMRInstalledDetails }
+        if ($null -ne $script:AMRMarqueeTb) { Stop-AMRMarquee }
+    })
+    # A click outside closes the popup by itself; bring the arrow back in sync (skip when the click is on the arrow, its own click handles it).
+    $script:Window.AddHandler([System.Windows.UIElement]::PreviewMouseLeftButtonDownEvent, [System.Windows.Input.MouseButtonEventHandler]{
+        if ($null -eq $script:AMRDetailsOpenToggle) { return }
+        if ($script:AMRDetailsOpenToggle.IsMouseOver) { return }
+        $null = $script:Window.Dispatcher.BeginInvoke([Action]{
+            try {
+                $syncPopup = $script:AMRDetailsOpenPopup
+                if ($null -ne $syncPopup -and -not $syncPopup.IsOpen) { Close-AMRInstalledDetails }
+            } catch {}
+        }, [System.Windows.Threading.DispatcherPriority]::Background)
+    }, $true)
+
+    $marqueeMoveHandler = [System.Windows.Input.MouseEventHandler]{
+        param($sender, $eventArgs)
+        try {
+            $moveSource = $eventArgs.OriginalSource
+            if ([object]::ReferenceEquals($moveSource, $script:AMRMarqueeLastSrc)) { return }
+            $script:AMRMarqueeLastSrc = $moveSource
+            $marqueeTarget = $null
+            $moveNode = $moveSource
+            for ($depth = 0; $depth -lt 16 -and $null -ne $moveNode; $depth++) {
+                if ($moveNode -is [System.Windows.FrameworkElement]) {
+                    if ($moveNode.Name -eq 'SoftwareCardSurface') { $marqueeTarget = Find-AMRNamedVisualChild -Parent $moveNode -Name 'SoftwareNameText'; break }
+                    if ($moveNode -is [System.Windows.Controls.ListBoxItem]) { $marqueeTarget = Find-AMRFirstTextBlock -Parent $moveNode; break }
+                }
+                if ($moveNode -isnot [System.Windows.Media.Visual]) { break }
+                $moveNode = [System.Windows.Media.VisualTreeHelper]::GetParent($moveNode)
+            }
+            if ($null -ne $marqueeTarget) { Start-AMRMarquee -Tb $marqueeTarget }
+            elseif ($null -ne $script:AMRMarqueeTb) { Stop-AMRMarquee }
+        } catch {}
+    }
+    $marqueeLeaveHandler = [System.Windows.Input.MouseEventHandler]{ if ($null -ne $script:AMRMarqueeTb) { Stop-AMRMarquee } }
+    $marqueeCategoryList = C 'SoftwareCategoryList'
+    foreach ($marqueeHost in @($detailsScroll, $marqueeCategoryList)) {
+        if ($null -eq $marqueeHost) { continue }
+        $marqueeHost.AddHandler([System.Windows.UIElement]::PreviewMouseMoveEvent, $marqueeMoveHandler)
+        $marqueeHost.AddHandler([System.Windows.UIElement]::MouseLeaveEvent, $marqueeLeaveHandler)
+    }
+} catch { Write-AMRLog ('Could not attach Software details/marquee handlers: ' + $_.Exception.Message) WARNING Software }
+
+
+# Hidden "delete" key sequence (About page only): D E L E T E typed within 2 s between keys, no modifiers, focus not in a text control.
+# Keys are matched on the Key enum (layout independent). The sequence only opens the glass confirmation; nothing is deleted before Enter there.
+try {
+    $script:AMRWipeSequence = @([System.Windows.Input.Key]::D,[System.Windows.Input.Key]::E,[System.Windows.Input.Key]::L,[System.Windows.Input.Key]::E,[System.Windows.Input.Key]::T,[System.Windows.Input.Key]::E)
+    $script:AMRWipeIndex = 0
+    $script:AMRWipeLastMs = [long]0
+    $script:AMRWipeBusy = $false
+    $script:AMRWipeClock = [System.Diagnostics.Stopwatch]::StartNew()
+    $script:AMRWipeTabs = C 'MainNavigationTabs'
+    $script:Window.AddHandler([System.Windows.UIElement]::PreviewKeyDownEvent, [System.Windows.Input.KeyEventHandler]{
+        param($sender, $keyArgs)
+        try {
+            if ($script:AMRWipeBusy -or $keyArgs.IsRepeat) { return }
+            $wipeTabs = $script:AMRWipeTabs
+            if ($null -eq $wipeTabs -or $null -eq $wipeTabs.SelectedItem -or [string]$wipeTabs.SelectedItem.Header -ne 'About') { $script:AMRWipeIndex = 0; return }
+            if ([System.Windows.Input.Keyboard]::Modifiers -ne [System.Windows.Input.ModifierKeys]::None) { $script:AMRWipeIndex = 0; return }
+            $focused = [System.Windows.Input.Keyboard]::FocusedElement
+            # The shared search box at the top is visible on the About page (placeholder 'Search about this application...') and is where a typed word most likely goes,
+            # so typing in THAT box counts too. Any other text control (or a combo box) still blocks the sequence.
+            $focusIsSearchBox = $false
+            try { $focusIsSearchBox = ($null -ne $script:SmartSearchBox -and [object]::ReferenceEquals($focused, $script:SmartSearchBox)) } catch {}
+            if (-not $focusIsSearchBox -and ($focused -is [System.Windows.Controls.Primitives.TextBoxBase] -or $focused -is [System.Windows.Controls.ComboBox] -or $focused -is [System.Windows.Controls.PasswordBox])) { $script:AMRWipeIndex = 0; return }
+            $nowMs = [long]$script:AMRWipeClock.ElapsedMilliseconds
+            if (($nowMs - [long]$script:AMRWipeLastMs) -gt 2000) { $script:AMRWipeIndex = 0 }
+            $script:AMRWipeLastMs = $nowMs
+            $pressed = $keyArgs.Key
+            if ($pressed -eq [System.Windows.Input.Key]::ImeProcessed) { $pressed = $keyArgs.ImeProcessedKey }
+            if ($pressed -eq $script:AMRWipeSequence[[int]$script:AMRWipeIndex]) { $script:AMRWipeIndex = [int]$script:AMRWipeIndex + 1 }
+            elseif ($pressed -eq $script:AMRWipeSequence[0]) { $script:AMRWipeIndex = 1 }
+            else { $script:AMRWipeIndex = 0 }
+            if ([int]$script:AMRWipeIndex -ge $script:AMRWipeSequence.Count) {
+                $script:AMRWipeIndex = 0
+                $script:AMRWipeBusy = $true
+                $null = $script:Window.Dispatcher.BeginInvoke([Action]{
+                    try {
+                        # Remove the six typed letters from the shared search box so the About filter does not keep them.
+                        try {
+                            $typedBox = $script:SmartSearchBox
+                            if ($null -ne $typedBox -and [string]$typedBox.Text -match '(?i)delete$') { $typedBox.Text = [string]$typedBox.Text.Substring(0, $typedBox.Text.Length - 6) }
+                        } catch {}
+                        Invoke-AMRWipeFromHotkey
+                    } catch { try { Write-AMRLog ('Delete command failed: ' + $_.Exception.Message) WARNING System } catch {} } finally { $script:AMRWipeBusy = $false }
+                }, [System.Windows.Threading.DispatcherPriority]::Background)
+            }
+        } catch {}
+    })
+} catch { try { Write-AMRLog ('Could not attach the About key sequence: ' + $_.Exception.Message) WARNING System } catch {} }
+
 Reset-AMRSoftwareGridPages -View $script:AppsView
 
 # Make the complete Software card a one-click selection surface. Buttons,
